@@ -1,0 +1,14 @@
+{
+  "image": "../assets/定妆图.png",
+  "promptTemplate": "图1中的同一位女性，保持脸型、五官、发型与妆造完全不变，只更换服装：身穿{outfit}，{scene}，{shot}，真实肤质纹理，柔和电影级布光，画面干净不发灰",
+  "fields": ["outfit", "scene", "shot"],
+  "itemsFile": "outfits.tsv",
+  "defaults": {
+    "resolution": "720P",
+    "duration": "7",
+    "aspectRatio": "9:16",
+    "audio": false,
+    "promptExtend": false,
+    "watermark": false
+  }
+}

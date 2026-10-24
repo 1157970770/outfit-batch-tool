@@ -1,0 +1,30 @@
+# 构建产物（体积大，放 GitHub Releases，不进仓库）
+dist/
+build/
+*.spec
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地产物与临时目录
+out/
+_tmp*/
+*.part
+*.log
+
+# 本机工具链（RunningHub skill 等），与产品无关
+.dsh/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 含密钥的本地配置（真身放在 %APPDATA%\RHOutfitTool\config.json）
+config.json
+cos.json
