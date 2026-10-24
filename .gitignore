@@ -40,3 +40,6 @@ _*.py
 
 # 真实密码表（含分配出去的密码，绝不提交）
 server/passwords.json
+
+# 其他 agent 的工作记忆
+.workbuddy/
