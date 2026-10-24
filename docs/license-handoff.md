@@ -57,13 +57,13 @@
 
 | 文件 | 大小 | 作用 | 是否上传到服务端 |
 | --- | --- | --- | --- |
-| `server/license_api.py` | 8.6 KB | 服务端全部逻辑，零第三方依赖 | ✅ 必须 |
+| `server/license_api.py` | 9.6 KB | 服务端全部逻辑，零第三方依赖 | ✅ 必须 |
 | `server/passwords.json` | 0.6 KB | 密码表（真实发放的密码） | ✅ 必须 |
 | `server/passwords.example.json` | 0.5 KB | 密码表模板 | ❌ 仅参考 |
-| `dist/license-deploy.zip` | 9 KB | 已打好的上传包（含上面两个文件） | ✅ 直接传这个 |
-| `app/license.py` | 4.5 KB | 客户端：激活、缓存、机器码 | ❌ 已打包进 exe |
-| `app/startup.py` | 1.3 KB | 启动门禁（弹框输密码） | ❌ 同上 |
-| `tests/test_license.py` | 5 KB | 11 项自动化验收 | ❌ 本地跑 |
+| `dist/license-deploy.zip` | 4 KB | 已打好的上传包（含上面两个文件） | ✅ 直接传这个 |
+| `app/license.py` | 4.9 KB | 客户端：激活、缓存、机器码 | ❌ 已打包进 exe |
+| `app/startup.py` | 1.4 KB | 启动门禁（弹框输密码） | ❌ 同上 |
+| `tests/test_license.py` | 6 KB | 11 项自动化验收 | ❌ 本地跑 |
 
 `license-deploy.zip` 的结构（文件在 zip 根目录，**不能套文件夹**）：
 
