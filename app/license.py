@@ -17,6 +17,8 @@ import hashlib
 import json
 import os
 import socket
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +30,54 @@ CACHE_PATH = CONFIG_DIR / "license.json"
 
 # 断网救援窗口：软件反正要联网才能干活，这个只用来挡住服务端抖动导致的误锁
 GRACE_DAYS = 7
+
+
+# ---------------------------------------------------------------------------
+# 缓存位置：%APPDATA% 可能在受控机器上不可写，按顺序找第一个能用的
+# ---------------------------------------------------------------------------
+
+def _cache_candidates() -> list[Path]:
+    """候选缓存目录，按优先级排列。"""
+    cands: list[Path] = []
+    for env_name in ("APPDATA", "LOCALAPPDATA"):
+        base = os.getenv(env_name)
+        if base:
+            cands.append(Path(base) / "RHOutfitTool")
+    cands.append(CONFIG_DIR)
+    try:
+        cands.append(Path(os.path.dirname(os.path.abspath(sys.executable))) / "_授权")
+    except Exception:  # noqa: BLE001
+        pass
+    cands.append(Path(tempfile.gettempdir()) / "RHOutfitTool")
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in cands:
+        key = str(path).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def cache_path() -> Path:
+    """返回可写的缓存文件路径；已有缓存的优先复用它。"""
+    candidates = _cache_candidates()
+    for folder in candidates:
+        target = folder / "license.json"
+        if target.exists():
+            return target
+    for folder in candidates:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            probe = folder / ".writable"
+            probe.write_text("1", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return folder / "license.json"
+        except OSError:
+            continue
+    # 全部不可写也返回第一个，让上层报出明确错误
+    return candidates[0] / "license.json"
 
 
 def machine_id() -> str:
@@ -81,21 +131,42 @@ def _call(server: str, action: str, payload: dict, timeout: int = 8) -> dict:
 
 
 def load_cache() -> dict:
-    if CACHE_PATH.exists():
+    for folder in _cache_candidates():
+        target = folder / "license.json"
+        if not target.exists():
+            continue
         try:
-            return json.loads(CACHE_PATH.read_text(encoding="utf-8-sig"))
-        except json.JSONDecodeError:
-            return {}
+            return json.loads(target.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
     return {}
 
 
 def save_cache(data: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    """写缓存；某个目录不可写就换下一个，全都不行才抛错（带可操作提示）。"""
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    errors: list[str] = []
+    for folder in _cache_candidates():
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "license.json").write_text(payload, encoding="utf-8")
+            return
+        except OSError as exc:
+            errors.append(f"{folder}: {exc.strerror or exc}")
+            continue
+    raise PermissionError(
+        "无法保存授权缓存（这几处都写不进去）：\n  "
+        + "\n  ".join(errors[:3])
+        + "\n\n请把软件解压到可写目录（如 D:\\工具\\），或以管理员身份运行一次。"
+    )
 
 
 def clear_cache() -> None:
-    CACHE_PATH.unlink(missing_ok=True)
+    for folder in _cache_candidates():
+        try:
+            (folder / "license.json").unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def activate(server: str, password: str) -> dict:

@@ -42,6 +42,13 @@ def ensure_license(server: str) -> bool:
         except (ValueError, ConnectionError) as exc:
             QMessageBox.warning(None, "激活失败", f"{exc}")
             continue
+        except PermissionError as exc:
+            # 缓存目录写不进去：不是密码问题，重试也没用，直接说清楚
+            QMessageBox.critical(None, "无法保存授权", str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001 - 任何意外都要显示出来，不能崩
+            QMessageBox.critical(None, "激活出错", f"{type(exc).__name__}: {exc}")
+            continue
         QMessageBox.information(None, "授权成功", "已激活，可以开始使用。")
         return True
 
