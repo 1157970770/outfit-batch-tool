@@ -20,6 +20,7 @@ license_api.py + passwords.json 重新打成一个包整体上传，等函数回
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import secrets
@@ -31,6 +32,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_FILE = os.path.join(ROOT, "server", "passwords.json")
 DEPLOY_SCRIPT = os.path.join(ROOT, "scripts", "license_deploy.py")
 ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # 去掉 0/O/1/l/I
+DEFAULT_DAYS = 31  # 新密码默认有效期
+NEVER_WORDS = ("never", "none", "-", "永久", "无限")
+
+
+def default_expires(days: int = DEFAULT_DAYS) -> str:
+    """默认到期时间：今天 + 31 天，且保留到当天 23:59（只写日期会按 00:00 失效）。"""
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() + days * 86400)) + " 23:59"
 
 
 def load(path: str) -> dict:
@@ -66,28 +74,29 @@ def show(doc: dict) -> None:
     if not rows:
         print("（空表）")
         return
-    print(f"{'密码':<22}{'状态':<8}{'到期':<14}备注")
-    print("-" * 70)
+    print(f"{'密码':<22}{'状态':<8}{'到期':<18}备注")
+    print("-" * 74)
     for code, v in rows.items():
         if v.get("revoked"):
             state = "已停用"
         else:
             dl = _deadline(v.get("expires"))
             state = "已到期" if (dl is not None and dl < time.time()) else "可用"
-        print(f"{code:<22}{state:<8}{v.get('expires') or '永久':<14}{v.get('note') or ''}")
+        print(f"{code:<22}{state:<8}{(v.get('expires') or '永久'):<18}{v.get('note') or ''}")
     print(f"-- 共 {len(rows)} 条")
 
 
 # ------------------------------------------------------------------ 自动同步
 def _deadline(value) -> float | None:
-    """把表里的 expires 换算成时间戳，与服务端同样的解析规则（只写日期=当天 00:00）。"""
+    """把表里的 expires 换算成时间戳，与服务端同规则：按北京时间解析，只写日期=当天 00:00。"""
     if not value:
         return None
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return time.mktime(time.strptime(str(value).strip(), fmt))
+            dt = time.strptime(str(value).strip(), fmt)
         except ValueError:
             continue
+        return calendar.timegm(dt) - 8 * 3600
     return None
 
 
@@ -130,7 +139,8 @@ def main():
 
     a = sub.add_parser("add")
     a.add_argument("--note", default="")
-    a.add_argument("--expires", default="2027-12-31")
+    a.add_argument("--expires", default=None,
+                   help=f"默认 {DEFAULT_DAYS} 天后 23:59 失效；写 never 表示永久")
     a.add_argument("--machine", default="")
     a.add_argument("--code", default=None, help="不填则自动生成")
 
@@ -161,11 +171,14 @@ def main():
         code = args.code or next_code(doc)
         if code in rows:
             sys.exit(f"密码已存在：{code}")
+        expires = (args.expires or default_expires()).strip()
+        if expires.lower() in NEVER_WORDS:
+            expires = ""
         rows[code] = {"note": args.note, "machine": args.machine,
-                      "expires": args.expires, "revoked": False}
+                      "expires": expires, "revoked": False}
         save(path, doc)
         print(f"已新增：{code}")
-        print(f"  备注={args.note or '-'}  到期={args.expires}")
+        print(f"  备注={args.note or '-'}  到期={expires or '永久'}")
         show(doc)
         if no_deploy:
             print("\n[同步] 已跳过（--no-deploy）。云端暂时不认这个密码。")
@@ -196,7 +209,7 @@ def main():
         print(f"已恢复：{code}")
     elif args.cmd == "expire":
         raw = args.date.strip()
-        if raw.lower() in ("never", "none", "-", "永久", "无限") or raw == "":
+        if raw.lower() in NEVER_WORDS or raw == "":
             rows[code]["expires"] = ""
             print(f"已改为永久：{code}（不再到期）")
         else:

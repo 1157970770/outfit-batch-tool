@@ -137,7 +137,7 @@
 | `OUTPUT_ROOT` | 输出根目录 | 留空 → exe 同目录 `输出` |
 | `COS_ENABLED` | 是否归档到 COS | `false` |
 | `COS_BUCKET` / `COS_REGION` / `COS_PREFIX` / `COS_DOMAIN` | COS 参数（**不放密钥**） | — |
-| `LICENSE_SERVER` | 授权服务地址；留空=不校验 | 空 |
+| `LICENSE_SERVER` | 授权服务地址；留空用内置地址，两者都空则**拒绝启动** | 空 |
 
 > 密钥不进 ini：COS 走本机凭证链，RH Key 由 ini 承载。
 

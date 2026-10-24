@@ -15,10 +15,14 @@ MAX_ATTEMPTS = 3
 
 
 def ensure_license(server: str) -> bool:
-    """返回 True 表示可以进入主界面。server 为空 = 未启用授权。"""
+    """返回 True 表示可以进入主界面。
+
+    注意：server 为空时**返回 False**（失败关闭）。调用方负责给出"未配置授权服务"的提示，
+    这样任何路径都不会因为"地址没填"而悄悄放行。
+    """
     server = (server or "").strip()
     if not server:
-        return True
+        return False
 
     ok, message = status(server)
     if ok:

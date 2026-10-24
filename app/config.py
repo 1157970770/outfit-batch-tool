@@ -53,7 +53,8 @@ COS_REGION=ap-guangzhou
 COS_PREFIX=
 COS_DOMAIN=
 
-# 【可选】授权服务器：填了就必须输入分配的密码才能进主界面；留空 = 不校验
+# 【必填】授权服务器：启动时必须输入分配的密码才能进主界面
+#        留空会使用程序内置地址；内置地址也没有时，程序会拒绝启动（不会放行）
 #        例：https://license.你的域名.com  或  http://127.0.0.1:8099
 LICENSE_SERVER=
 """

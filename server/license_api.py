@@ -13,13 +13,17 @@
 设计取舍（刻意保持"最简单"）：
   · 服务端**不存状态**，token 是 HMAC 签名，天然适合无状态的云函数；
   · 密码表就是一份 JSON，改完重新部署即可，不需要数据库；
-  · 换机器 = machine 不匹配 → 验签失败，等于绑定机器；
-  · 想吊销：把 revoked 改成 true 并重新部署，最多 TTL_DAYS 天后旧 token 全部失效。
+  · **只有一个时间：密码表里的 expires**。票的到期时间直接等于它，
+    并且 /verify 每次都回表复查一遍——所以「密码到期」= 下次启动就进不去，
+    不存在"票还没到期所以还能用"的宽限；
+  · 换机器 = machine 不匹配 → 验签失败；
+  · 想吊销：把 revoked 改成 true 并重新部署，下次启动即被拒。
 """
 
 from __future__ import annotations
 
 import base64
+import calendar
 import hashlib
 import hmac
 import json
@@ -29,8 +33,10 @@ import time
 from pathlib import Path
 
 SECRET = os.environ.get("LICENSE_SECRET", "")
-TTL_DAYS = int(os.environ.get("LICENSE_TTL_DAYS", "14"))
 PASSWORDS_PATH = Path(os.environ.get("LICENSE_PASSWORDS", "") or Path(__file__).with_name("passwords.json"))
+
+# 密码表里没写 expires（= 永久）时，票的有效期给一个足够远的日期，避免出现"永久密码 14 天后失效"
+FOREVER_DAYS = 3650
 
 
 class LicenseError(Exception):
@@ -55,12 +61,34 @@ def _sign(payload: bytes) -> str:
     return hmac.new(SECRET.encode(), payload, hashlib.sha256).hexdigest()
 
 
-def issue_token(password: str, machine: str) -> dict:
-    exp = int(time.time()) + TTL_DAYS * 86400
+def _deadline(expires) -> float | None:
+    """把密码表里的 expires 解析成时间戳。
+
+    统一按**北京时间**解释（云函数默认跑在 UTC，直接 mktime 会差 8 小时，
+    导致"到期日"看起来比写的晚半天）。只写日期 = 当天 00:00 失效。
+    """
+    if not expires:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = time.strptime(str(expires).strip(), fmt)
+        except ValueError:
+            continue
+        return calendar.timegm(dt) - 8 * 3600  # 北京时间 → UTC 时间戳
+    raise LicenseError(f"密码表里的 expires 格式看不懂：{expires}", status=500)
+
+
+def issue_token(password: str, machine: str, expires_at: float | None) -> dict:
+    """票的到期时间 = 密码的到期时间（永久密码给一个很远的日期）。
+
+    不再有独立的票面 TTL：世上只有一个时间，就是密码表里的 expires。
+    """
+    now = int(time.time())
+    exp = int(expires_at) if expires_at else now + FOREVER_DAYS * 86400
     payload = {"p": password, "m": machine, "e": exp}
     raw = json.dumps(payload, separators=(",", ":")).encode()
     token = f"{_b64e(raw)}.{_sign(raw)}"
-    return {"token": token, "expire_at": exp, "days": TTL_DAYS}
+    return {"token": token, "expire_at": exp, "days": max(0, (exp - now) // 86400)}
 
 
 def verify_token(token: str, machine: str) -> dict:
@@ -73,7 +101,7 @@ def verify_token(token: str, machine: str) -> dict:
         raise LicenseError("token 签名不对（可能是别的服务器签的）")
     data = json.loads(raw)
     if int(data.get("e", 0)) < time.time():
-        raise LicenseError("token 已过期，请重新输入密码")
+        raise LicenseError("授权已到期，请联系管理员续期")
     if data.get("m") != machine:
         raise LicenseError("token 与这台机器不匹配")
     entry = load_passwords().get(str(data.get("p")))
@@ -81,7 +109,12 @@ def verify_token(token: str, machine: str) -> dict:
         raise LicenseError("密码已被删除")
     if entry.get("revoked"):
         raise LicenseError("密码已被停用")
-    return {"expire_at": data.get("e"), "note": entry.get("note", "")}
+    # 关键：每次都回表复查到期日。票里那个 e 只是本地缓存的兜底，
+    # 真正说了算的是密码表 —— 改了 expires / 删了人，下次启动立刻生效。
+    deadline = _deadline(entry.get("expires"))
+    if deadline is not None and deadline < time.time():
+        raise LicenseError("授权已到期，请联系管理员续期")
+    return {"expire_at": int(data.get("e", 0)), "note": entry.get("note", "")}
 
 
 # ---------------------------------------------------------------------------
@@ -106,17 +139,9 @@ def check_password(password: str, machine: str) -> dict:
         raise LicenseError("密码已被停用")
     expires = entry.get("expires")
     if expires:
-        # expires 支持 2026-12-31 或 2026-12-31 23:59
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
-            try:
-                deadline = time.mktime(time.strptime(str(expires), fmt))
-                break
-            except ValueError:
-                continue
-        else:
-            raise LicenseError(f"密码表里的 expires 格式看不懂：{expires}", status=500)
-        if deadline < time.time():
-            raise LicenseError("密码已到期")
+        deadline = _deadline(expires)
+        if deadline is not None and deadline < time.time():
+            raise LicenseError("授权已到期，请联系管理员续期")
     bound = entry.get("machine")
     if bound and bound != machine:
         raise LicenseError("该密码已在另一台机器上激活")
@@ -159,7 +184,7 @@ def handle(path: str, body: dict) -> tuple[int, dict]:
                 "路径要带 /activate 或 /verify（或在 body 里给 action）", status=400
             )
         if action == "health":
-            return 200, {"ok": True, "service": "outfit-license", "ttl_days": TTL_DAYS}
+            return 200, {"ok": True, "service": "outfit-license", "mode": "password-expires"}
 
         machine = str(body.get("machine") or "").strip()
         if not machine:
@@ -170,7 +195,7 @@ def handle(path: str, body: dict) -> tuple[int, dict]:
             if not password:
                 raise LicenseError("缺少密码", status=400)
             entry = check_password(password, machine)
-            result = issue_token(password, machine)
+            result = issue_token(password, machine, _deadline(entry.get("expires")))
             return 200, {"ok": True, **result, "note": entry.get("note", "")}
 
         if action == "verify":

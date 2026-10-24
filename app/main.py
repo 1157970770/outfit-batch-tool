@@ -38,12 +38,21 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.4"
+APP_VERSION = "0.5"
+
+# 内置授权地址：配置文件里留空就用它，避免"删掉那行 = 免授权"。
+# 部署好授权服务后，把地址填到这里并重新打包。
+EMBEDDED_LICENSE_SERVER = ""
 
 
 # ---------------------------------------------------------------------------
 # 配置：全部来自 exe 同目录的 配置.ini，界面上不出现任何输入框
 # ---------------------------------------------------------------------------
+
+def resolve_license_server(cfg: dict) -> str:
+    """配置文件优先，其次用内置地址；两者都空 = 未配置（打包版会拒绝启动）。"""
+    return (cfg.get("LICENSE_SERVER") or "").strip() or EMBEDDED_LICENSE_SERVER.strip()
+
 
 def load_config() -> dict:
     return appconfig.load()
@@ -737,9 +746,9 @@ class MainWindow(QMainWindow):
         cos_on = appconfig.truthy(cfg.get("COS_ENABLED", ""))
         badge(self.badge_cos, "COS：开" if cos_on else "COS：关", "ok" if cos_on else "idle")
 
-        server = (cfg.get("LICENSE_SERVER") or "").strip()
+        server = resolve_license_server(cfg)
         if not server:
-            badge(self.badge_license, "授权：未启用", "idle")
+            badge(self.badge_license, "授权：未配置（无法启动）", "bad")
         else:
             cache = licensemod.load_cache()
             expire_at = int(cache.get("expire_at") or 0)
@@ -873,9 +882,23 @@ def main() -> int:
     font = QFont("Microsoft YaHei UI", 9)
     app.setFont(font)
     window = MainWindow()
-    # 配了授权服务器就必须先通过密码校验；没配则直接放行
-    if not ensure_license(str(window.cfg.get("LICENSE_SERVER") or "")):
+
+    # 默认强制授权：配置里留空就用内置地址；两者都空则拒绝启动（不再"留空=放行"）
+    license_server = resolve_license_server(window.cfg)
+    if not license_server:
+        if not getattr(sys, "frozen", False) and os.environ.get("RH_DEV_NO_LICENSE") == "1":
+            print("RH_DEV_NO_LICENSE=1：源码运行跳过授权（打包版不会生效）", file=sys.stderr)
+        else:
+            QMessageBox.critical(
+                None, "未配置授权服务",
+                "本程序必须通过密码授权才能使用，但当前没有配置授权服务器。\n\n"
+                "请打开「配置文件」填写 LICENSE_SERVER，"
+                "或向管理员索取已内置授权地址的版本。",
+            )
+            return 2
+    elif not ensure_license(license_server):
         return 2
+
     window.show()
     return app.exec()
 
