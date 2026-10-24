@@ -28,3 +28,6 @@ desktop.ini
 # 含密钥的本地配置（真身放在 %APPDATA%\RHOutfitTool\config.json）
 config.json
 cos.json
+
+# 测试临时目录
+.tmp/
