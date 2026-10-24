@@ -54,25 +54,44 @@ def load_config() -> dict:
     return appconfig.load()
 
 
-def build_storage(cfg: dict):
-    """按后台配置造存储实例；未启用返回 None。配置不合法时抛 StorageError。"""
-    if not appconfig.truthy(cfg.get("COS_ENABLED", "")):
-        return None
+def _make_storage(cfg: dict, bucket: str, prefix: str):
     manual = {
-        "bucket": (cfg.get("COS_BUCKET") or "").strip(),
+        "bucket": bucket,
         "region": (cfg.get("COS_REGION") or "").strip(),
-        "prefix": (cfg.get("COS_PREFIX") or "").strip(),
+        "prefix": prefix,
         "domain": (cfg.get("COS_DOMAIN") or "").strip(),
     }
-    # 配置文件里不放任何密钥：一律走本机已有凭证（环境变量 / ~/.cos / tccli）
     resolved = StorageConfig.from_local_profile(**manual)
     if not (resolved.secret_id and resolved.secret_key):
         raise StorageError(
-            "启用了 COS 归档，但本机找不到可用凭证。"
+            "启用了 COS，但本机找不到可用凭证。"
             "请设置环境变量 COS_SECRET_ID/COS_SECRET_KEY，或放进 ~/.cos/credentials.json，"
             "或先跑 tccli auth login --profile agent1"
         )
     return open_storage(resolved)
+
+
+def build_storages(cfg: dict) -> tuple[object | None, object | None]:
+    """返回 (模板桶, 成品桶)。双桶分离：模板只读素材桶，成品写成品桶。
+
+    任一桶名留空则回退到 COS_BUCKET；COS_ENABLED=false 时都返回 None。
+    """
+    if not appconfig.truthy(cfg.get("COS_ENABLED", "")):
+        return None, None
+
+    base_bucket = (cfg.get("COS_BUCKET") or "").strip()
+    template_bucket = (cfg.get("COS_TEMPLATE_BUCKET") or "").strip() or base_bucket
+    output_bucket = (cfg.get("COS_OUTPUT_BUCKET") or "").strip() or base_bucket
+    prefix = (cfg.get("COS_PREFIX") or "").strip()
+
+    template_store = _make_storage(cfg, template_bucket, "") if template_bucket else None
+    output_store = _make_storage(cfg, output_bucket, prefix) if output_bucket else None
+    return template_store, output_store
+
+
+def build_storage(cfg: dict):
+    """兼容旧调用：只返回成品桶。"""
+    return build_storages(cfg)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +386,9 @@ class BatchPanel(QWidget):
             return
 
         try:
-            storage = build_storage(self.cfg)
+            template_storage, storage = build_storages(self.cfg)
         except StorageError as exc:
-            QMessageBox.warning(self, "COS 配置有误", f"{exc}\n\n可先到「设置」里点“测试连接”。")
+            QMessageBox.warning(self, "COS 配置有误", f"{exc}\n\n可先关掉 配置.ini 里的 COS_ENABLED。")
             return
 
         if self.small:
@@ -409,6 +428,7 @@ class BatchPanel(QWidget):
             base=self.cfg.get("base_url") or "https://www.runninghub.cn/openapi/v2",
             concurrency=concurrency,
             storage=storage,
+            template_storage=template_storage,
         )
         self.worker = BatchWorker(spec)
         self.worker.progressed.connect(self._on_progress)

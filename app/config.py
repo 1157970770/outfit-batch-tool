@@ -98,6 +98,9 @@ def load() -> dict:
         "OUTPUT_ROOT": str(output_dir()),
         "COS_ENABLED": "true" if truthy(cos.get("enabled")) else "false",
         "COS_BUCKET": str(cos.get("bucket") or "").strip(),
+        # 双桶：模板只读素材桶，成品写成品桶；留空回退 COS_BUCKET
+        "COS_TEMPLATE_BUCKET": str(cos.get("template_bucket") or cos.get("bucket") or "").strip(),
+        "COS_OUTPUT_BUCKET": str(cos.get("output_bucket") or cos.get("bucket") or "").strip(),
         "COS_REGION": str(cos.get("region") or "ap-guangzhou").strip(),
         "COS_PREFIX": str(cos.get("prefix") or "").strip(),
         "COS_DOMAIN": str(cos.get("domain") or "").strip(),

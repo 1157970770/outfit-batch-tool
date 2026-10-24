@@ -232,6 +232,8 @@ class BatchSpec:
     expect_seconds: float = 7.0
     # 可选：产物同步到对象存储（None = 只落本地，保持旧行为）
     storage: Storage | None = None
+    # 可选：模板视频所在桶（清单里写 key 时用它签名）；缺省复用 storage
+    template_storage: Storage | None = None
     archive_prefix: str = "output"
     archive_expires: int = 7 * 24 * 3600
 
@@ -335,7 +337,8 @@ class BatchRunner:
         pending = [t for t in self.spec.templates if not t.get("url") and t.get("key")]
         if not pending:
             return
-        if self.spec.storage is None:
+        signer = self.spec.template_storage or self.spec.storage
+        if signer is None:
             raise EngineError(
                 "模板清单用的是 COS 对象 key，需要签名才能给模型访问，"
                 "但当前没有启用 COS（配置.ini 里 COS_ENABLED=false）。"
@@ -343,7 +346,7 @@ class BatchRunner:
         self.log(f"为 {len(pending)} 个模板生成签名链接（24 小时有效）")
         for tpl in pending:
             try:
-                tpl["url"] = self.spec.storage.sign_url(tpl["key"], 24 * 3600)
+                tpl["url"] = signer.sign_url(tpl["key"], 24 * 3600)
             except Exception as exc:  # noqa: BLE001
                 raise EngineError(f"模板 {tpl['id']} 签名失败：{exc}") from None
 
