@@ -61,11 +61,12 @@ def step(title: str, fn) -> bool:
 
 def main() -> int:
     try:
-        config = StorageConfig.from_env()
+        # 与桌面版一致：环境变量 → ~/.cos/credentials.json → ~/.tccli/<profile>.credential
+        config = StorageConfig.from_local_profile()
         config.validate()
     except StorageError as exc:
         print(f"✗ 配置不完整：{exc}")
-        print("\n需要这四个环境变量：COS_BUCKET / COS_REGION / COS_SECRET_ID / COS_SECRET_KEY")
+        print("\n三种来源任选：环境变量 COS_* / ~/.cos/credentials.json / tccli 登录后的 ~/.tccli/*.credential")
         return 2
 
     print("配置：")
