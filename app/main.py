@@ -534,7 +534,7 @@ class MainWindow(QMainWindow):
     def _load_manifest_async(self):
         source = (self.cfg.get("manifest") or "").strip()
         if not source:
-            self.manifest_label.setText("模板清单：未配置（点“设置”填写）")
+            self.manifest_label.setText("模板清单：未配置（打开“配置文件”填 MANIFEST）")
             return
         self.manifest_label.setText("模板清单：加载中…")
         self.manifest_worker = ManifestWorker(source)
