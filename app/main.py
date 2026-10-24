@@ -19,7 +19,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog,
+    QApplication, QComboBox, QDialog, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -38,7 +38,7 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.3"
+APP_VERSION = "0.4"
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +508,130 @@ class BatchPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# 配置编辑窗口（不依赖系统文件关联）
+# ---------------------------------------------------------------------------
+
+class ConfigDialog(QDialog):
+    """在程序内编辑 配置.ini：读不出、写不进、没关联程序，都不会再"点了没反应"。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("配置文件 · 配置.ini")
+        self.resize(760, 640)
+        self.path = appconfig.config_path()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
+
+        path_label = QLabel(f"文件位置：{self.path}")
+        path_label.setWordWrap(True)
+        path_label.setObjectName("pathhint")
+        layout.addWidget(path_label)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.editor.setPlaceholderText("配置内容为空")
+        layout.addWidget(self.editor, 1)
+
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+
+        row = QHBoxLayout()
+        save_btn = QPushButton("保存并重载")
+        save_btn.setObjectName("primary")
+        save_btn.clicked.connect(self._save)
+        notepad_btn = QPushButton("用记事本打开")
+        notepad_btn.clicked.connect(self._open_notepad)
+        saveas_btn = QPushButton("另存为…")
+        saveas_btn.clicked.connect(self._save_as)
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.reject)
+        row.addWidget(save_btn)
+        row.addWidget(notepad_btn)
+        row.addWidget(saveas_btn)
+        row.addStretch(1)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        self._load()
+
+    # ---- 读写 ----
+    def _load(self):
+        text = ""
+        if self.path.exists():
+            for encoding in ("utf-8-sig", "gbk"):
+                try:
+                    text = self.path.read_text(encoding=encoding)
+                    break
+                except (OSError, UnicodeDecodeError):
+                    continue
+        if not text:
+            appconfig.load()          # 尝试按模板生成
+            if self.path.exists():
+                try:
+                    text = self.path.read_text(encoding="utf-8-sig")
+                except OSError:
+                    text = ""
+        self.editor.setPlainText(text or appconfig.TEMPLATE)
+        self._refresh_hint()
+
+    def _refresh_hint(self):
+        values = appconfig._parse(self.editor.toPlainText()) if hasattr(appconfig, "_parse") else {}
+        key = "已填" if (values.get("RH_API_KEY") or "").strip() else "未填"
+        manifest = "已填" if (values.get("MANIFEST") or "").strip() else "未填"
+        exists = "存在" if self.path.exists() else "尚未生成"
+        self.hint.setText(
+            f"当前状态：文件{exists}　RH_API_KEY {key}　MANIFEST {manifest}　"
+            "（改完点「保存并重载」立即生效，无需重启）"
+        )
+        self.hint.setStyleSheet("color:#6b6b70; font-size:12px;")
+
+    def _save(self):
+        text = self.editor.toPlainText()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "保存失败",
+                f"{exc}\n\n常见原因：程序目录没有写权限"
+                "（比如直接在压缩包里双击了 exe）。\n"
+                "请先完整解压到 D 盘等可写目录，或用「另存为」存到文档目录。",
+            )
+            return
+        self.accept()
+
+    def _save_as(self):
+        target, _ = QFileDialog.getSaveFileName(self, "另存配置", "配置.ini", "配置 (*.ini);;所有文件 (*)")
+        if not target:
+            return
+        try:
+            Path(target).write_text(self.editor.toPlainText(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        QMessageBox.information(
+            self, "已另存",
+            f"已保存到：\n{target}\n\n注意：程序只读取原位置 {self.path}，"
+            "另存的文件需要自己改名替换过去。",
+        )
+
+    def _open_notepad(self):
+        try:
+            if not self.path.exists():
+                self.path.write_text(self.editor.toPlainText(), encoding="utf-8")
+            os.startfile(str(self.path))
+        except OSError as exc:
+            QApplication.clipboard().setText(str(self.path))
+            QMessageBox.information(
+                self, "打不开记事本",
+                f"{exc}\n\n路径已复制：\n{self.path}",
+            )
+
+
+# ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
 
@@ -681,7 +805,7 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
-    def _reload_config(self):
+    def _reload_config(self, silent: bool = False):
         """改完 配置.ini 点这里：不用重启就生效。"""
         self.cfg = load_config()
         for panel in (self.small_panel, self.big_panel):
@@ -691,14 +815,21 @@ class MainWindow(QMainWindow):
 
         missing = [name for name in ("RH_API_KEY", "MANIFEST") if not (self.cfg.get(name) or "").strip()]
         hint = f"\n\n还缺：{'、'.join(missing)}（在 配置.ini 里填）" if missing else ""
-        QMessageBox.information(self, "配置已重载", f"已重新读取 配置.ini{hint}")
+        if not silent:
+            QMessageBox.information(self, "配置已重载", f"已重新读取 配置.ini{hint}")
 
     def _open_config_file(self):
-        """打开 配置.ini；不存在先按模板生成一份。"""
-        path = appconfig.config_path()
-        if not path.exists():
-            appconfig.load()          # 会按模板写出一份
-        self._open_path(path, "配置文件")
+        """在程序里直接编辑 配置.ini。
+
+        不再依赖系统文件关联：远程桌面、没有 .ini 关联程序、压缩包内运行等场景
+        都会让"用默认程序打开"静默失败，用户看到的就是"点了没反应"。
+        """
+        try:
+            dialog = ConfigDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self._reload_config(silent=True)
+        except Exception as exc:  # noqa: BLE001 - 任何异常都要让人看见
+            QMessageBox.critical(self, "打不开配置窗口", f"{type(exc).__name__}: {exc}")
 
 
 STYLE = """
