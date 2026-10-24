@@ -532,7 +532,7 @@ class MainWindow(QMainWindow):
 
     # ---- 清单 ----
     def _load_manifest_async(self):
-        source = (self.cfg.get("manifest") or "").strip()
+        source = (self.cfg.get("MANIFEST") or "").strip()
         if not source:
             self.manifest_label.setText("模板清单：未配置（打开“配置文件”填 MANIFEST）")
             return

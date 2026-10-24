@@ -68,9 +68,10 @@ def main() -> int:
 
     window = gui.MainWindow()
     window.cfg.update({
-        "output_root": str(tmp / "out"),
-        "manifest": str(manifest),
-        "api_key": "demo-key-0123456789abcdef",
+        "OUTPUT_ROOT": str(tmp / "out"),
+        "MANIFEST": str(manifest),
+        "RH_API_KEY": "demo-key-0123456789abcdef",
+        "LICENSE_SERVER": "",
         "base_url": f"http://127.0.0.1:{port}/openapi/v2",
     })
     window.small_panel.cfg = window.cfg
