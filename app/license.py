@@ -40,7 +40,7 @@ def machine_id() -> str:
     return hashlib.sha256(raw).hexdigest()[:32]
 
 
-def _post(server: str, path: str, payload: dict, timeout: int = 8) -> dict:
+def _post(server: str, path: str, payload: dict, timeout: int = 8) -> tuple[int, dict]:
     url = server.rstrip("/") + path
     req = urllib.request.Request(
         url,
@@ -50,15 +50,29 @@ def _post(server: str, path: str, payload: dict, timeout: int = 8) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", "replace"))
+            return resp.status, json.loads(resp.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         try:
-            return json.loads(body)
+            return exc.code, json.loads(body)
         except json.JSONDecodeError:
-            return {"ok": False, "error": f"HTTP {exc.code}"}
+            return exc.code, {"ok": False, "error": f"HTTP {exc.code}"}
     except urllib.error.URLError as exc:
         raise ConnectionError(str(exc.reason)) from None
+
+
+def _call(server: str, action: str, payload: dict, timeout: int = 8) -> dict:
+    """兼容两种 API 网关配法：
+
+    · 单路由（资源就是 /license）：直接 POST 配置地址，动作放 body.action；
+    · 多路由（资源是 /license/activate、/license/verify）：先试上面那种，
+      网关会回 404，再补上 /action 重试。
+    """
+    body = {**payload, "action": action}
+    status, result = _post(server, "", body, timeout)
+    if status == 404 or (not result.get("ok") and "未知接口" in str(result.get("error", ""))):
+        status, result = _post(server, f"/{action}", body, timeout)
+    return result
 
 
 def load_cache() -> dict:
@@ -82,7 +96,7 @@ def clear_cache() -> None:
 def activate(server: str, password: str) -> dict:
     """用密码换 token，成功即写入本机缓存。"""
     machine = machine_id()
-    result = _post(server, "/activate", {"password": password.strip(), "machine": machine})
+    result = _call(server, "activate", {"password": password.strip(), "machine": machine})
     if not result.get("ok"):
         raise ValueError(result.get("error") or "激活失败")
     save_cache({
@@ -108,7 +122,8 @@ def status(server: str) -> tuple[bool, str]:
 
     # 联网复核：服务端说停用就立刻失效；连不上则按有效期离线放行
     try:
-        result = _post(server, "/verify", {"token": cache["token"], "machine": machine_id()}, timeout=6)
+        result = _call(server, "verify",
+                       {"token": cache["token"], "machine": machine_id()}, timeout=6)
     except ConnectionError:
         days = max(0, int((expire_at - time.time()) / 86400)) if expire_at else 0
         return True, f"当前离线，按缓存放行（剩余约 {days} 天）"

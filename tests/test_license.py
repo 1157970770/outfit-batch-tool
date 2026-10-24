@@ -113,6 +113,47 @@ def main() -> int:
     check("token 绑定机器（换机器失败）", not other.get("ok"), other.get("error", ""))
 
     # 停用后立刻失效
+    # 网关只挂了 /license/activate 时，客户端应自动补后缀重试
+    import http.server
+    import threading
+
+    seen: list[str] = []
+
+    class Gateway(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            seen.append(self.path)
+            if not self.path.endswith(("/activate", "/verify")):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            raw = json.dumps({"ok": True, "token": "t" * 24,
+                              "expire_at": int(time.time()) + 3600}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    gw = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    clear_cache()
+    try:
+        activate(f"http://127.0.0.1:{gw.server_address[1]}/license", "RH-OK")
+        check("网关只挂子路由时自动重试",
+              len(seen) == 2 and seen[0].endswith("/license") and seen[1].endswith("/license/activate"),
+              f"请求序列 {seen}")
+    finally:
+        gw.shutdown()
+
+    # 换回真服务重新激活，供后面的停用测试用
+    clear_cache()
+    activate(server, "RH-OK")
+
+    # 停用后立刻失效
     write_passwords({"RH-OK": {"note": "正常用户", "expires": "2099-12-31", "revoked": True}})
     # 服务端每次请求都重读密码表，不需要重启
     ok, msg = status(server)

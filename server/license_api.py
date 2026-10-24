@@ -127,12 +127,37 @@ def check_password(password: str, machine: str) -> dict:
 # 请求处理（HTTP 风格，两种入口共用）
 # ---------------------------------------------------------------------------
 
+KNOWN_ACTIONS = {"activate", "verify", "health"}
+
+
+def _resolve_action(path: str, body: dict) -> str:
+    """从路径末段或 body.action 判断要调哪个动作。
+
+    为什么要两者都支持：API 网关可能把路径配成 /license（单路由），也可能配成
+    /license/activate（多路由）。单路由时末段是 "license"，必须靠 body.action 兜底，
+    否则会莫名其妙返回 404。
+    """
+    last = (path or "").rstrip("/").split("/")[-1].strip().lower()
+    hinted = str((body or {}).get("action") or "").strip().lower()
+    # body.action 优先：客户端可能把地址填成 .../license/activate，此时路径末段是 activate，
+    # 但调用 /verify 时若按路径判断就会走错分支。
+    if hinted in KNOWN_ACTIONS:
+        return hinted
+    if last in KNOWN_ACTIONS:
+        return last
+    return ""
+
+
 def handle(path: str, body: dict) -> tuple[int, dict]:
     try:
         if not SECRET:
             raise LicenseError("服务端没配 LICENSE_SECRET", status=500)
 
-        action = path.rstrip("/").split("/")[-1]
+        action = _resolve_action(path, body)
+        if not action:
+            raise LicenseError(
+                "路径要带 /activate 或 /verify（或在 body 里给 action）", status=400
+            )
         if action == "health":
             return 200, {"ok": True, "service": "outfit-license", "ttl_days": TTL_DAYS}
 
