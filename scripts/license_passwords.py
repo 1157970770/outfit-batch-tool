@@ -69,12 +69,28 @@ def show(doc: dict) -> None:
     print(f"{'密码':<22}{'状态':<8}{'到期':<14}备注")
     print("-" * 70)
     for code, v in rows.items():
-        state = "已停用" if v.get("revoked") else "可用"
+        if v.get("revoked"):
+            state = "已停用"
+        else:
+            dl = _deadline(v.get("expires"))
+            state = "已到期" if (dl is not None and dl < time.time()) else "可用"
         print(f"{code:<22}{state:<8}{v.get('expires') or '永久':<14}{v.get('note') or ''}")
     print(f"-- 共 {len(rows)} 条")
 
 
 # ------------------------------------------------------------------ 自动同步
+def _deadline(value) -> float | None:
+    """把表里的 expires 换算成时间戳，与服务端同样的解析规则（只写日期=当天 00:00）。"""
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(str(value).strip(), fmt))
+        except ValueError:
+            continue
+    return None
+
+
 def _sync(code: str | None, expect: str) -> bool:
     """上传云函数 + 验证线上。expect: ok=该密码应可用, reject=应被拒。"""
     print("\n[同步] 上传到云函数（约 5~15 秒）…")
@@ -122,9 +138,9 @@ def main():
         q = sub.add_parser(name)
         q.add_argument("code")
 
-    e = sub.add_parser("expire")
+    e = sub.add_parser("expire", help="改进到期日；date 写 never/永久 表示不限")
     e.add_argument("code")
-    e.add_argument("date")
+    e.add_argument("date", help="2027-12-31 或 '2027-12-31 23:59' 或 never")
 
     sub.add_parser("deploy")
 
@@ -179,8 +195,16 @@ def main():
         rows[code]["revoked"] = False
         print(f"已恢复：{code}")
     elif args.cmd == "expire":
-        rows[code]["expires"] = args.date
-        print(f"已改到期：{code} -> {args.date}")
+        raw = args.date.strip()
+        if raw.lower() in ("never", "none", "-", "永久", "无限") or raw == "":
+            rows[code]["expires"] = ""
+            print(f"已改为永久：{code}（不再到期）")
+        else:
+            rows[code]["expires"] = raw
+            print(f"已改到期：{code} -> {raw}")
+            if ":" not in raw:
+                print("   注意：只写日期时，服务端按**当天 00:00** 判定失效（即最后有效时刻是前一天 23:59）。")
+                print(f"   想有效期到当天结束，请改写成：{raw} 23:59")
 
     save(path, doc)
     show(doc)
@@ -190,8 +214,15 @@ def main():
         print("       要推上去：python scripts/license_passwords.py deploy")
         return
 
-    # 停用 / 删除 → 线上应被拒；恢复 / 改期 → 线上应可用
-    expect = "reject" if args.cmd in ("revoke", "remove") else "ok"
+    # 停用 / 删除 → 线上应被拒；恢复 / 改期 → 线上应可用；
+    # 但如果改成一个已过去的日期，线上本来就该拒，用 reject 验才对
+    if args.cmd in ("revoke", "remove"):
+        expect = "reject"
+    elif args.cmd == "expire":
+        dl = _deadline(rows[code].get("expires"))
+        expect = "reject" if (dl is not None and dl < time.time()) else "ok"
+    else:
+        expect = "ok"
     _sync(code, expect)
 
 

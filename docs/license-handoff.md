@@ -270,7 +270,7 @@ python3 server\license_api.py --serve 8099
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `note` | 建议 | 只给你看，激活成功会回显 |
-| `expires` | 建议 | `YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM`；不填 = 永久 |
+| `expires` | 建议 | `YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM`；不填 = 永久。**只写日期时按当天 00:00 失效** |
 | `revoked` | 否 | `true` = 立即停用 |
 | `machine` | 否 | 填了锁死那台机器；留空 = 不锁 |
 
@@ -317,6 +317,35 @@ python scripts/license_passwords.py add --note "张三 / 设计部" --expires 20
 > 同步失败（`✗ 上传没成功`）时云端仍是旧表、**本地已保存**，修好网络或重新登录 tccli 后跑一次 `deploy` 即可，不需要重做改动。
 
 > 手动路线（脚本不可用时）：控制台 → 函数代码 → 打开 `passwords.json` → 改 → 点**部署**。等价，但容易手抖写坏 JSON，不推荐。
+
+### 6.5 到期与续期
+
+**续期就一条命令**（改表 + 上传 + 验证一条龙）：
+
+```powershell
+python scripts/license_passwords.py expire RH-2026-001-mj45 2028-12-31
+python scripts/license_passwords.py expire RH-2026-001-mj45 "2028-12-31 23:59"
+python scripts/license_passwords.py expire RH-2026-001-mj45 never        # 改成永久
+```
+
+`list` 会把状态直接标出来：`可用` / `已到期` / `已停用`。
+
+**到期后到底会发生什么**——这里有个容易误解的点：
+
+| 场景 | 结果 |
+| --- | --- |
+| 新电脑首次输这个密码 | ❌ 403 `密码已到期`，进不去 |
+| 已经在用的电脑 | ✅ **照常能用**，直到它自己的 token 过期（最长 `LICENSE_TTL_DAYS`=14 天） |
+| 那台电脑断网 | ✅ 同上，本地 token 还在就放行 |
+
+原因：`/verify` 只校验 token 签名、token 有效期、机器码、`revoked`，**不会重新检查 `expires`**。所以"到期"对新用户是立刻生效，对老用户最迟 14 天。
+
+**想立刻踢掉某人**：用 `revoke`，不要等到期。`/verify` 每次都读表里的 `revoked`，下次启动就被拒。
+
+**续期后对方要做什么**：什么都不用做。token 还在就继续用；已经停用或清过缓存的，重新输同一个密码即可，密码没变。
+
+> ⏰ 时间精度坑：`expires` 只写日期时，服务端按**当天 00:00** 判定，`2027-12-31` 等于 12-30 23:59 就失效了。想"有效到那天结束"，写 `2027-12-31 23:59`。脚本在只写日期时会提醒这一点。
+
 
 ---
 

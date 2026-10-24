@@ -16,7 +16,7 @@ import time
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog,
@@ -38,7 +38,7 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.2"
+APP_VERSION = "0.3"
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +263,48 @@ class BatchPanel(QWidget):
             self.stop_btn.setEnabled(False)
             self.status_label.setText("正在停止…")
 
+    def _open_path(self, path: Path, what: str) -> None:
+        """用系统默认程序打开文件/文件夹；打不开就说清楚为什么。
+
+        原来只用 QDesktopServices.openUrl()：文件不存在或没有关联程序时它会静默失败，
+        用户看到的就是"点了没反应"。这里三级兜底 + 明确提示。
+        """
+        target = Path(path).expanduser().resolve()
+        if not target.exists():
+            QMessageBox.warning(
+                self, "还没生成",
+                f"{what}不存在：\n{target}\n\n"
+                "如果是「配置文件」，常见原因是程序所在目录没有写权限"
+                "（例如直接在压缩包里双击了 exe）。请先完整解压再运行。",
+            )
+            return
+
+        ok = False
+        if os.name == "nt":
+            try:
+                os.startfile(str(target))   # Windows：交给 Shell，关联程序最可靠
+                ok = True
+            except OSError:
+                ok = False
+
+        if not ok:
+            try:
+                ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+            except Exception:  # noqa: BLE001
+                ok = False
+
+        if not ok:
+            QApplication.clipboard().setText(str(target))
+            QMessageBox.information(
+                self, "打不开",
+                f"系统没能自动打开，路径已复制到剪贴板：\n{target}\n\n"
+                "可以粘到资源管理器地址栏，或用记事本手动打开。",
+            )
+
     def _open_folder(self):
         target = self._out_dir()
-        if target and target.exists():
-            QDesktopServices.openUrl(target.as_uri())
+        if target:
+            self._open_path(target, "输出目录")
 
     def _out_dir(self) -> Path | None:
         if not self.id_edit.text().strip():
@@ -659,8 +697,8 @@ class MainWindow(QMainWindow):
         """打开 配置.ini；不存在先按模板生成一份。"""
         path = appconfig.config_path()
         if not path.exists():
-            appconfig.load()
-        QDesktopServices.openUrl(path.as_uri())
+            appconfig.load()          # 会按模板写出一份
+        self._open_path(path, "配置文件")
 
 
 STYLE = """
