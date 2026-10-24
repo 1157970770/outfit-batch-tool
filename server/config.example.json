@@ -1,0 +1,14 @@
+{
+  "_说明": "这份文件放在云函数代码目录，随激活/复核下发给客户端。改完重新部署即可，客户端下次启动生效。",
+  "rh_api_key": "",
+  "manifest_url": "",
+  "cos": {
+    "enabled": false,
+    "bucket": "",
+    "region": "ap-guangzhou",
+    "prefix": "",
+    "domain": ""
+  },
+  "notice": "",
+  "min_client_version": ""
+}

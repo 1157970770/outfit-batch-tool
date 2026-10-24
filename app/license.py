@@ -25,6 +25,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from app.secure_store import seal, unseal
+
 CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "RHOutfitTool"
 CACHE_PATH = CONFIG_DIR / "license.json"
 
@@ -136,15 +138,29 @@ def load_cache() -> dict:
         if not target.exists():
             continue
         try:
-            return json.loads(target.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
+            text = target.read_text(encoding="utf-8")
+        except OSError:
             continue
+        data = unseal(text)
+        if isinstance(data, dict):
+            return data
+        # 兼容早期明文缓存：能读就顺手升级成加密格式
+        try:
+            legacy = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(legacy, dict):
+            try:
+                save_cache(legacy)
+            except OSError:
+                pass
+            return legacy
     return {}
 
 
 def save_cache(data: dict) -> None:
-    """写缓存；某个目录不可写就换下一个，全都不行才抛错（带可操作提示）。"""
-    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    """加密后写盘（DPAPI）；某个目录不可写就换下一个，全都不行才抛错。"""
+    payload = seal(data)
     errors: list[str] = []
     for folder in _cache_candidates():
         try:
@@ -183,8 +199,14 @@ def activate(server: str, password: str) -> dict:
         "note": result.get("note", ""),
         "activated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "last_ok": time.time(),
+        "config": result.get("config") or {},
     })
     return result
+
+
+def get_config() -> dict:
+    """服务端下发的运行配置（未激活或未拉到时为空字典）。"""
+    return load_cache().get("config") or {}
 
 
 def status(server: str) -> tuple[bool, str]:
@@ -217,6 +239,8 @@ def status(server: str) -> tuple[bool, str]:
             cache["token"] = result["renewed_token"]
             if result.get("expire_at"):
                 cache["expire_at"] = result["expire_at"]
+        if isinstance(result.get("config"), dict) and result["config"]:
+            cache["config"] = result["config"]      # 配置随复核刷新
         cache["last_ok"] = time.time()
         save_cache(cache)
         when = time.strftime("%Y-%m-%d", time.localtime(int(result.get("expire_at") or expire_at)))

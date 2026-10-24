@@ -2,7 +2,6 @@
   一键打包：产出可分发 zip
   用法：  .\scripts\build.ps1                              （版本号自动取 app\main.py 的 APP_VERSION）
           .\scripts\build.ps1 -Version 0.3                 （强制覆盖版本号）
-          .\scripts\build.ps1 -LicenseServer https://xxx   （包内 配置.ini 预填授权地址）
           .\scripts\build.ps1 -OutRoot build\release       （产物换个地方，试打包用）
   产物：  dist\换装批量生产器\                          （文件夹版，直接能跑）
           dist\换装批量生产器-v<版本>-<日期>.zip        （发给别人用这个）
@@ -11,7 +10,6 @@
 #>
 param(
     [string]$Version = "",
-    [string]$LicenseServer = "",
     [string]$OutRoot = "dist"
 )
 
@@ -53,16 +51,6 @@ $appName = "换装批量生产器"
 $distRoot = Join-Path $root $OutRoot
 New-Item -ItemType Directory -Force $distRoot | Out-Null
 
-Write-Host "② 备份旧 配置.ini（PyInstaller 会整目录重建，不备份就丢了）" -ForegroundColor Cyan
-$cfgSrc = Join-Path $distRoot "$appName\配置.ini"
-if (Test-Path $cfgSrc) {
-    $cfgBak = Join-Path $distRoot ("配置.ini.bak-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-    Copy-Item $cfgSrc $cfgBak -Force
-    Write-Host "   已备份 → $cfgBak" -ForegroundColor DarkGray
-} else {
-    Write-Host "   （没有旧配置，跳过）" -ForegroundColor DarkGray
-}
-
 Write-Host "③ 打包（onedir 模式，不要用 --onefile）" -ForegroundColor Cyan
 $log = Join-Path $distRoot "build.log"
 # PyInstaller 会往 stderr 打进度，不能直接走管道（会被 $ErrorActionPreference=Stop 当错误）
@@ -88,14 +76,7 @@ try {
     Write-Host "   跳过自检（当前环境不允许启动 GUI 进程）：$($_.Exception.Message)" -ForegroundColor Yellow
 }
 
-Write-Host "⑤ 写干净的 配置.ini（不含任何 Key）" -ForegroundColor Cyan
-# 自检会把 配置.ini 生成出来，可能带着开发机填过的 Key，必须用模板覆盖
-$mkArgs = @((Join-Path $root "scripts\make_config.py"), "--dir", $builtDir)
-if ($LicenseServer) { $mkArgs += @("--license-server", $LicenseServer) }
-& $python @mkArgs
-if ($LASTEXITCODE -ne 0) { throw "生成 配置.ini 失败" }
-
-Write-Host "⑥ 压成 zip" -ForegroundColor Cyan
+Write-Host "⑤ 压成 zip" -ForegroundColor Cyan
 $stamp = Get-Date -Format "yyyyMMdd"
 $zip = Join-Path $distRoot "$appName-v$Version-$stamp.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }

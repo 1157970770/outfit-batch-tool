@@ -75,10 +75,11 @@ def load_manifest(source: str, timeout: int = 15) -> list[dict]:
         if isinstance(item, str):
             item = {"id": f"{idx + 1:03d}", "url": item}
         tid = str(item.get("id") or f"{idx + 1:03d}").zfill(3)
-        url = item.get("url")
-        if not url:
-            raise EngineError(f"模板 {tid} 缺少 url")
-        out.append({"id": tid, "url": url, "duration": item.get("duration")})
+        url = (item.get("url") or "").strip()
+        key = (item.get("key") or "").strip().lstrip("/")
+        if not url and not key:
+            raise EngineError(f"模板 {tid} 缺少 url（公有桶）或 key（私有桶）")
+        out.append({"id": tid, "url": url, "key": key, "duration": item.get("duration")})
     return out
 
 
@@ -286,6 +287,7 @@ class BatchRunner:
     def run(self) -> dict:
         spec = self.spec
         spec.out_dir.mkdir(parents=True, exist_ok=True)
+        self._prepare_templates()
         self._ensure_image()
         self._save_state()
 

@@ -1,63 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""后台配置文件（界面上不出现任何输入框）。
+"""运行配置：全部来自服务端下发，本地只保存"输出目录"这一个用户选择。
 
-文件：与 exe 同目录的 `配置.ini`，纯文本 KEY=VALUE，# 开头是注释。
-首次启动自动生成模板，用户只需要填 `RH_API_KEY` 一行。
+没有任何 ini / 用户可编辑的配置文件。
+  · 服务地址：内置常量 SERVICE_URL（改不了）
+  · RH Key / 模板清单 / COS：登录时由服务端随票下发，加密缓存在 license.json
+  · 输出目录：用户用"浏览"选一次，记在 ui.json（加密）
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
 
-CONFIG_NAME = "配置.ini"
+# 唯一的内置配置：配置/授权服务地址
+SERVICE_URL = "https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com"
 
-# 键 -> (默认值, 说明)
-DEFAULTS: dict[str, str] = {
-    "RH_API_KEY": "",
-    "MANIFEST": "",
-    "OUTPUT_ROOT": "",
-    "COS_ENABLED": "false",
-    "COS_BUCKET": "",
-    "COS_REGION": "ap-guangzhou",
-    "COS_PREFIX": "",
-    "COS_DOMAIN": "",
-    "LICENSE_SERVER": "",
-}
-
-TEMPLATE = """# ============================================================
-#  换装批量生产器 · 配置文件
-#  用记事本改下面几行，保存后回软件点「重载配置」即可，不用重启。
-#  等号右边不要留空格，也不要加引号。
-# ============================================================
-
-# 【必填】RunningHub 的 32 位 Key（企业级-共享 API Key）
-# 拿 Key：https://www.runninghub.cn/enterprise-api/sharedApi
-RH_API_KEY=
-
-# 【必填】500 个模板视频的清单地址（manifest.json），可以是 https 链接或本地文件路径
-# 生成清单：python tools/build_manifest.py --src 视频目录 --base-url https://你的CDN/tpl
-MANIFEST=
-
-# 【可选】视频存到哪；留空 = exe 同目录下的「输出」
-OUTPUT_ROOT=
-
-# 【可选】成品自动上传腾讯云 COS；不填密钥时会自动用本机已有凭证
-#        （环境变量 COS_SECRET_ID/COS_SECRET_KEY、~/.cos/credentials.json、tccli 登录态）
-COS_ENABLED=false
-COS_BUCKET=
-COS_REGION=ap-guangzhou
-COS_PREFIX=
-COS_DOMAIN=
-
-# 【必填】授权服务器：启动时必须输入分配的密码才能进主界面
-#        留空会使用程序内置地址；内置地址也没有时，程序会拒绝启动（不会放行）
-#        例：https://license.你的域名.com  或  http://127.0.0.1:8099
-LICENSE_SERVER=
-"""
+APP_NAME = "RHOutfitTool"
 
 
 def app_dir() -> Path:
@@ -67,75 +27,80 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def config_path() -> Path:
-    return app_dir() / CONFIG_NAME
-
-
-def _parse(text: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";", "[", "//")):
-            continue
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip().upper()] = value.strip()
-    return values
-
-
-def load() -> dict:
-    """读配置；缺字段用默认值补齐。文件不存在时自动生成模板。"""
-    path = config_path()
-    if not path.exists():
-        try:
-            path.write_text(TEMPLATE, encoding="utf-8")
-        except OSError:
-            pass
-        values: dict[str, str] = {}
-    else:
-        raw = path.read_bytes()
-        for encoding in ("utf-8-sig", "gbk"):
+def _state_dir() -> Path:
+    for env in ("APPDATA", "LOCALAPPDATA"):
+        base = os.getenv(env)
+        if base:
+            candidate = Path(base) / APP_NAME
             try:
-                values = _parse(raw.decode(encoding))
-                break
-            except UnicodeDecodeError:
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except OSError:
                 continue
-        else:
-            values = {}
-
-    cfg = dict(DEFAULTS)
-    cfg.update({k: v for k, v in values.items() if k in DEFAULTS})
-
-    # 旧版本把配置放在 %APPDATA%\RHOutfitTool\config.json，做一次性迁移
-    legacy = Path(os.getenv("APPDATA") or Path.home()) / "RHOutfitTool" / "config.json"
-    if not cfg["RH_API_KEY"] and legacy.exists():
-        try:
-            old = json.loads(legacy.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            old = {}
-        cfg["RH_API_KEY"] = old.get("api_key", "") or ""
-        cfg["MANIFEST"] = cfg["MANIFEST"] or old.get("manifest", "") or ""
-        cfg["OUTPUT_ROOT"] = cfg["OUTPUT_ROOT"] or old.get("output_root", "") or ""
-        if old.get("cos_enabled"):
-            cfg["COS_ENABLED"] = "true"
-            cfg["COS_BUCKET"] = cfg["COS_BUCKET"] or old.get("cos_bucket", "") or ""
-            cfg["COS_REGION"] = cfg["COS_REGION"] or old.get("cos_region", "") or ""
-            cfg["COS_PREFIX"] = cfg["COS_PREFIX"] or old.get("cos_prefix", "") or ""
-            cfg["COS_DOMAIN"] = cfg["COS_DOMAIN"] or old.get("cos_domain", "") or ""
-
-    if not cfg["OUTPUT_ROOT"]:
-        cfg["OUTPUT_ROOT"] = str(app_dir() / "输出")
-    return cfg
+    fallback = app_dir() / "_state"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
-def truthy(value: str) -> bool:
+def _ui_path() -> Path:
+    return _state_dir() / "ui.json"
+
+
+def load_ui() -> dict:
+    from app.secure_store import unseal
+
+    path = _ui_path()
+    if not path.exists():
+        return {}
+    try:
+        data = unseal(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_ui(data: dict) -> None:
+    from app.secure_store import seal
+
+    try:
+        _ui_path().write_text(seal(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def output_dir() -> Path:
+    """用户选过的目录优先；否则 exe 同目录下的「输出」。"""
+    saved = (load_ui().get("output_dir") or "").strip()
+    if saved:
+        return Path(saved)
+    return app_dir() / "输出"
+
+
+def save_output_dir(path: str) -> None:
+    ui = load_ui()
+    ui["output_dir"] = str(path)
+    save_ui(ui)
+
+
+def truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "是"}
 
 
-def mask(secret: str) -> str:
-    """日志/界面里显示用：只露头尾。"""
-    secret = (secret or "").strip()
-    if len(secret) <= 8:
-        return "***" if secret else "(空)"
-    return f"{secret[:4]}…{secret[-4:]}"
+def load() -> dict:
+    """组装成界面/引擎使用的扁平字典（键名保持历史一致，减少改动面）。"""
+    from app import license as licensemod
+
+    remote = licensemod.get_config() or {}
+    cos = remote.get("cos") or {}
+    return {
+        "RH_API_KEY": str(remote.get("rh_api_key") or "").strip(),
+        "MANIFEST": str(remote.get("manifest_url") or "").strip(),
+        "OUTPUT_ROOT": str(output_dir()),
+        "COS_ENABLED": "true" if truthy(cos.get("enabled")) else "false",
+        "COS_BUCKET": str(cos.get("bucket") or "").strip(),
+        "COS_REGION": str(cos.get("region") or "ap-guangzhou").strip(),
+        "COS_PREFIX": str(cos.get("prefix") or "").strip(),
+        "COS_DOMAIN": str(cos.get("domain") or "").strip(),
+        "NOTICE": str(remote.get("notice") or "").strip(),
+        "SERVICE_URL": SERVICE_URL,
+    }

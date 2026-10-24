@@ -34,6 +34,8 @@ from pathlib import Path
 
 SECRET = os.environ.get("LICENSE_SECRET", "")
 PASSWORDS_PATH = Path(os.environ.get("LICENSE_PASSWORDS", "") or Path(__file__).with_name("passwords.json"))
+# 运行配置（RH Key / 模板清单 / COS / 公告），随激活与复核一起下发
+CONFIG_PATH = Path(os.environ.get("LICENSE_CONFIG", "") or Path(__file__).with_name("config.json"))
 
 # 密码表里没写 expires（= 永久）时，票的有效期给一个足够远的日期，避免出现"永久密码 14 天后失效"
 FOREVER_DAYS = 3650
@@ -128,6 +130,17 @@ def verify_token(token: str, machine: str) -> dict:
 # 密码表
 # ---------------------------------------------------------------------------
 
+def load_runtime_config() -> dict:
+    """运行配置（RH Key / 模板清单 / COS / 公告）。文件不存在就返回空对象，不影响授权。"""
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LicenseError(f"config.json 有问题：{exc}", status=500) from None
+    return data if isinstance(data, dict) else {}
+
+
 def load_passwords() -> dict:
     if not PASSWORDS_PATH.exists():
         return {}
@@ -203,14 +216,22 @@ def handle(path: str, body: dict) -> tuple[int, dict]:
                 raise LicenseError("缺少密码", status=400)
             entry = check_password(password, machine)
             result = issue_token(password, machine, _deadline(entry.get("expires")))
-            return 200, {"ok": True, **result, "note": entry.get("note", "")}
+            return 200, {"ok": True, **result, "note": entry.get("note", ""),
+                         "config": load_runtime_config()}
 
         if action == "verify":
             token = str(body.get("token") or "").strip()
             if not token:
                 raise LicenseError("缺少 token", status=400)
             info = verify_token(token, machine)
-            return 200, {"ok": True, **info}
+            return 200, {"ok": True, **info, "config": load_runtime_config()}
+
+        if action == "config":
+            token = str(body.get("token") or "").strip()
+            if not token:
+                raise LicenseError("缺少 token", status=400)
+            info = verify_token(token, machine)
+            return 200, {"ok": True, "config": load_runtime_config(), **info}
 
         raise LicenseError("未知接口", status=404)
     except LicenseError as exc:

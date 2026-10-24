@@ -38,20 +38,16 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.7"
-
-# 内置授权地址：配置文件里留空就用它，避免"删掉那行 = 免授权"。
-# 部署好授权服务后，把地址填到这里并重新打包。
-EMBEDDED_LICENSE_SERVER = "https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com"
+APP_VERSION = "0.8"
 
 
 # ---------------------------------------------------------------------------
-# 配置：全部来自 exe 同目录的 配置.ini，界面上不出现任何输入框
+# 配置：服务端下发，本地无可编辑文件（见 app/config.py）
 # ---------------------------------------------------------------------------
 
-def resolve_license_server(cfg: dict) -> str:
-    """配置文件优先，其次用内置地址；两者都空 = 未配置（打包版会拒绝启动）。"""
-    return (cfg.get("LICENSE_SERVER") or "").strip() or EMBEDDED_LICENSE_SERVER.strip()
+def resolve_license_server(cfg: dict | None = None) -> str:
+    """服务地址只有一处来源：内置常量。改地址必须重新打包。"""
+    return (appconfig.SERVICE_URL or "").strip()
 
 
 def load_config() -> dict:
@@ -349,15 +345,19 @@ class BatchPanel(QWidget):
             QMessageBox.warning(self, "缺少批次号", "批次号会作为输出文件夹名，请先填写。")
             return
         if not self.templates:
-            QMessageBox.warning(self, "模板未加载", "模板清单没有加载成功，请检查 配置.ini 里的 MANIFEST。")
+            QMessageBox.warning(
+                self, "模板未加载",
+                "还没有拿到模板清单。\n\n"
+                "可能原因：服务端没下发 MANIFEST，或清单地址打不开。请联系管理员。",
+            )
             return
 
         key = (self.cfg.get("RH_API_KEY") or "").strip()
         if not key:
             QMessageBox.warning(
-                self, "还没配置 Key",
-                f"请在 配置.ini 里填写 RH_API_KEY 这一行，保存后点右上角「重载配置」。\n\n"
-                f"文件位置：\n{appconfig.config_path()}",
+                self, "还没拿到 Key",
+                "服务端没有下发 RH Key，暂时无法生成。\n\n"
+                "请联系管理员在服务端 config.json 里补齐后重启软件。",
             )
             return
 
@@ -517,130 +517,6 @@ class BatchPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# 配置编辑窗口（不依赖系统文件关联）
-# ---------------------------------------------------------------------------
-
-class ConfigDialog(QDialog):
-    """在程序内编辑 配置.ini：读不出、写不进、没关联程序，都不会再"点了没反应"。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("配置文件 · 配置.ini")
-        self.resize(760, 640)
-        self.path = appconfig.config_path()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 12)
-        layout.setSpacing(10)
-
-        path_label = QLabel(f"文件位置：{self.path}")
-        path_label.setWordWrap(True)
-        path_label.setObjectName("pathhint")
-        layout.addWidget(path_label)
-
-        self.editor = QPlainTextEdit()
-        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.editor.setPlaceholderText("配置内容为空")
-        layout.addWidget(self.editor, 1)
-
-        self.hint = QLabel()
-        self.hint.setWordWrap(True)
-        layout.addWidget(self.hint)
-
-        row = QHBoxLayout()
-        save_btn = QPushButton("保存并重载")
-        save_btn.setObjectName("primary")
-        save_btn.clicked.connect(self._save)
-        notepad_btn = QPushButton("用记事本打开")
-        notepad_btn.clicked.connect(self._open_notepad)
-        saveas_btn = QPushButton("另存为…")
-        saveas_btn.clicked.connect(self._save_as)
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.reject)
-        row.addWidget(save_btn)
-        row.addWidget(notepad_btn)
-        row.addWidget(saveas_btn)
-        row.addStretch(1)
-        row.addWidget(close_btn)
-        layout.addLayout(row)
-
-        self._load()
-
-    # ---- 读写 ----
-    def _load(self):
-        text = ""
-        if self.path.exists():
-            for encoding in ("utf-8-sig", "gbk"):
-                try:
-                    text = self.path.read_text(encoding=encoding)
-                    break
-                except (OSError, UnicodeDecodeError):
-                    continue
-        if not text:
-            appconfig.load()          # 尝试按模板生成
-            if self.path.exists():
-                try:
-                    text = self.path.read_text(encoding="utf-8-sig")
-                except OSError:
-                    text = ""
-        self.editor.setPlainText(text or appconfig.TEMPLATE)
-        self._refresh_hint()
-
-    def _refresh_hint(self):
-        values = appconfig._parse(self.editor.toPlainText()) if hasattr(appconfig, "_parse") else {}
-        key = "已填" if (values.get("RH_API_KEY") or "").strip() else "未填"
-        manifest = "已填" if (values.get("MANIFEST") or "").strip() else "未填"
-        exists = "存在" if self.path.exists() else "尚未生成"
-        self.hint.setText(
-            f"当前状态：文件{exists}　RH_API_KEY {key}　MANIFEST {manifest}　"
-            "（改完点「保存并重载」立即生效，无需重启）"
-        )
-        self.hint.setStyleSheet("color:#6b6b70; font-size:12px;")
-
-    def _save(self):
-        text = self.editor.toPlainText()
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(text, encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.critical(
-                self, "保存失败",
-                f"{exc}\n\n常见原因：程序目录没有写权限"
-                "（比如直接在压缩包里双击了 exe）。\n"
-                "请先完整解压到 D 盘等可写目录，或用「另存为」存到文档目录。",
-            )
-            return
-        self.accept()
-
-    def _save_as(self):
-        target, _ = QFileDialog.getSaveFileName(self, "另存配置", "配置.ini", "配置 (*.ini);;所有文件 (*)")
-        if not target:
-            return
-        try:
-            Path(target).write_text(self.editor.toPlainText(), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.warning(self, "保存失败", str(exc))
-            return
-        QMessageBox.information(
-            self, "已另存",
-            f"已保存到：\n{target}\n\n注意：程序只读取原位置 {self.path}，"
-            "另存的文件需要自己改名替换过去。",
-        )
-
-    def _open_notepad(self):
-        try:
-            if not self.path.exists():
-                self.path.write_text(self.editor.toPlainText(), encoding="utf-8")
-            os.startfile(str(self.path))
-        except OSError as exc:
-            QApplication.clipboard().setText(str(self.path))
-            QMessageBox.information(
-                self, "打不开记事本",
-                f"{exc}\n\n路径已复制：\n{self.path}",
-            )
-
-
-# ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
 
@@ -654,9 +530,8 @@ class MainWindow(QMainWindow):
         self._log_path = Path(self.cfg["OUTPUT_ROOT"]) / "logs" / f"app-{time.strftime('%Y%m%d')}.log"
 
         self.setWindowTitle(f"{APP_TITLE} v{APP_VERSION}")
-        self.resize(940, 760)
+        self.resize(960, 760)
         self._build_ui()
-        self._load_manifest_async()
 
     def _build_ui(self):
         central = QWidget()
@@ -672,25 +547,27 @@ class MainWindow(QMainWindow):
         head_row = QHBoxLayout()
         title = QLabel(APP_TITLE)
         title.setObjectName("title")
-        reload_btn = QPushButton("重载配置")
-        reload_btn.setObjectName("ghost")
-        reload_btn.setToolTip("改完 配置.ini 点这里，不用重启")
-        reload_btn.clicked.connect(self._reload_config)
-        config_btn = QPushButton("配置文件")
-        config_btn.setObjectName("ghost")
-        config_btn.setToolTip("打开 配置.ini：填 RH_API_KEY / MANIFEST / COS / 授权地址")
-        config_btn.clicked.connect(self._open_config_file)
         head_row.addWidget(title)
         head_row.addStretch(1)
-        head_row.addWidget(reload_btn)
-        head_row.addSpacing(6)
-        head_row.addWidget(config_btn)
+
+        # 输出目录：唯一给用户选的路径
+        head_row.addWidget(QLabel("输出目录"))
+        self.output_edit = QLineEdit()
+        self.output_edit.setReadOnly(True)
+        self.output_edit.setMinimumWidth(300)
+        self.output_edit.setToolTip("视频保存位置")
+        self.output_edit.setText(str(appconfig.output_dir()))
+        pick_out = QPushButton("选择…")
+        pick_out.setObjectName("ghost")
+        pick_out.clicked.connect(self._pick_output_dir)
+        head_row.addWidget(self.output_edit)
+        head_row.addWidget(pick_out)
 
         # 状态条：四个灯泡，一眼看出还缺什么
         status_row = QHBoxLayout()
         status_row.setSpacing(14)
         self.badge_key = QLabel()
-        self.badge_manifest = QLabel("模板清单：加载中…")
+        self.badge_manifest = QLabel("模板清单：未下发")
         self.badge_license = QLabel()
         self.badge_cos = QLabel()
         self.manifest_label = self.badge_manifest   # 兼容旧引用
@@ -730,7 +607,7 @@ class MainWindow(QMainWindow):
 
     # ---- 状态条 ----
     def _refresh_status(self):
-        """四个状态：RH Key / 清单 / 授权 / COS。只读配置与本地缓存，不联网。"""
+        """配置 / 清单 / 授权 / COS 四个状态。只读本地缓存，不联网。"""
         cfg = self.cfg
 
         def badge(label: QLabel, text: str, tone: str) -> None:
@@ -740,42 +617,60 @@ class MainWindow(QMainWindow):
             label.style().polish(label)
 
         key_ok = bool((cfg.get("RH_API_KEY") or "").strip())
-        badge(self.badge_key, "RH Key：已配置" if key_ok else "RH Key：未配置",
+        badge(self.badge_key, "配置：已下发" if key_ok else "配置：未下发",
               "ok" if key_ok else "bad")
 
         cos_on = appconfig.truthy(cfg.get("COS_ENABLED", ""))
         badge(self.badge_cos, "COS：开" if cos_on else "COS：关", "ok" if cos_on else "idle")
 
-        server = resolve_license_server(cfg)
-        if not server:
-            badge(self.badge_license, "授权：未配置（无法启动）", "bad")
+        cache = licensemod.load_cache()
+        expire_at = int(cache.get("expire_at") or 0)
+        if cache.get("token") and expire_at > time.time():
+            day = time.strftime("%Y-%m-%d", time.localtime(expire_at))
+            badge(self.badge_license, f"授权：至 {day}", "ok")
         else:
-            cache = licensemod.load_cache()
-            expire_at = int(cache.get("expire_at") or 0)
-            if cache.get("token") and expire_at > time.time():
-                day = time.strftime("%Y-%m-%d", time.localtime(expire_at))
-                badge(self.badge_license, f"授权：至 {day}", "ok")
-            else:
-                badge(self.badge_license, "授权：待激活", "warn")
+            badge(self.badge_license, "授权：待激活", "warn")
 
-        missing = []
-        if not key_ok:
-            missing.append("RH_API_KEY")
-        if not (cfg.get("MANIFEST") or "").strip():
-            missing.append("MANIFEST")
-        if missing:
+        if not key_ok or not (cfg.get("MANIFEST") or "").strip():
             self.banner.setText(
-                f"⚠ 还差 {'、'.join(missing)}：点右上角「配置文件」填写，保存后点「重载配置」，不用重启。"
+                "⚠ 服务端还没下发完整配置（RH Key / 模板清单）。请联系管理员在服务端 config.json 里补齐，重启即可生效。"
             )
+            self.banner.show()
+        elif (cfg.get("NOTICE") or "").strip():
+            self.banner.setText(f"📢 {cfg['NOTICE']}")
             self.banner.show()
         else:
             self.banner.hide()
+
+    # ---- 输出目录 ----
+    def _pick_output_dir(self):
+        start = self.cfg.get("OUTPUT_ROOT") or str(appconfig.output_dir())
+        chosen = QFileDialog.getExistingDirectory(self, "选择输出目录", start)
+        if not chosen:
+            return
+        appconfig.save_output_dir(chosen)
+        self.cfg["OUTPUT_ROOT"] = chosen
+        for panel in (self.small_panel, self.big_panel):
+            panel.cfg = self.cfg
+        self._log_path = Path(chosen) / "logs" / f"app-{time.strftime('%Y%m%d')}.log"
+        self._refresh_status()
+
+    def apply_config(self, cfg: dict) -> None:
+        """授权完成后调用：把服务端下发的配置灌进界面。"""
+        self.cfg = cfg
+        for panel in (self.small_panel, self.big_panel):
+            panel.cfg = cfg
+        self.output_edit.setText(cfg.get("OUTPUT_ROOT", ""))
+        self._log_path = Path(cfg.get("OUTPUT_ROOT") or appconfig.output_dir()) / "logs" / \
+            f"app-{time.strftime('%Y%m%d')}.log"
+        self._load_manifest_async()
+        self._refresh_status()
 
     # ---- 清单 ----
     def _load_manifest_async(self):
         source = (self.cfg.get("MANIFEST") or "").strip()
         if not source:
-            self.manifest_label.setText("模板清单：未配置（打开“配置文件”填 MANIFEST）")
+            self.manifest_label.setText("模板清单：未下发")
             return
         self.manifest_label.setText("模板清单：加载中…")
         self.manifest_worker = ManifestWorker(source)
@@ -813,32 +708,6 @@ class MainWindow(QMainWindow):
                 fh.write(line + "\n")
         except OSError:
             pass
-
-    def _reload_config(self, silent: bool = False):
-        """改完 配置.ini 点这里：不用重启就生效。"""
-        self.cfg = load_config()
-        for panel in (self.small_panel, self.big_panel):
-            panel.cfg = self.cfg
-        self._load_manifest_async()
-        self._refresh_status()
-
-        missing = [name for name in ("RH_API_KEY", "MANIFEST") if not (self.cfg.get(name) or "").strip()]
-        hint = f"\n\n还缺：{'、'.join(missing)}（在 配置.ini 里填）" if missing else ""
-        if not silent:
-            QMessageBox.information(self, "配置已重载", f"已重新读取 配置.ini{hint}")
-
-    def _open_config_file(self):
-        """在程序里直接编辑 配置.ini。
-
-        不再依赖系统文件关联：远程桌面、没有 .ini 关联程序、压缩包内运行等场景
-        都会让"用默认程序打开"静默失败，用户看到的就是"点了没反应"。
-        """
-        try:
-            dialog = ConfigDialog(self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                self._reload_config(silent=True)
-        except Exception as exc:  # noqa: BLE001 - 任何异常都要让人看见
-            QMessageBox.critical(self, "打不开配置窗口", f"{type(exc).__name__}: {exc}")
 
 
 STYLE = """
@@ -883,22 +752,16 @@ def main() -> int:
     app.setFont(font)
     window = MainWindow()
 
-    # 默认强制授权：配置里留空就用内置地址；两者都空则拒绝启动（不再"留空=放行"）
-    license_server = resolve_license_server(window.cfg)
+    # 服务地址是内置常量；拿不到票且没有缓存 → 拒绝启动
+    license_server = resolve_license_server()
     if not license_server:
-        if not getattr(sys, "frozen", False) and os.environ.get("RH_DEV_NO_LICENSE") == "1":
-            print("RH_DEV_NO_LICENSE=1：源码运行跳过授权（打包版不会生效）", file=sys.stderr)
-        else:
-            QMessageBox.critical(
-                None, "未配置授权服务",
-                "本程序必须通过密码授权才能使用，但当前没有配置授权服务器。\n\n"
-                "请打开「配置文件」填写 LICENSE_SERVER，"
-                "或向管理员索取已内置授权地址的版本。",
-            )
-            return 2
-    elif not ensure_license(license_server):
+        QMessageBox.critical(None, "程序损坏", "缺少内置服务地址，请重新获取安装包。")
+        return 2
+    if not ensure_license(license_server):
         return 2
 
+    # 授权通过后，服务端下发的配置才可用
+    window.apply_config(load_config())
     window.show()
     return app.exec()
 
