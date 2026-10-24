@@ -8,7 +8,7 @@
 
 ## 0. 执行方须知（先看这一节）
 
-**你要做的只有三件事**：上传两个文件到云函数 → 配 3 个环境变量 → 建 API 网关路由。
+**你要做的只有三件事**：上传两个文件到云函数 → 配 3 个环境变量 → 建一个 HTTP 触发器（函数 URL）。
 
 **必须遵守的约束**：
 
@@ -63,6 +63,8 @@
 | `dist/license-deploy.zip` | 4 KB | 已打好的上传包（含上面两个文件） | ✅ 直接传这个 |
 | `app/license.py` | 4.9 KB | 客户端：激活、缓存、机器码 | ❌ 已打包进 exe |
 | `app/startup.py` | 1.4 KB | 启动门禁（弹框输密码） | ❌ 同上 |
+| `scripts/license_passwords.py` | 6 KB | 密码表增删改，**改完自动同步云函数并验证** | ❌ 本地跑 |
+| `scripts/license_deploy.py` | 7 KB | 打包 / 部署 / 查线上状态 / 验收 | ❌ 本地跑 |
 | `tests/test_license.py` | 6 KB | 11 项自动化验收 | ❌ 本地跑 |
 
 `license-deploy.zip` 的结构（文件在 zip 根目录，**不能套文件夹**）：
@@ -72,6 +74,30 @@ license-deploy.zip
 ├── license_api.py
 └── passwords.json
 ```
+
+### 2.1 分发边界：哪些文件能到客户手里
+
+客户拿到的只有一个包：`dist/换装批量生产器-v<版本>-<时间>.zip`。解开只有三项：
+
+```
+换装批量生产器/
+├── _internal/            PyInstaller 运行时 + 依赖
+├── 换装批量生产器.exe
+└── 配置.ini
+```
+
+**`passwords.json` 不在里面，而且客户端代码根本不认识它**——`grep -rn "passwords" app/ run_app.py wan3_r2v.py` 零匹配，`app/license.py` 只负责把密码 POST 到云端 `/activate`。所以这份名单**不会随着软件复制、转发、网盘分享被带出去**。
+
+| 文件 | 里面有什么 | 能给客户吗 |
+| --- | --- | --- |
+| `dist/换装批量生产器-v*.zip` | exe + 运行时 + `配置.ini` | ✅ 只发这个 |
+| `dist/license-deploy.zip` | `license_api.py` + **全量 passwords.json** | ❌ 只用于往云端部署。发给客户等于把密码本交出去 |
+| `server/passwords.json` | 真实密码表（唯一真身） | ❌ 本地保留，改也只改这份 |
+| `server/passwords.example.json` | 空模板 | 参考用，不含真实密码 |
+
+全世界的密码表只有两份：**本地 `server/passwords.json`（真身，你编辑这份）** 与 **云端函数 `/var/user/passwords.json`（部署时复制过去，运行时读这份）**。二者靠 `scripts/license_passwords.py deploy` 同步。
+
+发版前 30 秒自检：双击打开要发的 zip，根目录只应有 `_internal`、一个 exe、`配置.ini`。**看到 `passwords.json` 或 `server/` 目录，立刻停下，别发。**
 
 ---
 
@@ -178,42 +204,38 @@ base64url({"p":密码,"m":机器码,"e":过期时间戳}) + "." + HMAC-SHA256(�
 -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 48 | % {[char]$_})
 ```
 
-### 4.3 API 网关触发器
+### 4.3 对外暴露：函数 URL（⚠️ API 网关已停售，别再照着老文档配）
+
+> **2026-10 实测结论**：API 网关已**停止售卖**，新建 service 会直接失败：
+> `FailedOperation.LimitingResourceCreated：API网关产品已停止售卖，无法新建资源`。
+> 所以不要再去建 API 网关触发器。**改用 SCF 自带的「函数 URL」**——一个地址同时服务
+> `/activate`、`/verify`、`/health`，路径是透传的，不需要像网关那样一条一条建路由。
 
 函数 → **触发管理 → 创建触发器**：
 
 | 项 | 值 |
 | --- | --- |
-| 触发方式 | API 网关 |
-| API 服务 | 新建 |
-| 请求方法 | POST（顺带勾 GET） |
-| 发布环境 | `release` |
-| 路径 | **`/license/activate`** |
-| 鉴权 | **免鉴权** |
+| 触发类型 | **HTTP**（就是函数 URL） |
+| 触发器名称 | `licenseUrl` |
+| 鉴权 | **免鉴权（NONE）** |
+| 公网访问 | 开启 |
 
-**再建第二条**，路径改成 `/license/verify`，其余同上。
-
-> 也可以只建一条 `/license`（单路由），客户端会按 `body.action` 自动适配。
-> 但**推荐建两条**，错误码更直观。
->
-> ⚠️ 不要只建 `/license` 却让客户端去请求 `/license/activate` —— 那是网关层 404，函数根本不会被调用。
-> 客户端已做自动重试，但首次上线仍建议按两条路由配，避免多绕一次。
-
-保存后得到地址：
+保存后得到地址，形如：
 
 ```
-https://service-xxxxxxxx-1234567890.gz.apigw.tencentcs.com/release/license/activate
+https://1463907213-<随机8位>.ap-guangzhou.tencentscf.com
 ```
 
 ### 4.4 填入客户端的地址
 
-把最后一段 `/activate` **去掉**，得到 base：
+函数 URL **透传路径**，所以 base 直接用域名，不用带 `/license`：
 
-```
-https://service-xxxxxxxx-1234567890.gz.apigw.tencentcs.com/release/license
+```ini
+LICENSE_SERVER=https://1463907213-<随机8位>.ap-guangzhou.tencentscf.com
 ```
 
-这个 base 写进客户端的 `配置.ini` 的 `LICENSE_SERVER`。
+客户端会自动拼 `/activate` 与 `/verify`，服务端按路径最后一段分派。
+写成 `https://.../license` 也照样能用（实际请求 `/license/activate`），两种都可以。
 
 ---
 
@@ -261,13 +283,40 @@ python3 server\license_api.py --serve 8099
 
 | 动作 | 改什么 | 生效 |
 | --- | --- | --- |
-| 新增用户 | 加一条 | 重新部署后 |
-| 停用某人 | `revoked: true` | 重新部署后，其下次启动即被拒 |
-| 续期 | 改 `expires` | 重新部署后 |
+| 新增用户 | 加一条 | 自动同步后（几秒） |
+| 停用某人 | `revoked: true` | 自动同步后，其下次启动即被拒 |
+| 续期 | 改 `expires` | 自动同步后 |
 | 换电脑 | 不用改，新机输同一密码 | 立即 |
 | 换 `LICENSE_SECRET` | 环境变量 | **所有客户端需重新激活** |
 
-改表流程：控制台 → 函数代码 → 打开 `passwords.json` → 改 → **部署**。
+### 6.4 改完怎么同步到云端（自动的）
+
+**一条命令，改表 + 上传 + 验证全做完：**
+
+```powershell
+python scripts/license_passwords.py add --note "张三 / 设计部" --expires 2027-12-31
+```
+
+它会依次做三件事，任何一步失败都会明确告诉你：
+
+1. 改本地 `server/passwords.json`（原子写，写坏不了）
+2. 把 `license_api.py` + `passwords.json` 打成 zip 整体上传云函数，并轮询到函数状态回到 `Active`
+3. 用这个密码真打一次线上 `/activate`，确认线上**真的认得**（`✓ 线上已生效`）
+
+为什么必须整体重传、不能只改云端那一个文件：SCF 的代码目录 `/var/user` 是**只读**的，改不了单个文件。所以"同步"的本质是重新部署代码包，**耗时 5~15 秒**，不是热更新。
+
+| 命令 | 线上期望结果 |
+| --- | --- |
+| `add` / `unrevoke` / `expire` | `[PASS] 线上应可用 → 200` |
+| `revoke` / `remove` | `[PASS] 线上应被拒 → 403` |
+
+只改本地、先不推云（没网，或还在斟酌）：加 `--no-deploy`。
+只推云、不改表：`python scripts/license_passwords.py deploy`。
+只想查某个密码线上现在什么状态：`python scripts/license_deploy.py check <密码> [--expect reject]`。
+
+> 同步失败（`✗ 上传没成功`）时云端仍是旧表、**本地已保存**，修好网络或重新登录 tccli 后跑一次 `deploy` 即可，不需要重做改动。
+
+> 手动路线（脚本不可用时）：控制台 → 函数代码 → 打开 `passwords.json` → 改 → 点**部署**。等价，但容易手抖写坏 JSON，不推荐。
 
 ---
 
@@ -324,8 +373,8 @@ python3 tests/test_license.py
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 客户端提示「本机还没有授权」 | `LICENSE_SERVER` 空或拼错 | 检查 `配置.ini`，结尾不要 `/` |
-| `HTTP 404` | 网关没有该路径 | 建 `/license/activate`、`/license/verify` 两条 |
-| `HTTP 401/403` 且非业务错误 | 网关开了鉴权 | 改成「免鉴权」 |
+| `HTTP 404` | 函数 URL 没建好，或路径最后一段不是 `activate`/`verify`/`health` | 函数 → 触发管理里确认有一条 HTTP 触发器 |
+| `HTTP 401/403` 且非业务错误 | 函数 URL 开了鉴权 | 触发器改成「免鉴权 / NONE」 |
 | `服务端没配 LICENSE_SECRET` | 环境变量未生效 | 重新保存，等 1 分钟 |
 | `密码不存在` | 密码表没传 / 拼错 | 控制台确认 `passwords.json` 存在 |
 | `body 不是 JSON` | 用 curl 在 PowerShell 里测 | 改 `Invoke-RestMethod` |
@@ -338,9 +387,10 @@ python3 tests/test_license.py
 
 1. `LICENSE_SECRET` 只放环境变量，≥48 位随机，**不要**出现在代码/文档/聊天里。
 2. `passwords.json` 已在 `.gitignore`（`server/passwords.json`），不要强制提交。
-3. API 网关保持「免鉴权」，安全性由 `LICENSE_SECRET` + 密码表保证；不要为了"更安全"去开密钥鉴权，客户端会 401。
+3. 函数 URL 触发器保持「免鉴权 / NONE」，安全性由 `LICENSE_SECRET` + 密码表保证；不要为了"更安全"去开密钥鉴权，客户端会 401。
 4. 密码表泄露 = 所有人可用；泄露后立即换 `LICENSE_SECRET`（强制全员重新激活）+ 换密码。
 5. 这套方案的定位是**防止 exe 被随手转发**，不防逆向破解。真实商业授权需要服务端下发业务数据，不是这套。
+6. `dist/license-deploy.zip` 内含全量密码表，只用于部署。**不放进任何对外分发物**（群文件、网盘、邮件附件），发版时只发 `换装批量生产器-v*.zip`。详见 §2.1。
 
 ---
 

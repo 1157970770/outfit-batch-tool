@@ -225,7 +225,9 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 
 1. **配 RH Key 跑 1 条真实** → 拿单价、验效果（唯一阻塞项）
 2. 500 模板上 CDN → `tools/build_manifest.py` 出 manifest
-3. 部署授权服务（[license-handoff.md](license-handoff.md)）
+3. ~~部署授权服务~~ ✅ **已完成 2026-10-24**：腾讯云函数 `outfit-license`（ap-guangzhou，Python3.9，128MB/5s）+ 函数 URL
+   `https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com`。
+   ⚠️ 原计划的 API 网关已停止售卖，改用 SCF 函数 URL；运维用 `python scripts/license_deploy.py deploy|test|url`。
 4. 失败自动重试（1–2 次）+ 一键补跑
 5. 历史批次列表（读 `batch.json`）
 6. `transfer.py` 接入主流程（边下边传，省本地磁盘）

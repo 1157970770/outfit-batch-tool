@@ -1,0 +1,199 @@
+# -*- coding: utf-8 -*-
+"""密码表增删改，改完自动同步到云函数并验证线上是否生效。
+
+默认行为：**一条命令搞定「改本地表 → 上传云函数 → 验证线上」**，不需要收尾再跑一条。
+    python scripts/license_passwords.py list
+    python scripts/license_passwords.py add --note "张三 / 设计部" --expires 2027-12-31
+    python scripts/license_passwords.py revoke   RH-2026-001-mj45
+    python scripts/license_passwords.py unrevoke RH-2026-001-mj45
+    python scripts/license_passwords.py expire   RH-2026-001-mj45 2026-12-31
+    python scripts/license_passwords.py remove   RH-2026-003-cegs
+    python scripts/license_passwords.py deploy              # 只部署，不改表
+
+加 --no-deploy 只改本地、不推云（没网 / 只想先存着）：
+    python scripts/license_passwords.py add --no-deploy --note "测试"
+
+同步原理：SCF 的代码目录 /var/user 只读，改不了单个文件，所以「同步」= 把
+license_api.py + passwords.json 重新打成一个包整体上传，等函数回到 Active 才生效
+（约 5~15 秒），随后用 /activate 真打一次，确认线上确实认得这个密码。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_FILE = os.path.join(ROOT, "server", "passwords.json")
+DEPLOY_SCRIPT = os.path.join(ROOT, "scripts", "license_deploy.py")
+ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # 去掉 0/O/1/l/I
+
+
+def load(path: str) -> dict:
+    if not os.path.isfile(path):
+        return {"_说明": "密码表", "passwords": {}}
+    with open(path, encoding="utf-8-sig") as f:
+        doc = json.load(f)
+    doc.setdefault("passwords", {})
+    return doc
+
+
+def save(path: str, doc: dict) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)  # 原子写，避免写一半把表弄坏
+
+
+def next_code(doc: dict) -> str:
+    year = time.strftime("%Y")
+    used = 0
+    for code in doc["passwords"]:
+        parts = code.split("-")
+        if len(parts) >= 3 and parts[1] == year and parts[2].isdigit():
+            used = max(used, int(parts[2]))
+    suffix = "".join(secrets.choice(ALPHABET) for _ in range(4))
+    return f"RH-{year}-{used + 1:03d}-{suffix}"
+
+
+def show(doc: dict) -> None:
+    rows = doc["passwords"]
+    if not rows:
+        print("（空表）")
+        return
+    print(f"{'密码':<22}{'状态':<8}{'到期':<14}备注")
+    print("-" * 70)
+    for code, v in rows.items():
+        state = "已停用" if v.get("revoked") else "可用"
+        print(f"{code:<22}{state:<8}{v.get('expires') or '永久':<14}{v.get('note') or ''}")
+    print(f"-- 共 {len(rows)} 条")
+
+
+# ------------------------------------------------------------------ 自动同步
+def _sync(code: str | None, expect: str) -> bool:
+    """上传云函数 + 验证线上。expect: ok=该密码应可用, reject=应被拒。"""
+    print("\n[同步] 上传到云函数（约 5~15 秒）…")
+    rc = subprocess.call([sys.executable, DEPLOY_SCRIPT, "deploy"])
+    if rc != 0:
+        print("[同步] ✗ 上传没成功，云端还是旧表。本地已保存，可重跑：")
+        print("       python scripts/license_passwords.py deploy")
+        return False
+    if not code:
+        return True
+
+    print("[同步] 验证线上是否生效…")
+    rc = subprocess.call([sys.executable, DEPLOY_SCRIPT, "check", code, "--expect", expect])
+    if rc == 0:
+        print("[同步] ✓ 线上已生效")
+        return True
+    print("[同步] ⚠ 线上验证没通过（可能还在切流量，或密码表内容不对）。稍后重跑：")
+    print(f"       python scripts/license_deploy.py check {code} --expect {expect}")
+    return False
+
+
+def main():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # 让本脚本输出与子进程输出按顺序显示
+    except Exception:
+        pass
+    argv = sys.argv[1:]
+    no_deploy = "--no-deploy" in argv
+    if no_deploy:
+        argv = [a for a in argv if a != "--no-deploy"]
+
+    p = argparse.ArgumentParser(description="密码表增删改（默认自动同步云函数）")
+    p.add_argument("--file", default=DEFAULT_FILE, help="默认 server/passwords.json")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list")
+
+    a = sub.add_parser("add")
+    a.add_argument("--note", default="")
+    a.add_argument("--expires", default="2027-12-31")
+    a.add_argument("--machine", default="")
+    a.add_argument("--code", default=None, help="不填则自动生成")
+
+    for name in ("revoke", "unrevoke", "remove"):
+        q = sub.add_parser(name)
+        q.add_argument("code")
+
+    e = sub.add_parser("expire")
+    e.add_argument("code")
+    e.add_argument("date")
+
+    sub.add_parser("deploy")
+
+    args = p.parse_args(argv)
+
+    if args.cmd == "deploy":
+        sys.exit(subprocess.call([sys.executable, DEPLOY_SCRIPT, "deploy"]))
+
+    path = args.file
+    doc = load(path)
+    rows = doc["passwords"]
+
+    if args.cmd == "list":
+        show(doc)
+        return
+
+    if args.cmd == "add":
+        code = args.code or next_code(doc)
+        if code in rows:
+            sys.exit(f"密码已存在：{code}")
+        rows[code] = {"note": args.note, "machine": args.machine,
+                      "expires": args.expires, "revoked": False}
+        save(path, doc)
+        print(f"已新增：{code}")
+        print(f"  备注={args.note or '-'}  到期={args.expires}")
+        show(doc)
+        if no_deploy:
+            print("\n[同步] 已跳过（--no-deploy）。云端暂时不认这个密码。")
+            print("       要推上去：python scripts/license_passwords.py deploy")
+        else:
+            _sync(code, "ok")
+        return
+
+    if args.cmd not in ("revoke", "unrevoke", "expire", "remove"):
+        return
+
+    code = args.code
+    if code not in rows:
+        near = [c for c in rows if code.lower() in c.lower()]
+        msg = f"没有这个密码：{code}"
+        if near:
+            msg += "\n你是不是想说：\n  " + "\n  ".join(near)
+        sys.exit(msg)
+
+    if args.cmd == "remove":
+        del rows[code]
+        print(f"已删除：{code}（该用户下次启动会被拒）")
+    elif args.cmd == "revoke":
+        rows[code]["revoked"] = True
+        print(f"已停用：{code}")
+    elif args.cmd == "unrevoke":
+        rows[code]["revoked"] = False
+        print(f"已恢复：{code}")
+    elif args.cmd == "expire":
+        rows[code]["expires"] = args.date
+        print(f"已改到期：{code} -> {args.date}")
+
+    save(path, doc)
+    show(doc)
+
+    if no_deploy:
+        print("\n[同步] 已跳过（--no-deploy）。云端仍是旧的。")
+        print("       要推上去：python scripts/license_passwords.py deploy")
+        return
+
+    # 停用 / 删除 → 线上应被拒；恢复 / 改期 → 线上应可用
+    expect = "reject" if args.cmd in ("revoke", "remove") else "ok"
+    _sync(code, expect)
+
+
+if __name__ == "__main__":
+    main()

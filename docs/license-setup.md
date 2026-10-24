@@ -103,62 +103,45 @@ Windows 下打包：选中这两个文件 → 右键 → 压缩为 zip（**不�
 -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 48 | % {[char]$_})
 ```
 
-### 2.4 加 API 网关触发器
+### 2.4 对外暴露：函数 URL（⚠️ 别再照 API 网关配）
+
+> **2026-10 实测**：API 网关已**停止售卖**，新建 service 直接报
+> `FailedOperation.LimitingResourceCreated：API网关产品已停止售卖，无法新建资源`。
+> 改用 SCF 自带的**函数 URL**——路径透传，**一个地址同时服务 `/activate`、`/verify`、`/health`**，
+> 不用像网关那样一条一条建路由。
 
 函数 → **触发管理 → 创建触发器**：
 
 | 项 | 填什么 |
 | --- | --- |
-| 触发方式 | API 网关 |
-| API 服务 | 新建（或选已有） |
-| 请求方法 | **POST** |
-| 发布环境 | `release` |
-| 路径 | **`/license/activate`** |
-| **鉴权** | **免鉴权** |
+| 触发类型 | **HTTP**（就是函数 URL） |
+| 触发器名称 | `licenseUrl` |
+| 鉴权 | **免鉴权（NONE）** |
+| 公网访问 | 开启 |
 
-**然后按同样的配置再建第二条触发器，路径改成 `/license/verify`。** 两条都要 POST。
-
-> **为什么路径要带最后一段？** 因为客户端是在你填的地址后面拼 `/activate`：
-> 客户端 → `/release/license/activate` → 网关匹配 `/license/activate` → 函数收到 `action=activate`。
-> 如果网关只挂 `/license`，这个请求在网关层就 404 了，根本到不了函数。
-
-**也可以只建一条 `/license`**（单路由）。这种情况下客户端会按 `body.action` 判断动作，
-首次请求直接打到 `/license`，不拼后缀。两种配法客户端都兼容，会自己适配：
+保存后得到地址，形如：
 
 ```
-先 POST <你填的地址>            body 里带 action
-  ├─ 200 → 成功
-  └─ 404 → 自动补 /activate 或 /verify 重试一次
+https://1463907213-<随机8位>.ap-guangzhou.tencentscf.com
 ```
 
-> 不想建两条、也不想试错的话：一个资源 `/license/{action}` 并开启路径参数，效果等价。
-> 新手建议建两条，出错时错误码更直观。
-
-> ⚠️ 鉴权如果选了"API 密钥"或"OAuth"，客户端调用会 401。
-> 这套方案的安全性靠 `LICENSE_SECRET` 和密码表，不靠网关鉴权。
-
-保存后控制台会给你一条完整地址，形如：
-
-```
-https://service-xxxxxxxx-1234567890.gz.apigw.tencentcs.com/release/license/activate
-```
-
-**客户端要填的 `LICENSE_SERVER` 是把最后一段 `/activate` 去掉**：
+**客户端要填的 `LICENSE_SERVER` 直接用这个域名**，结尾不要带 `/`：
 
 ```ini
-LICENSE_SERVER=https://service-xxxxxxxx-1234567890.gz.apigw.tencentcs.com/release/license
+LICENSE_SERVER=https://1463907213-<随机8位>.ap-guangzhou.tencentscf.com
 ```
 
-结尾不要带 `/`。客户端会自己在后面拼 `/activate` 或 `/verify`。
+客户端会自己在后面拼 `/activate` 或 `/verify`，函数按路径最后一段分派。
 
+> 写成 `https://.../license` 也能用（实际请求 `/license/activate`），两种都通。
 > 误填成带 `/activate` 的完整地址也不会坏：客户端把动作放在 `body.action` 里，
 > 函数**优先看 body.action**，其次才看路径末段。
 
-> 拆解一下这条地址，避免填错：
-> `https://service-xxx.gz.apigw.tencentcs.com` = 网关域名，`/release` = 发布环境，`/license` = 你配的路径前缀，`/activate` = 你配的路径最后一段。
-> 换到别的环境（比如 `test`）时，把 `/release` 换掉即可。
+> ⚠️ 鉴权必须选「免鉴权 / NONE」。开了密钥鉴权客户端会 401，这套方案的安全性
+> 靠 `LICENSE_SECRET` 和密码表，不靠触发器鉴权。
 
-> 可选：再建一条 `/license/health`（GET），浏览器直接打开能返回 `{"ok":true,...}`，上线前用来确认网关和函数是通的，比对着 POST 接口猜错误码省事。
+> 上线前先用浏览器打开 `https://你的地址/health`，返回 `{"ok":true,...}` 就说明链路通了。
+
 
 ---
 
@@ -168,23 +151,23 @@ LICENSE_SERVER=https://service-xxxxxxxx-1234567890.gz.apigw.tencentcs.com/releas
 
 ```powershell
 Invoke-RestMethod -Method Post `
-  -Uri "https://你的地址/release/license/activate" `
+  -Uri "https://你的地址/activate" `
   -ContentType "application/json" `
-  -Body '{"password":"RH-2026-001","machine":"test-machine"}'
+  -Body '{"password":"RH-2026-001-mj45","machine":"test-machine"}'
 ```
 
 **cmd / bash**
 
 ```bash
-curl -X POST https://你的地址/release/license/activate \
+curl -X POST https://你的地址/activate \
   -H "Content-Type: application/json" \
-  -d "{\"password\":\"RH-2026-001\",\"machine\":\"test-machine\"}"
+  -d "{\"password\":\"RH-2026-001-mj45\",\"machine\":\"test-machine\"}"
 ```
 
 **最保险（任何 shell 都行）**：把 JSON 存成 `payload.json`，再
 
 ```bash
-curl -X POST https://你的地址/release/license/activate -H "Content-Type: application/json" --data-binary "@payload.json"
+curl -X POST https://你的地址/activate -H "Content-Type: application/json" --data-binary "@payload.json"
 ```
 
 三种返回的含义：
@@ -192,9 +175,11 @@ curl -X POST https://你的地址/release/license/activate -H "Content-Type: app
 | 返回 | 含义 | 处理 |
 | --- | --- | --- |
 | `{"ok":true,"token":"..."}` | 成功 | 继续第 5 节 |
-| `{"ok":false,"error":"密码不存在"}` | 密码表里没这个密码 | 检查 `passwords.json` 是否真的传上去了 |
+| `{"ok":false,"error":"密码不存在"}` | 密码表里没这个密码 | 检查 `passwords.json` 是否真的打进了 zip |
 | `{"ok":false,"error":"服务端没配 LICENSE_SECRET"}` | 环境变量没生效 | 重新保存配置，等 1 分钟再试 |
-| 502 / 504 | 触发器路径或方法不对 | 路径要 `/license/activate`，方法要 POST |
+| 404 | 函数 URL 没绑好 | 函数 → 触发管理里确认有一条 HTTP 触发器 |
+| 502 / 504 | 函数超时或报错 | 看函数日志；超时调到 5 秒 |
+
 
 ---
 
@@ -250,7 +235,7 @@ curl -X POST https://你的地址/release/license/activate -H "Content-Type: app
 
 ```ini
 # 授权服务地址；留空 = 不校验（自己开发时用）
-LICENSE_SERVER=https://service-xxx.gz.apigw.tencentcs.com/release/license
+LICENSE_SERVER=https://1463907213-xxxxxxxx.ap-guangzhou.tencentscf.com
 ```
 
 打包：
@@ -284,10 +269,10 @@ scripts\build.bat
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 弹框一直说"本机还没有授权" | `LICENSE_SERVER` 没填或拼错 | 检查 `配置.ini`，地址结尾不要带 `/` |
-| `HTTP 404` / `502` | 触发器路径不是 `/license/activate`，或方法不是 POST | 改触发器，路径要带 `/activate` 这一段 |
-| `HTTP 404`，但函数日志里没有这次调用 | 网关没匹配上，请求根本没进函数 | 网关路径必须和客户端请求路径一致：客户端调 `/license/activate`，网关就得挂 `/license/activate` |
-| 返回 `{"ok":false,"error":"未知接口"}` | 请求进到函数了，但路径最后一段不是 `activate`/`verify`/`health` | 检查是否把网关路径挂成了 `/license`，导致末段变成 `license` |
-| `HTTP 401` / `403` | 网关开了鉴权 | 改成"免鉴权" |
+| `HTTP 404` | 函数 URL 没绑好，或路径末段不是 `activate`/`verify`/`health` | 函数 → 触发管理确认有 HTTP 触发器 |
+| `HTTP 404`，但函数日志里没有这次调用 | 请求根本没进函数 | 触发器被停用，或域名拼错 |
+| 返回 `{"ok":false,"error":"未知接口"}` | 请求进到函数了，但路径末段不认识 | 地址末尾多了/少了一段，base 用域名即可 |
+| `HTTP 401` / `403` | 触发器开了鉴权 | 改成"免鉴权 / NONE" |
 | `服务端没配 LICENSE_SECRET` | 环境变量没保存成功 | 重新保存，等 1 分钟 |
 | `密码不存在` | 密码表没传上去 / 拼错 | 控制台看 `passwords.json` 是否存在 |
 | `token 签名不对` | 换过 `LICENSE_SECRET` | 用户删掉本地 `license.json` 重新激活 |
@@ -299,7 +284,8 @@ scripts\build.bat
 ## 7. 成本
 
 - 云函数：每月前 40 万 GB·秒 + 100 万次调用免费额度内，**这套 100 人用也基本是 ¥0**
-- API 网关：每月前 100 万次调用免费
+- 函数 URL：不额外计费（API 网关已停售，本来也不用买了）
+- 日志服务 CLS：按量计费，函数日志量极小，通常在免费额度内
 - 结论：**不花钱**，除非你做到很大规模
 
 ---

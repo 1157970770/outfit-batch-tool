@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent))
 
 from app import config as appconfig  # noqa: E402
+from app import license as licensemod  # noqa: E402
 from app.core import (  # noqa: E402
     DEFAULT_PROMPT, GROUP_SIZE, TOTAL_TEMPLATES, BatchRunner, BatchSpec,
     EngineError, check_account, load_manifest, plan_batch, unique_batch_dir,
@@ -37,7 +38,7 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.1"
+APP_VERSION = "0.2"
 
 
 # ---------------------------------------------------------------------------
@@ -493,28 +494,53 @@ class MainWindow(QMainWindow):
 
         header = QWidget()
         header.setObjectName("header")
-        head_row = QHBoxLayout(header)
-        head_row.setContentsMargins(18, 12, 18, 12)
+        head_col = QVBoxLayout(header)
+        head_col.setContentsMargins(18, 10, 18, 10)
+        head_col.setSpacing(6)
+
+        head_row = QHBoxLayout()
         title = QLabel(APP_TITLE)
         title.setObjectName("title")
-        self.manifest_label = QLabel("模板清单：加载中…")
-        self.manifest_label.setObjectName("manifest")
         reload_btn = QPushButton("重载配置")
         reload_btn.setObjectName("ghost")
         reload_btn.setToolTip("改完 配置.ini 点这里，不用重启")
         reload_btn.clicked.connect(self._reload_config)
         config_btn = QPushButton("配置文件")
         config_btn.setObjectName("ghost")
-        config_btn.setToolTip("打开 配置.ini：填 RH_API_KEY / MANIFEST / COS")
+        config_btn.setToolTip("打开 配置.ini：填 RH_API_KEY / MANIFEST / COS / 授权地址")
         config_btn.clicked.connect(self._open_config_file)
         head_row.addWidget(title)
         head_row.addStretch(1)
-        head_row.addWidget(self.manifest_label)
-        head_row.addSpacing(12)
         head_row.addWidget(reload_btn)
         head_row.addSpacing(6)
         head_row.addWidget(config_btn)
+
+        # 状态条：四个灯泡，一眼看出还缺什么
+        status_row = QHBoxLayout()
+        status_row.setSpacing(14)
+        self.badge_key = QLabel()
+        self.badge_manifest = QLabel("模板清单：加载中…")
+        self.badge_license = QLabel()
+        self.badge_cos = QLabel()
+        self.manifest_label = self.badge_manifest   # 兼容旧引用
+        for label in (self.badge_key, self.badge_manifest, self.badge_license, self.badge_cos):
+            label.setObjectName("badge")
+        status_row.addWidget(self.badge_key)
+        status_row.addWidget(self.badge_manifest)
+        status_row.addWidget(self.badge_license)
+        status_row.addWidget(self.badge_cos)
+        status_row.addStretch(1)
+
+        head_col.addLayout(head_row)
+        head_col.addLayout(status_row)
         layout.addWidget(header)
+
+        # 缺必填项时的提示条（不阻塞操作，只是提醒）
+        self.banner = QLabel()
+        self.banner.setObjectName("banner")
+        self.banner.setWordWrap(True)
+        self.banner.hide()
+        layout.addWidget(self.banner)
 
         self.tabs = QTabWidget()
         self.small_panel = BatchPanel(self.cfg, small=True, window=self)
@@ -529,6 +555,50 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.setStyleSheet(STYLE)
+        self._refresh_status()
+
+    # ---- 状态条 ----
+    def _refresh_status(self):
+        """四个状态：RH Key / 清单 / 授权 / COS。只读配置与本地缓存，不联网。"""
+        cfg = self.cfg
+
+        def badge(label: QLabel, text: str, tone: str) -> None:
+            label.setText(text)
+            label.setProperty("tone", tone)
+            label.style().unpolish(label)
+            label.style().polish(label)
+
+        key_ok = bool((cfg.get("RH_API_KEY") or "").strip())
+        badge(self.badge_key, "RH Key：已配置" if key_ok else "RH Key：未配置",
+              "ok" if key_ok else "bad")
+
+        cos_on = appconfig.truthy(cfg.get("COS_ENABLED", ""))
+        badge(self.badge_cos, "COS：开" if cos_on else "COS：关", "ok" if cos_on else "idle")
+
+        server = (cfg.get("LICENSE_SERVER") or "").strip()
+        if not server:
+            badge(self.badge_license, "授权：未启用", "idle")
+        else:
+            cache = licensemod.load_cache()
+            expire_at = int(cache.get("expire_at") or 0)
+            if cache.get("token") and expire_at > time.time():
+                day = time.strftime("%Y-%m-%d", time.localtime(expire_at))
+                badge(self.badge_license, f"授权：至 {day}", "ok")
+            else:
+                badge(self.badge_license, "授权：待激活", "warn")
+
+        missing = []
+        if not key_ok:
+            missing.append("RH_API_KEY")
+        if not (cfg.get("MANIFEST") or "").strip():
+            missing.append("MANIFEST")
+        if missing:
+            self.banner.setText(
+                f"⚠ 还差 {'、'.join(missing)}：点右上角「配置文件」填写，保存后点「重载配置」，不用重启。"
+            )
+            self.banner.show()
+        else:
+            self.banner.hide()
 
     # ---- 清单 ----
     def _load_manifest_async(self):
@@ -547,11 +617,13 @@ class MainWindow(QMainWindow):
         self.small_panel.apply_templates(templates)
         self.big_panel.apply_templates(templates)
         self.manifest_label.setText(f"模板清单：{len(templates)} 个")
+        self._refresh_status()
 
     def _manifest_failed(self, msg: str):
         self.templates = []
         self.manifest_label.setText("模板清单：加载失败")
         self._log(f"模板清单加载失败：{msg}")
+        self._refresh_status()
 
     # ---- 状态 ----
     def set_busy(self, busy: bool):
@@ -577,6 +649,7 @@ class MainWindow(QMainWindow):
         for panel in (self.small_panel, self.big_panel):
             panel.cfg = self.cfg
         self._load_manifest_async()
+        self._refresh_status()
 
         missing = [name for name in ("RH_API_KEY", "MANIFEST") if not (self.cfg.get(name) or "").strip()]
         hint = f"\n\n还缺：{'、'.join(missing)}（在 配置.ini 里填）" if missing else ""
@@ -595,6 +668,12 @@ QWidget { font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px; color:
 #header { background: #f5f5f7; border-bottom: 1px solid #e3e3e6; }
 #title { font-size: 15px; font-weight: 600; }
 #manifest { color: #6b6b70; }
+#badge { color: #6b6b70; font-size: 12px; }
+#badge[tone="ok"] { color: #0a7d32; font-weight: 600; }
+#badge[tone="bad"] { color: #b3261e; font-weight: 600; }
+#badge[tone="warn"] { color: #a86400; font-weight: 600; }
+#badge[tone="idle"] { color: #86868b; }
+#banner { background: #fff8e6; border-bottom: 1px solid #f0dfae; color: #8a5a00; padding: 8px 18px; font-size: 12px; }
 #footer { color: #86868b; padding: 6px 18px; border-top: 1px solid #ececef; }
 QPushButton { border: 1px solid #d6d6da; border-radius: 6px; padding: 6px 14px; background: #ffffff; }
 QPushButton:hover { background: #f2f2f5; }
