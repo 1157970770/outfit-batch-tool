@@ -24,7 +24,7 @@ passwords.json  ──部署──▶  POST /activate  {password, machine}
 | `server/passwords.example.json` | 密码表模板 |
 | `app/license.py` | 客户端：激活、缓存、机器码 |
 | `app/startup.py` | 启动门禁（弹框输入密码） |
-| `tests/test_license.py` | 10 项自动化验证 |
+| `tests/test_license.py` | 11 项自动化验证 |
 
 ---
 
@@ -44,14 +44,14 @@ python3 server\license_api.py --serve 8099
 # 终端 2：造一个密码、验一次（PowerShell 用这个，别用 curl，见下方说明）
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8099/activate" `
   -ContentType "application/json" `
-  -Body '{"password":"RH-2026-001","machine":"test-machine"}'
+  -Body '{"password":"RH-2026-001-mj45","machine":"test-machine"}'
 ```
 
-返回 `ok=True` 和一个 136 字符的 token 就说明服务端没问题。
-返回 `密码不存在`，说明 `passwords.json` 里没有 `RH-2026-001`（模板里默认有，检查路径）。
+返回 `ok=True` 和一个约 130 字符的 token 就说明服务端没问题。
+返回 `密码不存在`，说明 `passwords.json` 里没有这个密码（用 `server/passwords.json` 里实际存在的那个，别照抄示例）。
 
 > ⚠️ **PowerShell 里不要用 `curl -d '{"password":"..."}'`**：PowerShell 5.1 会吃掉 JSON 里的双引号，
-> 服务器收到的是 `{password:RH-2026-001,...}`，于是报 `body 不是 JSON`。
+> 服务器收到的是 `{password:...}`，于是报 `body 不是 JSON`。
 > 要么用上面的 `Invoke-RestMethod`，要么把 JSON 写进文件再 `curl --data-binary "@payload.json"`。
 
 > 这一步只验证服务端。客户端联调放第 5 节。
@@ -94,8 +94,9 @@ Windows 下打包：选中这两个文件 → 右键 → 压缩为 zip（**不�
 | 变量名 | 值 | 说明 |
 | --- | --- | --- |
 | `LICENSE_SECRET` | 一串 40 位以上随机字符 | **必改**，泄露 = 别人能自签 token |
-| `LICENSE_TTL_DAYS` | `14` | token 有效期；想吊销更快就设 `1` |
 | `LICENSE_PASSWORDS` | `/var/user/passwords.json` | 密码表在代码目录里的路径 |
+
+> `LICENSE_TTL_DAYS` 已废弃：现在只有一个到期日，就是密码表里的 `expires`；`/verify` 每次都会回表复查，密码到期 = 下次启动即被拒。
 
 生成随机串（PowerShell）：
 
@@ -190,9 +191,9 @@ curl -X POST https://你的地址/activate -H "Content-Type: application/json" -
 ```json
 {
   "passwords": {
-    "RH-2026-001": { "note": "张三 / 设计部",   "expires": "2027-12-31", "revoked": false },
-    "RH-2026-002": { "note": "李四 / 外包团队", "expires": "2026-12-31", "revoked": false },
-    "RH-2026-003": { "note": "王五（已离职）",   "expires": "2027-12-31", "revoked": true  }
+    "RH-2026-004-a1b2": { "note": "张三 / 设计部",   "expires": "2027-12-31", "revoked": false },
+    "RH-2026-005-c3d4": { "note": "李四 / 外包团队", "expires": "2026-12-31", "revoked": false },
+    "RH-2026-006-e5f6": { "note": "王五（已离职）",   "expires": "2027-12-31", "revoked": true  }
   }
 }
 ```
@@ -309,8 +310,8 @@ scripts\build.bat
 | 限制 | 影响 | 缓解 |
 | --- | --- | --- |
 | 不防逆向 | 有人改 exe 跳过校验 | 只防"随手转发"，防不了专业破解 |
-| 吊销有延迟 | 最多一个 token 有效期 | `LICENSE_TTL_DAYS` 设 1~7 |
-| 断网可用 | 已激活的机器可离线跑到 token 到期 | 同上，把有效期调短 |
+| 吊销有延迟 | 下次启动即生效（`/verify` 每次读表） | 无需额外配置 |
+| 断网可用 | 上次核验 7 天内放行，超过要求联网 | 窗口写在 `app/license.py` 的 `GRACE_DAYS` |
 | 密码表明文 | 泄露 = 所有人都能用 | 别提交 Git；只放函数里 |
 | 没有用量统计 | 不知道谁跑了多少条 | 需要时在 `/activate` 里加一行写 COS 日志 |
 
