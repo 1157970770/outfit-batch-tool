@@ -326,6 +326,27 @@ class BatchRunner:
         self._emit("finished", summary=summary)
         return summary
 
+    def _prepare_templates(self) -> None:
+        """清单里写的是对象 key（私有桶）时，开工前统一签成有效 URL。
+
+        签名有效期 24 小时：一批 100 条通常 1 小时内跑完，够用；
+        又不用把桶改成公有读，模板不会被白拿。
+        """
+        pending = [t for t in self.spec.templates if not t.get("url") and t.get("key")]
+        if not pending:
+            return
+        if self.spec.storage is None:
+            raise EngineError(
+                "模板清单用的是 COS 对象 key，需要签名才能给模型访问，"
+                "但当前没有启用 COS（配置.ini 里 COS_ENABLED=false）。"
+            )
+        self.log(f"为 {len(pending)} 个模板生成签名链接（24 小时有效）")
+        for tpl in pending:
+            try:
+                tpl["url"] = self.spec.storage.sign_url(tpl["key"], 24 * 3600)
+            except Exception as exc:  # noqa: BLE001
+                raise EngineError(f"模板 {tpl['id']} 签名失败：{exc}") from None
+
     def _ensure_image(self) -> None:
         with self._upload_lock:
             if self._image_url:

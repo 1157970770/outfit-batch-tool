@@ -71,7 +71,10 @@ def main() -> int:
         print("没有找到视频文件（.mp4/.mov/.m4v）", file=sys.stderr)
         return 1
 
-    base = args.base_url.rstrip("/")
+    base = (args.base_url or "").rstrip("/")
+    if args.mode == "key" and not args.prefix:
+        args.prefix = base.rsplit("/", 1)[-1] if base else ""
+    prefix = (args.prefix or "").strip("/")
     poster_dir = Path(args.posters) if args.posters else None
     entries = []
     warnings = []
@@ -92,16 +95,21 @@ def main() -> int:
         if poster_dir:
             dest = poster_dir / f"{tid}.jpg"
             if make_poster(path, dest):
-                poster_url = f"{base}/{args.posters.split('/')[-1]}/{dest.name}"
+                poster_url = (f"{prefix}/{dest.parent.name}/{dest.name}" if args.mode == "key"
+                              else f"{base}/{args.posters.split('/')[-1]}/{dest.name}")
 
-        entries.append({
+        entry = {
             "id": tid,
             "name": path.stem,
-            "url": f"{base}/{path.name}",
             "duration": duration,
             "size_mb": size_mb,
             "poster": poster_url,
-        })
+        }
+        if args.mode == "key":
+            entry["key"] = f"{prefix}/{path.name}" if prefix else path.name
+        else:
+            entry["url"] = f"{base}/{path.name}"
+        entries.append(entry)
 
     out = Path(args.out)
     out.write_text(json.dumps({"version": 1, "templates": entries}, ensure_ascii=False, indent=2), encoding="utf-8")
