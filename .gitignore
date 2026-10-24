@@ -37,3 +37,6 @@ cos.json
 
 # 临时探针脚本（下划线开头）
 _*.py
+
+# 真实密码表（含分配出去的密码，绝不提交）
+server/passwords.json
