@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -39,6 +40,20 @@ class StorageError(RuntimeError):
     """存储层统一异常，message 直接面向用户。"""
 
 
+def _is_expired(stamp: str) -> bool:
+    """判断 tccli 的 expiresAt（ISO8601 或 epoch 秒）是否已过期；判断不了就当没过期。"""
+    stamp = (stamp or "").strip()
+    if not stamp:
+        return False
+    try:
+        if stamp.isdigit():
+            return float(stamp) <= time.time()
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return dt.timestamp() <= time.time()
+    except (ValueError, OSError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
@@ -52,6 +67,7 @@ class StorageConfig:
     region: str = ""                # 形如 ap-guangzhou / ap-shanghai
     secret_id: str = ""
     secret_key: str = ""
+    token: str = ""                 # STS 临时凭证 Token（OAuth / AssumeRole 时需要）
     prefix: str = ""                # 对象前缀，例如 prod 或 test
     domain: str = ""                # CDN 加速域名，留空用 COS 默认域名
     scheme: str = "https"
@@ -68,6 +84,7 @@ class StorageConfig:
             "region": "COS_REGION",
             "secret_id": "COS_SECRET_ID",
             "secret_key": "COS_SECRET_KEY",
+            "token": "COS_SECURITY_TOKEN",
             "prefix": "COS_PREFIX",
             "domain": "COS_DOMAIN",
             "scheme": "COS_SCHEME",
@@ -85,6 +102,54 @@ class StorageConfig:
             values["enabled"] = False
         values.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**values)
+
+    # -- 本机已有凭证（不填密钥也能用） --
+    @classmethod
+    def from_local_profile(cls, profile: str = "", **overrides: Any) -> "StorageConfig":
+        """按优先级凑配置：环境变量 → ~/.cos/credentials.json → ~/.tccli/<profile>.credential。
+
+        场景：这台机器上已经 `tccli auth login` 过、或放好了 credentials.json，
+        桌面版就不该再逼用户手抄一遍密钥。
+        """
+        cfg = cls.from_env(**overrides)
+        if cfg.provider == "local" or (cfg.secret_id and cfg.secret_key):
+            return cfg
+
+        home = Path.home()
+
+        cos_file = home / ".cos" / "credentials.json"
+        if cos_file.exists():
+            try:
+                data = json.loads(cos_file.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise StorageError(f"{cos_file} 读不了：{exc}") from None
+            cfg.secret_id = cfg.secret_id or str(data.get("secret_id") or "")
+            cfg.secret_key = cfg.secret_key or str(data.get("secret_key") or "")
+            cfg.token = cfg.token or str(data.get("token") or "")
+            cfg.region = cfg.region or str(data.get("region") or "")
+            cfg.bucket = cfg.bucket or str(data.get("bucket") or "")
+
+        if cfg.secret_id and cfg.secret_key:
+            return cfg
+
+        # tccli OAuth 临时凭证（约 2 小时，需定期重新登录）
+        prof = profile or os.environ.get("COS_TCCLI_PROFILE", "").strip() or "agent1"
+        cred_file = home / ".tccli" / f"{prof}.credential"
+        if cred_file.exists():
+            try:
+                data = json.loads(cred_file.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise StorageError(f"{cred_file} 读不了：{exc}") from None
+            expires = data.get("expiresAt") or data.get("expiredTime")
+            if expires and _is_expired(str(expires)):
+                raise StorageError(
+                    f"tccli 凭证（profile={prof}）已过期，先跑一次：tccli auth login --profile {prof}"
+                )
+            cfg.secret_id = str(data.get("secretId") or "")
+            cfg.secret_key = str(data.get("secretKey") or "")
+            cfg.token = str(data.get("token") or "")
+
+        return cfg
 
     # -- 校验 --
     def validate(self) -> None:
@@ -324,6 +389,7 @@ class CosStorage(Storage):
                 Region=self.cfg.region,
                 SecretId=self.cfg.secret_id,
                 SecretKey=self.cfg.secret_key,
+                Token=self.cfg.token or None,   # STS 临时凭证（tccli OAuth / AssumeRole）
                 Scheme=self.cfg.scheme,
                 Timeout=60,
             )

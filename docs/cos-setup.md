@@ -114,6 +114,25 @@ set COS_SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxx
 
 密钥会明文存到 `%APPDATA%\RHOutfitTool\config.json`。这是本机程序，可接受；但如果这台机器多人共用，请改用方式 A。
 
+### 方式 C：什么都不填，复用本机已有凭证（最省事）
+
+如果这台机器上已经配过 COS（比如 WorkBuddy 那套 `tccli auth login`，或放了 `~/.cos/credentials.json`），
+界面里**只需勾上「启用 COS 归档」+ 填桶名**，密钥留空即可。
+
+程序按这个优先级自动找凭证：
+
+```
+① 环境变量  COS_SECRET_ID / COS_SECRET_KEY（+ COS_SECURITY_TOKEN）
+② ~/.cos/credentials.json      {secret_id, secret_key, token, region, bucket}
+③ ~/.tccli/<profile>.credential   tccli OAuth 临时凭证（约 2 小时，带 token）
+```
+
+- profile 默认读 `COS_TCCLI_PROFILE`，没设就用 `agent1`；过期会直接提示 `tccli auth login --profile agent1`。
+- 第 ③ 种是 STS 临时凭证，程序会在 `CosConfig` 里带 `Token`，能正常签名。
+- 优先级设计成「长期密钥 > 临时密钥」，是因为 OAuth 过期后文件仍残留，放最后才不会拿到失效凭证。
+
+验证：设置里点 **测试连接**，`✓ 读写正常` 就成了，全程不用手抄 SecretKey。
+
 ---
 
 ## 5. 自检（先跑这个，再谈批量）

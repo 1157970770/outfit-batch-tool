@@ -77,15 +77,24 @@ def build_storage(cfg: dict):
     """按界面配置造存储实例；未启用返回 None。配置不合法时抛 StorageError。"""
     if not cfg.get("cos_enabled"):
         return None
-    return open_storage(StorageConfig(
-        provider="cos",
-        bucket=(cfg.get("cos_bucket") or "").strip(),
-        region=(cfg.get("cos_region") or "").strip(),
-        secret_id=(cfg.get("cos_secret_id") or "").strip(),
-        secret_key=(cfg.get("cos_secret_key") or "").strip(),
-        prefix=(cfg.get("cos_prefix") or "").strip(),
-        domain=(cfg.get("cos_domain") or "").strip(),
-    ))
+    manual = {
+        "bucket": (cfg.get("cos_bucket") or "").strip(),
+        "region": (cfg.get("cos_region") or "").strip(),
+        "secret_id": (cfg.get("cos_secret_id") or "").strip(),
+        "secret_key": (cfg.get("cos_secret_key") or "").strip(),
+        "prefix": (cfg.get("cos_prefix") or "").strip(),
+        "domain": (cfg.get("cos_domain") or "").strip(),
+    }
+    if not manual["secret_id"]:
+        # 界面没填密钥 → 用本机已有凭证，省得每人再抄一遍
+        resolved = StorageConfig.from_local_profile(**manual)
+        if not (resolved.secret_id and resolved.secret_key):
+            raise StorageError(
+                "启用了 COS 归档，但没填密钥，本机也没找到可用凭证。"
+                "填 SecretId/SecretKey，或先跑 tccli auth login --profile agent1"
+            )
+        return open_storage(resolved)
+    return open_storage(StorageConfig(provider="cos", **manual))
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +246,24 @@ class SettingsDialog(QDialog):
 
     # ---- 对象存储 ----
     def _cos_config(self) -> StorageConfig:
-        return StorageConfig(
-            provider="cos",
-            bucket=self.cos_bucket.text().strip(),
-            region=self.cos_region.text().strip(),
-            secret_id=self.cos_id.text().strip(),
-            secret_key=self.cos_key.text().strip(),
-            prefix=self.cos_prefix.text().strip(),
-            domain=self.cos_domain.text().strip(),
-        )
+        manual = {
+            "bucket": self.cos_bucket.text().strip(),
+            "region": self.cos_region.text().strip(),
+            "secret_id": self.cos_id.text().strip(),
+            "secret_key": self.cos_key.text().strip(),
+            "prefix": self.cos_prefix.text().strip(),
+            "domain": self.cos_domain.text().strip(),
+        }
+        # 没填密钥就退回本机已有凭证（环境变量 / ~/.cos/credentials.json / tccli OAuth）
+        if not manual["secret_id"]:
+            cfg = StorageConfig.from_local_profile(**manual)
+            if not (cfg.secret_id and cfg.secret_key):
+                raise StorageError(
+                    "没填密钥，本机也没找到可用凭证。"
+                    "可以填 SecretId/SecretKey，或先跑 tccli auth login --profile agent1"
+                )
+            return cfg
+        return StorageConfig(provider="cos", **manual)
 
     def _test_cos(self):
         """真写一个几十字节的探针对象，跑通 写→读→删 才算配置正确。"""
