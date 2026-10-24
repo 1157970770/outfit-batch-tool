@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""授权客户端：密码 → token → 本机缓存。
+
+规则（刻意做得简单）：
+  · 没配 `license_server` 就完全放行（不影响本地开发和你自己用）；
+  · 配了就必须有有效 token 才能进主界面；
+  · token 绑定机器码，拷到别的电脑上无效；
+  · 启动时联网校验一次：服务端说停用就立刻要求重输；网络不通则按 token 有效期离线放行。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "RHOutfitTool"
+CACHE_PATH = CONFIG_DIR / "license.json"
+
+
+def machine_id() -> str:
+    """稳定但不泄露硬件信息的机器指纹。"""
+    parts: list[str] = []
+    try:
+        import winreg  # 仅 Windows 有，取 MachineGuid 最稳
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+            parts.append(str(winreg.QueryValueEx(key, "MachineGuid")[0]))
+    except Exception:  # noqa: BLE001
+        parts.append(str(uuid.getnode()))
+    parts.append(socket.gethostname())
+    raw = "|".join(parts).encode("utf-8", "replace")
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _post(server: str, path: str, payload: dict, timeout: int = 8) -> dict:
+    url = server.rstrip("/") + path
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return {"ok": False, "error": f"HTTP {exc.code}"}
+    except urllib.error.URLError as exc:
+        raise ConnectionError(str(exc.reason)) from None
+
+
+def load_cache() -> dict:
+    if CACHE_PATH.exists():
+        try:
+            return json.loads(CACHE_PATH.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_cache(data: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_cache() -> None:
+    CACHE_PATH.unlink(missing_ok=True)
+
+
+def activate(server: str, password: str) -> dict:
+    """用密码换 token，成功即写入本机缓存。"""
+    machine = machine_id()
+    result = _post(server, "/activate", {"password": password.strip(), "machine": machine})
+    if not result.get("ok"):
+        raise ValueError(result.get("error") or "激活失败")
+    save_cache({
+        "server": server.rstrip("/"),
+        "machine": machine,
+        "token": result["token"],
+        "expire_at": result.get("expire_at"),
+        "note": result.get("note", ""),
+        "activated": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    return result
+
+
+def status(server: str) -> tuple[bool, str]:
+    """(能否使用, 说明)。不改缓存以外的任何东西。"""
+    cache = load_cache()
+    if not cache.get("token") or cache.get("server", "").rstrip("/") != server.rstrip("/"):
+        return False, "本机还没有授权，请输入分配的密码"
+
+    expire_at = int(cache.get("expire_at") or 0)
+    if expire_at and expire_at < time.time():
+        return False, "授权已过期，请重新输入密码"
+
+    # 联网复核：服务端说停用就立刻失效；连不上则按有效期离线放行
+    try:
+        result = _post(server, "/verify", {"token": cache["token"], "machine": machine_id()}, timeout=6)
+    except ConnectionError:
+        days = max(0, int((expire_at - time.time()) / 86400)) if expire_at else 0
+        return True, f"当前离线，按缓存放行（剩余约 {days} 天）"
+
+    if result.get("ok"):
+        return True, f"授权有效（到期 {time.strftime('%Y-%m-%d', time.localtime(int(result.get('expire_at') or expire_at)))}）"
+
+    clear_cache()
+    return False, result.get("error") or "授权校验失败"

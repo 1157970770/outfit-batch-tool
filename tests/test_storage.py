@@ -43,6 +43,9 @@ class FakeServiceError(Exception):
         self.message = message
 
 
+_UNSET = object()   # 区分「没传 Marker」和「传了 Marker=None」
+
+
 class FakeCosClient:
     def __init__(self):
         self.objects: dict[str, tuple[bytes, str]] = {}
@@ -74,15 +77,19 @@ class FakeCosClient:
         data, ctype = self.objects[Key]
         return {"Content-Length": str(len(data)), "ETag": '"fake-etag"', "Content-Type": ctype}
 
-    def get_presigned_url(self, Bucket, Key, Expired=3600):  # noqa: N803
+    def get_presigned_url(self, Bucket, Key, Expired=3600, Method="GET"):  # noqa: N803
+        # 真实 SDK（cos-python-sdk-v5 新版）要求显式传 Method，这里同样强制
         return (f"https://{Bucket}.cos.ap-guangzhou.myqcloud.com/{Key}"
-                f"?q-signature=fake&expires={Expired}")
+                f"?q-signature=fake&expires={Expired}&method={Method}")
 
     def delete_object(self, Bucket, Key):  # noqa: N803
         self.objects.pop(Key, None)
         return {}
 
-    def list_objects(self, Bucket, Prefix="", MaxKeys=1000, Marker=None):  # noqa: N803
+    def list_objects(self, Bucket, Prefix="", MaxKeys=1000, Marker=_UNSET):  # noqa: N803
+        # 真实 SDK 收到 Marker=None 会签出空 query 导致 403，storage 层必须省略该参数
+        if Marker is None:
+            raise AssertionError("不应把 Marker=None 传给 list_objects")
         keys = sorted(k for k in self.objects if k.startswith(Prefix))
         return {"Contents": [{"Key": k} for k in keys[:MaxKeys]], "IsTruncated": "false"}
 

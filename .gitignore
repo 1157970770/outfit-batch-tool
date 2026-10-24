@@ -29,5 +29,8 @@ desktop.ini
 config.json
 cos.json
 
+# 程序运行配置（含 RH_API_KEY，绝不提交）
+配置.ini
+
 # 测试临时目录
 .tmp/

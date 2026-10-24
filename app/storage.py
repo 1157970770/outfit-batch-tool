@@ -481,7 +481,7 @@ class CosStorage(Storage):
         try:
             url = _with_retry(
                 lambda: self.client.get_presigned_url(
-                    Bucket=self.cfg.bucket, Key=key, Expired=expiry,
+                    Bucket=self.cfg.bucket, Key=key, Expired=expiry, Method="GET",
                 ),
                 "生成签名链接",
             )
@@ -508,11 +508,16 @@ class CosStorage(Storage):
         keys: list[str] = []
         marker: str | None = None
         while len(keys) < limit:
+            params: dict[str, Any] = {
+                "Bucket": self.cfg.bucket,
+                "Prefix": base,
+                "MaxKeys": min(1000, limit - len(keys)),
+            }
+            # Marker=None 会被 SDK 签名成空 query，触发 SignatureDoesNotMatch，必须省略
+            if marker:
+                params["Marker"] = marker
             resp = _with_retry(
-                lambda: self.client.list_objects(
-                    Bucket=self.cfg.bucket, Prefix=base,
-                    MaxKeys=min(1000, limit - len(keys)), Marker=marker,
-                ),
+                lambda: self.client.list_objects(**params),
                 f"列举 {base or '/'}",
             )
             for item in resp.get("Contents") or []:
