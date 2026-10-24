@@ -38,11 +38,11 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.5"
+APP_VERSION = "0.6"
 
 # 内置授权地址：配置文件里留空就用它，避免"删掉那行 = 免授权"。
 # 部署好授权服务后，把地址填到这里并重新打包。
-EMBEDDED_LICENSE_SERVER = ""
+EMBEDDED_LICENSE_SERVER = "https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com"
 
 
 # ---------------------------------------------------------------------------

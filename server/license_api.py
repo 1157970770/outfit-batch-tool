@@ -114,7 +114,14 @@ def verify_token(token: str, machine: str) -> dict:
     deadline = _deadline(entry.get("expires"))
     if deadline is not None and deadline < time.time():
         raise LicenseError("授权已到期，请联系管理员续期")
-    return {"expire_at": int(data.get("e", 0)), "note": entry.get("note", "")}
+
+    out = {"expire_at": int(data.get("e", 0)), "note": entry.get("note", "")}
+    # 管理员续期后，表里的到期日比旧票更晚 → 顺手换一张新票，用户不必重新输密码
+    if deadline is not None and deadline > int(data.get("e", 0)):
+        fresh = issue_token(str(data.get("p")), machine, deadline)
+        out["expire_at"] = fresh["expire_at"]
+        out["renewed_token"] = fresh["token"]
+    return out
 
 
 # ---------------------------------------------------------------------------

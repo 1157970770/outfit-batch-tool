@@ -146,8 +146,9 @@
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `LICENSE_SECRET` | ✅ | HMAC 密钥，≥48 位随机 |
-| `LICENSE_TTL_DAYS` | — | 默认 14 |
 | `LICENSE_PASSWORDS` | ✅（SCF） | `/var/user/passwords.json` |
+
+> 有效期只有一个来源：密码表里的 `expires`（新增默认 31 天）。`LICENSE_TTL_DAYS` 已废弃。
 
 ---
 
@@ -244,5 +245,6 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 | [cos-setup.md](cos-setup.md) | COS 接入手册（建桶/密钥/生命周期/CDN） |
 | [license-setup.md](license-setup.md) | 授权方案说明与上线手册 |
 | [license-handoff.md](license-handoff.md) | **交给执行方的完整交接文档** |
+| [license-integration.md](license-integration.md) | **客户端 ↔ 授权服务对接文档**（地址填哪、怎么验收、排错） |
 | [batch/README.md](../batch/README.md) | 旧链路：清单→100 条任务 |
 | [tests/README.md](../tests/README.md) | 离线联调（假服务） |

@@ -141,6 +141,11 @@ def status(server: str) -> tuple[bool, str]:
         return False, f"需要联网核验一次（已超过 {GRACE_DAYS} 天没能连上授权服务器）"
 
     if result.get("ok"):
+        # 管理员续期后服务端会顺手换新票，这里直接收下，用户不用重输密码
+        if result.get("renewed_token"):
+            cache["token"] = result["renewed_token"]
+            if result.get("expire_at"):
+                cache["expire_at"] = result["expire_at"]
         cache["last_ok"] = time.time()
         save_cache(cache)
         when = time.strftime("%Y-%m-%d", time.localtime(int(result.get("expire_at") or expire_at)))

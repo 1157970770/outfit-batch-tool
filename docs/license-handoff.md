@@ -384,6 +384,17 @@ python scripts/license_passwords.py expire RH-2026-001-mj45 never        # 改�
 
 > 这是**内部管理工具**，不要跟着软件发给客户（`build.ps1` 只打包 `run_app.py`，不含 `scripts/`）。
 
+**启动方式**：双击 `scripts\密码管理器.bat`。它会在 `python3 / py / python` 里挑出**真正装了 PySide6** 的那个，并打印 `Using Python: xxx`。
+真正的实现是 `scripts\password_manager.py`（ASCII 文件名），`scripts\密码管理器.py` 只是个三行的兼容入口。
+
+**闪退排查**：
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 窗口一闪就没了 | bat 挑到了微软商店的假 `python`（WindowsApps 存根，返回 9009） | 用现在的 `.bat`，它会打印选中的解释器；或直接 `python3 scripts\password_manager.py` |
+| 提示「这个 Python 里没有 PySide6」 | 双击 `.py` 关联到了没装依赖的解释器 | 照提示 `pip install PySide6`，或改用 `.bat` |
+| 其它崩溃 | — | 看 `%TEMP%\密码管理器_error.log`（完整的 Python 报错栈） |
+
 
 ---
 
