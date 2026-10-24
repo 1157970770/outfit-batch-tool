@@ -4,9 +4,10 @@
 
 ## 桌面软件（最终形态，v0.1 已打包）
 
-**[换装批量生产器-v0.1.zip](dist/换装批量生产器-v0.1.zip)**（36.7 MB，解压后双击文件夹里的 exe）
+**下载：到 [Releases](../../releases) 里取 `换装批量生产器-v0.1.zip`**（36.7 MB，解压后双击文件夹里的 exe）
 
 > 文件夹版：exe 旁边必须有 `_internal\`，分发时发整个 zip，别只发 exe。
+> 自己重新打包：双击 `scripts\build.bat`（自动构建 + 自检 + 生成带日期的 zip）。
 
 ![界面](docs/ui-preview.png)
 
