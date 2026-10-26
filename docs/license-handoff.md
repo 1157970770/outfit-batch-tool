@@ -4,6 +4,10 @@
 > 目标：把 `license_api.py` 部署成一个公网 HTTPS 接口，并让桌面软件在启动时用「分配的密码」换取授权。
 > 本文自带协议规格、文件清单、验收标准，不依赖任何对话上下文。
 
+> ⚠️ **v0.8 起「配置.ini」已被删除**：服务地址内置在 `app/config.py:18`，
+> RH Key / 模板清单 / COS 凭证全部由服务端随票下发。
+> 下文凡涉及"改 `配置.ini`"的段落均已失效，以 [license-integration.md](license-integration.md) 为准。
+
 ---
 
 ## 0. 执行方须知（先看这一节）
@@ -116,7 +120,7 @@ Base：部署后得到的地址，例如 `https://service-xxx.gz.apigw.tencentcs
 ```json
 {
   "action": "activate",
-  "password": "RH-2026-001-mj45",
+  "password": "RH-2026-001-xxxx",
   "machine": "a1b2c3d4e5f6..."
 }
 ```
@@ -247,13 +251,14 @@ LICENSE_SERVER=https://1463907213-<随机8位>.ap-guangzhou.tencentscf.com
 
 这一点直接决定分发包能不能启动，务必先看懂：
 
-| 来源 | 优先级 | 说明 |
-| --- | --- | --- |
-| `配置.ini` 的 `LICENSE_SERVER` | 1 | 用户可改，换服务器用 |
-| 程序内置 `EMBEDDED_LICENSE_SERVER`（`app/main.py` 顶部） | 2 | 兜底，防止用户删掉配置行绕过 |
-| 两者都空 | — | **程序拒绝启动**，弹"未配置授权服务" |
+| 来源 | 现状 |
+| --- | --- |
+| 内置常量 `app/config.py:18` 的 `SERVICE_URL` | ✅ **唯一来源**（v0.8 起） |
+| `配置.ini` 的 `LICENSE_SERVER` | ❌ 文件已删除，写了也不生效 |
+| 内置常量为空 | — **程序拒绝启动**，弹"未配置授权服务" |
 
-所以正式分发前，**必须二选一填上**，否则用户双击 exe 只会看到一行错误提示然后退出。
+也就是：**换服务地址 = 改代码 + 重新打包 + 换 exe**，没有别的路；
+日常改 Key / 清单 / COS 参数不用发版。
 
 > 开发调试可临时设 `RH_DEV_NO_LICENSE=1` 跳过校验，但**只对源码运行有效**，打包后的 exe 不认。
 
@@ -280,9 +285,9 @@ python3 server\license_api.py --serve 8099
 ```json
 {
   "passwords": {
-    "RH-2026-001-mj45": {"note": "张三 / 设计部",   "expires": "2027-12-31", "revoked": false},
-    "RH-2026-002-4688": {"note": "李四 / 外包",     "expires": "2026-12-31", "revoked": false},
-    "RH-2026-003-cegs": {"note": "王五（已离职）",  "expires": "2027-12-31", "revoked": true}
+    "RH-2026-001-xxxx": {"note": "张三 / 设计部",   "expires": "2027-12-31", "revoked": false},
+    "RH-2026-002-xxxx": {"note": "李四 / 外包",     "expires": "2026-12-31", "revoked": false},
+    "RH-2026-003-xxxx": {"note": "王五（已离职）",  "expires": "2027-12-31", "revoked": true}
   }
 }
 ```
@@ -346,9 +351,9 @@ python scripts/license_passwords.py add --note "李四 / 外包" --expires "2026
 **续期一条命令**（改表 + 上传 + 验证 一条龙）：
 
 ```powershell
-python scripts/license_passwords.py expire RH-2026-001-mj45 2028-12-31
-python scripts/license_passwords.py expire RH-2026-001-mj45 "2028-12-31 23:59"
-python scripts/license_passwords.py expire RH-2026-001-mj45 never        # 改成永久
+python scripts/license_passwords.py expire RH-2026-001-xxxx 2028-12-31
+python scripts/license_passwords.py expire RH-2026-001-xxxx "2028-12-31 23:59"
+python scripts/license_passwords.py expire RH-2026-001-xxxx never        # 改成永久
 ```
 
 新增密码默认有效期 **31 天**（今天 +31 天，保留到当天 23:59）。要指定就加 `--expires "2027-06-30 23:59"`。
@@ -409,7 +414,7 @@ Invoke-RestMethod "https://你的base/health"
 # 2) 正确密码
 Invoke-RestMethod -Method Post -Uri "https://你的base/activate" `
   -ContentType "application/json" `
-  -Body '{"password":"RH-2026-001-mj45","machine":"test-machine"}'
+  -Body '{"password":"RH-2026-001-xxxx","machine":"test-machine"}'
 
 # 3) 错误密码 → 必须 401 且 error="密码不存在"
 Invoke-RestMethod -Method Post -Uri "https://你的base/activate" `

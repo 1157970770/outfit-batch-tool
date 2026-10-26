@@ -1,114 +1,119 @@
-# 500 个模板：从本地视频到「程序能用的清单」
+# 模板：从本地视频到「程序能用的清单」
 
-一句话流程：**视频上传到 COS（私有）→ 本地生成 manifest.json（只写对象名）→ 清单放能读到的位置 → 填 配置.ini**。
+> 更新：**2026-10-26**。本文按**现行方案**重写：模板走**公有读直链（方案 B）**，
+> 清单发布在桶根 `manifest.json`，客户端只读清单、不签名、不碰模板桶。
+> 文档里写的 `D:\模板` 是占位路径，实际素材在 `D:\视频模板分类工作区`。
+
+一句话流程：**视频上传到 `input/tpl/` 并逐对象设公有读 → 同一条命令生成清单 → 清单发到桶根 → 服务端 `manifest_url` 指向它**。
 
 ---
 
-## 0. 先避开最大的坑
+## 0. 为什么是"公有读直链"，不是"私有桶 + 程序签名"
 
-你的桶是**私有读写**。模型去取 `https://.../tpl/001.mp4` 会 **403**——RunningHub 没法帮你签名。
+模型（RunningHub）自己去拉模板视频，它不会带我们的签名；而客户端手里的 COS 凭证是
+**只能写成品桶的子账号**，对模板桶**零权限**（`video-input-1463907213` 整个桶 `AccessDenied`）。
+所以"客户端给模型签模板链接"这条路**走不通**——这一点写在
+[adr-001-cos-client-credential.md](adr-001-cos-client-credential.md) §7，别重复踩。
 
-所以有两条路，**推荐第一条**：
-
-| 方案 | 桶权限 | 清单里写什么 | 代价 |
+| 方案 | 桶权限 | 清单里写什么 | 现状 |
 | --- | --- | --- | --- |
-| **A 私有桶 + 程序签名**（推荐） | 保持私有 | `"key": "tpl/001.mp4"` | 程序每批开工前签 24 小时链接，模板不外泄 |
-| B 公有读 + 直链 | `tpl/` 前缀设为公有读 | `"url": "https://.../tpl/001.mp4"` | 最简单，但**任何人都能下你的 500 个素材** |
+| **B 公有读 + 直链** | `input/tpl/*` 与 `manifest.json` 公有读，其余私有 | `"url": "https://…/input/tpl/001.mp4"` | ✅ **现行** |
+| A 私有桶 + 程序签名 | 保持私有 | `"key": "input/tpl/001.mp4"` | ❌ 不可行（签名者没读权限） |
 
-程序两种都认。下面按 A 走。
-
----
-
-## 1. 本地把文件编号
-
-文件名随意，但**按名称排序后必须是 001…500 的顺序**，因为「第 1 组 = 前 100 个」就是按这个顺序切的。
-
-```
-D:\模板\001.mp4
-D:\模板\002.mp4
-...
-D:\模板\500.mp4
-```
-
-已有多余文件先挪走——脚本会把文件夹里所有 mp4 都算进去。
+代价：模板**任何人拿到 URL 都能下载**。素材是自有/已授权素材时才可接受。
 
 ---
 
-## 2. 生成清单（只写对象名，不写死链接）
+## 1. 一条命令：上传 + 打标签 + 生成清单
 
-```bash
-python3 tools/build_manifest.py --src D:\模板 --mode key --prefix tpl --out manifest.json
+```powershell
+# 先看编号和标签，不上传
+python3 tools\upload_templates.py --dry-run
+
+# 先传 5 个试水
+python3 tools\upload_templates.py --limit 5
+
+# 全量（幂等：对象大小一致就跳过，不会重复传）
+python3 tools\upload_templates.py --no-duration --out build\manifest\manifest.json
 ```
 
-输出长这样：
+它做什么：
+
+1. 按 `--root`（默认 `D:\视频模板分类工作区`）下**目录名 + 文件名顺序**稳定编号 `001…NNN`；
+   目录名含「近景」→ `shot=near`，否则 `shot=medium_far`；
+2. 上传成 `input/tpl/NNN.mp4`，同时打 `shot` / `kind` / `tpl_id` 三个标签；
+3. **逐对象设 `public-read`**（模型要匿名拉取）；
+4. 生成清单 `build/manifest/manifest.json`。
+
+> 编号规则很重要：**「第 N 组」= 清单第 `(N-1)*100+1` ~ `N*100` 项**，按清单顺序切，不按文件名。
+
+---
+
+## 2. 清单长什么样
 
 ```json
 {
   "version": 1,
+  "count": 108,
+  "prefix": "input/tpl",
   "templates": [
-    { "id": "001", "name": "001", "key": "tpl/001.mp4", "duration": 7.0, "size_mb": 8.2 },
-    { "id": "002", "name": "002", "key": "tpl/002.mp4", "duration": 7.0, "size_mb": 7.9 }
+    { "id": "001", "name": "10月8日(1)", "shot": "medium_far", "size_mb": 5.57,
+      "duration": null,
+      "url": "https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/input/tpl/001.mp4" }
   ]
 }
 ```
 
-脚本会顺手体检，有问题直接告诉你：
-
-- 时长 > 15 秒 → 接口会拒
-- 体积 > 100 MB → 传上去也用不了
-- 读不到时长 → 提示你检查文件
+客户端只认 `id` / `url`（`key` 模式时才用 `key`）；`shot`、`size_mb`、`duration` 是给人看的，不影响出片。
 
 ---
 
-## 3. 上传到 COS
+## 3. 发布清单（覆盖写，URL 永不变）
 
-用 [COSBrowser](https://cloud.tencent.com/document/product/436/11366)（图形界面，最省事）或 coscli：
-
-```
-桶：video-input-1463907213（ap-guangzhou）
-tpl/001.mp4 … tpl/500.mp4     ← 500 个视频，私有
-manifest.json                  ← 清单，放桶根（需要能被程序读到）
+```powershell
+python3 tools\publish_manifest.py              # 上传 build\manifest\manifest.json 到桶根 + 设公有读
+python3 tools\publish_manifest.py --verify-only  # 只验证：匿名拉取 + 客户端视角解析
 ```
 
-**桶权限怎么设**：
+发布地址（固定）：
 
-- `tpl/` 前缀：**保持私有**（模板是资产，别公开）
-- `manifest.json`：**设为公有读**（它只有编号、时长、体积，没有素材本体，泄露无害）
+```
+https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json
+```
 
-> 为什么清单要能公开读：程序启动时用普通 HTTP 拉它，没走签名。
-> 不想公开也行——把 `manifest.json` 放在本地，让服务端配置里的 `manifest_url` 指向本地路径即可（分发时随程序一起给）。
+> 客户端的 `manifest_url` 就是它，**每次启动重拉一次、不缓存**。换清单只覆盖写同名对象，客户端不需要动。
+> 旧的 `cdn.ap-shanghai.tencentcos.cn` 域名已废弃（连接层 502），别再改回去。
 
 ---
 
-## 4. 配置（服务端下发，双桶）
-
-配置不在客户端，而是**授权后由服务端下发**（客户端激活时拉取）。服务端那份 config 里跟 COS 有关的部分长这样：
+## 4. 服务端配置（客户端看不到这个文件）
 
 ```json
 {
-  "rh_api_key": "32位Key",
+  "rh_api_key": "32 位 Key",
   "manifest_url": "https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json",
   "cos": {
     "enabled": true,
+    "bucket": "video-input-1463907213",
     "template_bucket": "video-input-1463907213",
     "output_bucket": "video-output-1463907213",
     "region": "ap-guangzhou",
-    "prefix": "",
-    "domain": ""
+    "prefix": "prod",
+    "domain": "",
+    "secret_id": "子账号 SecretId",
+    "secret_key": "子账号 SecretKey"
   }
 }
 ```
 
 | 字段 | 作用 |
 | --- | --- |
-| `template_bucket` | 500 个模板所在桶，只用来**签名**（只读语义） |
-| `output_bucket` | 成品写入桶，`prefix` 为空时落在 `output/日期/批次/` 下 |
-| `prefix` | 统一前缀，比如 `prod`；留空就是桶根 |
-| `region` | 桶所在地域，两个桶应同地域 |
+| `template_bucket` | 模板桶（只读语义）；客户端对它**没有任何权限**，靠公有直链 |
+| `output_bucket` | 成品桶，客户端用下发的子账号密钥写入 |
+| `prefix` | 统一前缀，**当前 `prod`**；成品落 `prod/output/…`（CAM 策略按这个写） |
+| `secret_id` / `secret_key` | 子账号 `rh-client-uploader`，只能对 `video-output/…/prod/output/*` Put/Get/分片 |
 
-两个桶都留空时会回退到 `cos.bucket`（单桶模式）。密钥同样不写在配置里——程序用本机凭证（环境变量 / `~/.cos/credentials.json` / tccli 登录态）。
-
-改完服务端配置后，客户端重新激活或重启即可拉到新值。
+改完 `server\config.json` → `python3 scripts\license_deploy.py deploy` → 客户端**下次启动**生效。
 
 ---
 
@@ -116,44 +121,48 @@ manifest.json                  ← 清单，放桶根（需要能被程序读到
 
 ```
 video-output-1463907213/
-└── output/
-    └── 2026-10-24/
-        └── 20261024a/            ← 批次号（COS 里统一小写，避免大小写歧义）
-            ├── 001-9c1b2d4e.mp4  ← 编号-内容指纹，重复跑不会多存一份
-            └── 002-44e8557f.mp4
+└── prod/                        ← cos.prefix（当前 prod）
+    └── output/
+        └── 2026-10-26/
+            └── 2026-10-26a/     ← 批次号（统一小写）
+                ├── 001-9c1b2d4e.mp4   ← 编号-内容指纹，重复跑不会多存
+                └── 002-44e8557f.mp4
 ```
 
-`tpl/` 在 input 桶，`output/` 在 output 桶，两者互不干扰，生命周期规则可以分别设。
-
-## 5. 验证（三步，别跳）
-
-1. 浏览器打开清单地址 → 能下载 JSON
-2. 软件标题栏 → `模板清单：500 个`
-3. 点「试跑 3 条」→ 提交前会打印 `为 100 个模板生成签名链接（24 小时有效）`，
-   生成的链接粘到浏览器能播 → 说明模型也拿得到
+> 归档失败**不影响出片**：异常只写进 `archive_error`。所以"任务成功但桶里没有"时，
+> 先查 CAM 策略是否写了 `prod/output/*`（只写 `output/*` 会 403 静默失败）。
 
 ---
 
-## 6. 几个常见问题
+## 6. 验收（四步，别跳）
+
+1. 浏览器打开清单地址 → 能下载 JSON，条数与本地一致；
+2. 浏览器打开任意一条 `input/tpl/NNN.mp4` → **能在浏览器里直接播放**（不是 403）；
+3. 客户端启动 → 状态灯「模板清单：108 个」；
+4. 跑「随机 3 条」→ 真的出片（要花钱）。
+
+---
+
+## 7. 常见问题
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `模板清单下载失败：403` | manifest.json 在私有桶里 | 改成公有读，或改用本地文件路径 |
-| 提交后大面积失败、`403 SignatureDoesNotMatch` | 系统时间偏差 > 15 分钟 | `w32tm /resync` |
-| `模板 X 签名失败` | 桶名/地域与 key 不匹配 | 检查 `COS_BUCKET` 是否带 `-1463907213` |
-| 第 5 组跑不了（模板不足 100） | 只有 480 个文件 | 补满 500，或改用「随机 100 条」 |
-| 想换一批 | 改 `COS_PREFIX` 或换清单 | 换前缀即可，不影响历史产物 |
+| 清单 403 | 对象没设公有读 / 发布失败 | 重跑 `publish_manifest.py`；确认 `put_object_acl` 没报错 |
+| 模板 403（模型拉不到） | 单条对象漏设 `public-read` | 重跑 `upload_templates.py --force`，或单独补 ACL |
+| 客户端显示「模板清单：加载失败」 | `manifest_url` 打不开 / JSON 格式不对 | `publish_manifest.py --verify-only` |
+| **第 2–5 组跑不了**（"模板不足 100 个"） | 清单只有 108 条，分组按 100 切 | 补到 500，或先用「随机 100 条」 |
+| 任务成功但桶里没成品 | CAM 少 `prod/output/*`，或子账号密钥过期 | 看 `archive_error`；核对策略前缀 |
+| 改了清单但客户端没变 | 客户端只认服务端下发的 `manifest_url` | 覆盖写同名对象即可；地址没变就不动配置 |
 
 ---
 
-## 7. 编号与分组的对应关系
+## 8. 补到 500 个的差距
 
-```
-第 1 组 → 清单第 1–100 项   → 001.mp4 … 100.mp4
-第 2 组 → 清单第 101–200 项 → 101.mp4 … 200.mp4
-…
-第 5 组 → 清单第 401–500 项 → 401.mp4 … 500.mp4
-「随机 100 条」→ 从 500 里抽 100，不重复
-```
+| 项 | 现状 | 目标 |
+| --- | --- | --- |
+| 模板总数 | 108（近景 14 / 中远 94） | 500 |
+| 可用分组 | 第 1 组 + 随机 100 | 第 1–5 组 |
+| `TOTAL_TEMPLATES` | 代码里写死 500（`app/core.py:43`） | 补齐素材即可，不用改代码 |
 
-编号存在清单的 `id` 字段里，程序不读文件名。所以改名不会错位，**改顺序才会**。
+> 素材补齐后：`upload_templates.py` 全量跑一遍 → `publish_manifest.py` 发布 → 客户端重启就看到新数量。
+> 数量长期不足 500 时，建议把分组改成按实际条数动态算，别让用户点到跑不了的分组。

@@ -6,6 +6,7 @@
     python scripts/license_deploy.py pack        # 把 server/ 两个文件打成 dist/license-deploy.zip
     python scripts/license_deploy.py deploy      # 打包 + 上传 + 等函数变 Active（函数不存在则创建）
     python scripts/license_deploy.py check CODE  # 验某个密码在线上是否可用（--expect reject 验是否被拒）
+    python scripts/license_deploy.py config      # 看运行配置（RH Key / 清单）填全了没，线上有没有下发
     python scripts/license_deploy.py test        # 线上验收：激活/复核/换机/错密码
 
 依赖：本机已安装 tccli 并完成登录（tccli auth login --profile agent1）。
@@ -39,7 +40,13 @@ if not __import__("shutil").which(TCCLI):
             TCCLI = _cand
             break
 
-ZIP_FILES = ["license_api.py", "passwords.json"]
+# 部署包必须包含的文件。缺任何一个都直接失败——宁可不部署，也别部署半套。
+# config.json 是运行必需（新版靠它下发 RH Key / 模板清单 / COS）。
+ZIP_FILES = ["license_api.py", "passwords.json", "config.json"]
+
+MISSING_HINT = {
+    "config.json": "先复制模板：copy server\\config.example.json server\\config.json，再填 rh_api_key",
+}
 
 
 # ---------------------------------------------------------------- tccli 调用
@@ -64,10 +71,12 @@ def pack() -> str:
         for name in ZIP_FILES:
             src = os.path.join(SERVER_DIR, name)
             if not os.path.isfile(src):
-                raise SystemExit(f"缺少文件：{src}")
+                hint = MISSING_HINT.get(name, "")
+                raise SystemExit(f"缺少文件：{src}" + (f"\n  提示：{hint}" if hint else ""))
             z.write(src, arcname=name)  # 必须放 zip 根目录，不套文件夹
+            print(f"[pack] 打入 {name}")
     size = os.path.getsize(ZIP_PATH)
-    print(f"[pack] {ZIP_PATH}  ({size} 字节)")
+    print(f"[pack] {ZIP_PATH}  ({size} 字节，{len(ZIP_FILES)} 个文件)")
     return ZIP_PATH
 
 
@@ -243,6 +252,54 @@ def check(code: str, expect: str = "ok") -> int:
     return 0 if good else 1
 
 
+def config_status() -> int:
+    """看运行配置填全了没（只报是否已填 / 长度，绝不打印 Key 的值）。"""
+    path = os.path.join(SERVER_DIR, "config.json")
+    ok = True
+    if not os.path.isfile(path):
+        print("[config] 缺少 server/config.json")
+        return 1
+    with open(path, encoding="utf-8-sig") as f:
+        data = json.load(f)
+    key = str(data.get("rh_api_key") or "")
+    manifest = str(data.get("manifest_url") or "")
+    cos = data.get("cos") or {}
+    print(f"[config] 本地 rh_api_key   : {'已填（长度 ' + str(len(key)) + '）' if key else '未填 ← 客户端会显示「配置：未下发」'}")
+    print(f"[config] 本地 manifest_url : {manifest or '未填 ← 客户端显示「模板清单：未下发」'}")
+    print(f"[config] 本地 cos          : enabled={cos.get('enabled')} bucket={cos.get('bucket')} region={cos.get('region')} prefix={cos.get('prefix')}")
+    tpl_b, out_b = (cos.get("template_bucket") or ""), (cos.get("output_bucket") or "")
+    if not (tpl_b and out_b):
+        print("[config] 本地 双桶          : 缺失 ← 客户端会回退 cos.bucket，成品可能写进模板桶（归档静默失败）")
+    elif tpl_b == out_b:
+        print(f"[config] 本地 双桶          : 两桶相同（{tpl_b}）← 双桶未生效，确认是否有意为之")
+    else:
+        print(f"[config] 本地 双桶          : 模板={tpl_b} | 成品={out_b}")
+    ok &= bool(key) and bool(manifest) and bool(tpl_b) and bool(out_b)
+
+    base = function_url()
+    if not base:
+        print("[config] 没有 HTTP 触发器，跳过线上检查")
+        return 1
+    with open(os.path.join(SERVER_DIR, "passwords.json"), encoding="utf-8-sig") as f:
+        table = json.load(f).get("passwords", {})
+    code = next((k for k, v in table.items() if not v.get("revoked")), None)
+    if not code:
+        print("[config] 密码表里没有可用密码，跳过线上检查")
+        return 1
+    _, d = _post(base, "/activate", {"password": code, "machine": "config-check"})
+    live = d.get("config")
+    if not d.get("ok") or live is None:
+        print("[config] 线上 /activate 没有返回 config ← 服务端还是旧版，或 config.json 没传上去")
+        return 1
+    lkey = str(live.get("rh_api_key") or "")
+    print(f"[config] 线上 rh_api_key   : {'已下发（长度 ' + str(len(lkey)) + '）' if lkey else '未下发（空）'}")
+    print(f"[config] 线上 manifest_url : {live.get('manifest_url') or '未下发（空）'}")
+    print(f"[config] 线上多余字段      : {[k for k in live if k.startswith('_')] or '无'}")
+    ok &= bool(lkey)
+    print("[config] 结论:", "配置完整，客户端可用" if ok else "还缺东西，见上面标 ← 的行")
+    return 0 if ok else 1
+
+
 def main():
     p = argparse.ArgumentParser(description="授权服务运维")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -252,6 +309,7 @@ def main():
     sub.add_parser("url")
     sub.add_parser("test")
     sub.add_parser("status")
+    sub.add_parser("config")
     c = sub.add_parser("check")
     c.add_argument("code")
     c.add_argument("--expect", choices=["ok", "reject"], default="ok")
@@ -271,6 +329,8 @@ def main():
         print("函数 URL:", function_url())
     elif args.cmd == "check":
         sys.exit(check(args.code, args.expect))
+    elif args.cmd == "config":
+        sys.exit(config_status())
     elif args.cmd == "test":
         sys.exit(test())
 

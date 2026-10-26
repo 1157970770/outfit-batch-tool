@@ -104,6 +104,9 @@ def load() -> dict:
         "COS_REGION": str(cos.get("region") or "ap-guangzhou").strip(),
         "COS_PREFIX": str(cos.get("prefix") or "").strip(),
         "COS_DOMAIN": str(cos.get("domain") or "").strip(),
+        # 服务端下发的 COS 凭证（子账号：只能写成品桶）；没下发时留空，客户端回退本机凭证
+        "COS_SECRET_ID": str(cos.get("secret_id") or "").strip(),
+        "COS_SECRET_KEY": str(cos.get("secret_key") or "").strip(),
         "NOTICE": str(remote.get("notice") or "").strip(),
         "SERVICE_URL": SERVICE_URL,
     }

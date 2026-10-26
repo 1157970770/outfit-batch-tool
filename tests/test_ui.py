@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """界面集成测试：离屏启动窗口，用假服务完整跑一批（3 条），验证表格/CSV/日志。"""
 
@@ -9,7 +9,6 @@ import os
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -17,6 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tmpdir import tempdir  # noqa: E402
 
 from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
@@ -49,7 +50,7 @@ def main() -> int:
         print("假服务没起来")
         return 1
 
-    tmp = Path(tempfile.mkdtemp(prefix="rhui-"))
+    tmp = tempdir("rhui-")
     app = QApplication([])
 
     # 测试里不需要弹窗，直接吞掉

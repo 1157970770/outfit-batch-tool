@@ -41,8 +41,8 @@ ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 import license_passwords as LP  # noqa: E402
 
-DEPLOY_SCRIPT = SCRIPTS / "license_deploy.py"
-DATA = ROOT / "server" / "passwords.json"
+DEPLOY_SCRIPT = Path(LP.DEPLOY_SCRIPT)   # 指向项目里的真脚本（打包后也能找到）
+DATA = Path(LP.DEFAULT_FILE)             # 密码表真身，跟随项目根
 
 COLUMNS = ["密码", "状态", "到期时间", "剩余", "备注"]
 GREEN, AMBER, RED, GRAY = QColor("#1D9E75"), QColor("#BA7517"), QColor("#A32D2D"), QColor("#5F5E5A")
@@ -124,7 +124,8 @@ class SyncWorker(QThread):
 
     def run(self):
         try:
-            r = subprocess.run([sys.executable, str(DEPLOY_SCRIPT), "deploy"],
+            py = LP.python_exe()          # 打包后 sys.executable 是 exe 自己，不能用
+            r = subprocess.run([py, str(DEPLOY_SCRIPT), "deploy"],
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=300)
             out = (r.stdout or "").strip().splitlines()
@@ -135,7 +136,7 @@ class SyncWorker(QThread):
             if not self.code:
                 self.done.emit(True, "已同步到云函数")
                 return
-            c = subprocess.run([sys.executable, str(DEPLOY_SCRIPT), "check",
+            c = subprocess.run([py, str(DEPLOY_SCRIPT), "check",
                                 self.code, "--expect", self.expect],
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=120)

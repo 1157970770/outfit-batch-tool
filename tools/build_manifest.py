@@ -55,11 +55,16 @@ def make_poster(path: Path, dest: Path, width: int = 480) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成模板清单")
     parser.add_argument("--src", required=True, help="模板视频所在文件夹")
-    parser.add_argument("--base-url", required=True, help="CDN 上该文件夹对应的公网前缀")
+    parser.add_argument("--base-url", help="公有桶/CDN 的前缀；--mode key 时可留空")
+    parser.add_argument("--mode", choices=("url", "key"), default="url",
+                        help="url=公有桶直接给链接；key=私有桶只给对象名，由程序签名")
+    parser.add_argument("--prefix", help="对象前缀，例如 tpl；key 模式默认从 base-url 末段推断")
     parser.add_argument("--out", default="manifest.json")
     parser.add_argument("--posters", help="海报输出目录（不给就不抽帧）")
     parser.add_argument("--start", type=int, default=1, help="起始编号，默认 1")
     args = parser.parse_args()
+    if args.mode == "url" and not args.base_url:
+        parser.error("--mode url 需要 --base-url；如果要走私有桶，用 --mode key")
 
     src = Path(args.src)
     if not src.is_dir():

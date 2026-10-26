@@ -44,7 +44,7 @@ python3 server\license_api.py --serve 8099
 # 终端 2：造一个密码、验一次（PowerShell 用这个，别用 curl，见下方说明）
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8099/activate" `
   -ContentType "application/json" `
-  -Body '{"password":"RH-2026-001-mj45","machine":"test-machine"}'
+  -Body '{"password":"RH-2026-001-xxxx","machine":"test-machine"}'
 ```
 
 返回 `ok=True` 和一个约 130 字符的 token 就说明服务端没问题。
@@ -154,7 +154,7 @@ LICENSE_SERVER=https://1463907213-<随机8位>.ap-guangzhou.tencentscf.com
 Invoke-RestMethod -Method Post `
   -Uri "https://你的地址/activate" `
   -ContentType "application/json" `
-  -Body '{"password":"RH-2026-001-mj45","machine":"test-machine"}'
+  -Body '{"password":"RH-2026-001-xxxx","machine":"test-machine"}'
 ```
 
 **cmd / bash**
@@ -162,7 +162,7 @@ Invoke-RestMethod -Method Post `
 ```bash
 curl -X POST https://你的地址/activate \
   -H "Content-Type: application/json" \
-  -d "{\"password\":\"RH-2026-001-mj45\",\"machine\":\"test-machine\"}"
+  -d "{\"password\":\"RH-2026-001-xxxx\",\"machine\":\"test-machine\"}"
 ```
 
 **最保险（任何 shell 都行）**：把 JSON 存成 `payload.json`，再

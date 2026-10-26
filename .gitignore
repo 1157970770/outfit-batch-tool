@@ -1,6 +1,7 @@
 # 构建产物（体积大，放 GitHub Releases，不进仓库）
 dist/
 build/
+build_*/
 *.spec
 
 # Python 缓存
@@ -37,6 +38,8 @@ cos.json
 
 # 临时探针脚本（下划线开头）
 _*.py
+# 例外：测试的共享临时目录 helper 要进仓库
+!tests/_tmpdir.py
 
 # 真实密码表（含分配出去的密码，绝不提交）
 server/passwords.json

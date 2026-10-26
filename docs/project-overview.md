@@ -2,8 +2,11 @@
 
 > 一句话：**1 张无头模特图 + 100 个模板视频 → 100 条 7 秒 720P 竖屏换装视频**，桌面一键跑完，产物自动落本地并归档到腾讯云 COS，分发给别人时用密码授权。
 >
-> 仓库：`https://github.com/1157970770/outfit-batch-tool`　当前版本：**v0.1 测试版**
-> 最近一次全量测试：4 个测试套件全部通过（见 §8）
+> 仓库：`https://github.com/1157970770/outfit-batch-tool`　当前版本：**v0.9**
+> 最近一次全量测试：**5 个测试套件全部通过**（见 §8）
+>
+> ⚠️ 本文是**架构总览**，其中的进度/待办会过时；**现状以 [license-integration.md](license-integration.md) §0
+> 与 [project-report-20261026.md](project-report-20261026.md) 为准**。
 
 ---
 
@@ -65,7 +68,8 @@
 | --- | --- |
 | `wan3_r2v.py` | 独立批量客户端（校验/上传/提交/轮询/下载/记账/emit 请求原文） |
 | `make_batch.py` | 服装清单 → 100 条任务文件（旧链路，与桌面版并存） |
-| `tools/build_manifest.py` | 500 个模板视频 → `manifest.json`（读时长、查体积、抽海报） |
+| `tools/build_manifest.py` | 视频目录 → `manifest.json`（读时长、查体积、抽海报） |
+| `tools/upload_templates.py` / `publish_manifest.py` | 上传模板到 `input/tpl/` + 发布清单到桶根（现行链路） |
 | `scripts/build.bat` / `.ps1` | 一键打包：onedir + 自检 + 带日期 zip |
 | `scripts/cos_check.py` | COS 七步连通性自检（写/签/读/存在/列举/删） |
 | `scripts/archive_to_cos.py` | 历史成片补传 COS，回写 `batch.json` |
@@ -198,7 +202,7 @@
 ## 10. 发布流程
 
 ```bash
-scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生产器-v0.1-日期.zip
+scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生产器-v<APP_VERSION>-日期.zip
 ```
 
 - 打包模式：**onedir**（不能用 onefile：会解压到 `%TEMP%`，受限机器会报 `Could not create temporary directory!`）

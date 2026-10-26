@@ -131,14 +131,19 @@ def verify_token(token: str, machine: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def load_runtime_config() -> dict:
-    """运行配置（RH Key / 模板清单 / COS / 公告）。文件不存在就返回空对象，不影响授权。"""
+    """运行配置（RH Key / 模板清单 / COS / 公告）。文件不存在就返回空对象，不影响授权。
+
+    下划线开头的字段（如 `_说明`）是给人看的注释，不下发给客户端。
+    """
     if not CONFIG_PATH.exists():
         return {}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise LicenseError(f"config.json 有问题：{exc}", status=500) from None
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if not str(k).startswith("_")}
 
 
 def load_passwords() -> dict:

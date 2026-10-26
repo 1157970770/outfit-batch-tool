@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """核心引擎冒烟测试：不联网、不花钱，用本地假服务跑 3 条。"""
 
@@ -9,7 +9,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path

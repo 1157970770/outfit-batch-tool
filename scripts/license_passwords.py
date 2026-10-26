@@ -4,10 +4,10 @@
 默认行为：**一条命令搞定「改本地表 → 上传云函数 → 验证线上」**，不需要收尾再跑一条。
     python scripts/license_passwords.py list
     python scripts/license_passwords.py add --note "张三 / 设计部" --expires 2027-12-31
-    python scripts/license_passwords.py revoke   RH-2026-001-mj45
-    python scripts/license_passwords.py unrevoke RH-2026-001-mj45
-    python scripts/license_passwords.py expire   RH-2026-001-mj45 2026-12-31
-    python scripts/license_passwords.py remove   RH-2026-003-cegs
+    python scripts/license_passwords.py revoke   RH-2026-001-xxxx
+    python scripts/license_passwords.py unrevoke RH-2026-001-xxxx
+    python scripts/license_passwords.py expire   RH-2026-001-xxxx 2026-12-31
+    python scripts/license_passwords.py remove   RH-2026-003-xxxx
     python scripts/license_passwords.py deploy              # 只部署，不改表
 
 加 --no-deploy 只改本地、不推云（没网 / 只想先存着）：
@@ -24,13 +24,51 @@ import calendar
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _detect_root() -> str:
+    """项目根。源码运行=脚本的上一级；打包成 exe 后=exe 附近能找到 server/ 的目录。"""
+    env = os.environ.get("RH_PROJECT_ROOT", "").strip()
+    if env and os.path.isdir(os.path.join(env, "server")):
+        return env
+    if not getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.dirname(os.path.abspath(sys.executable))
+    for cand in (here, os.path.dirname(here), r"D:\批量视频任务设计区"):
+        if os.path.isdir(os.path.join(cand, "server")):
+            return cand
+    return here
+
+
+ROOT = _detect_root()
 DEFAULT_FILE = os.path.join(ROOT, "server", "passwords.json")
 DEPLOY_SCRIPT = os.path.join(ROOT, "scripts", "license_deploy.py")
+
+
+def python_exe() -> str:
+    """真正用来跑部署脚本的 Python。
+
+    打包后 sys.executable 是 exe 自己，拿它去跑 license_deploy.py 只会把界面再开一次，
+    所以要另找一个 Python（可用环境变量 RH_PYTHON 指定）。
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    cands = [os.environ.get("RH_PYTHON", "").strip()]
+    for name in ("python3", "py", "python"):
+        found = shutil.which(name)
+        if found:
+            cands.append(found)
+    for cand in cands:
+        if not cand or "WindowsApps" in cand:  # 跳过微软商店的假 python
+            continue
+        if os.path.isfile(cand) or shutil.which(cand):
+            return cand
+    raise RuntimeError("找不到可用的 Python，无法部署云函数；请设置环境变量 RH_PYTHON")
+
 ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # 去掉 0/O/1/l/I
 DEFAULT_DAYS = 31  # 新密码默认有效期
 NEVER_WORDS = ("never", "none", "-", "永久", "无限")
@@ -103,7 +141,12 @@ def _deadline(value) -> float | None:
 def _sync(code: str | None, expect: str) -> bool:
     """上传云函数 + 验证线上。expect: ok=该密码应可用, reject=应被拒。"""
     print("\n[同步] 上传到云函数（约 5~15 秒）…")
-    rc = subprocess.call([sys.executable, DEPLOY_SCRIPT, "deploy"])
+    try:
+        py = python_exe()
+    except RuntimeError as exc:
+        print(f"[同步] ✗ {exc}")
+        return False
+    rc = subprocess.call([py, DEPLOY_SCRIPT, "deploy"])
     if rc != 0:
         print("[同步] ✗ 上传没成功，云端还是旧表。本地已保存，可重跑：")
         print("       python scripts/license_passwords.py deploy")
@@ -112,7 +155,7 @@ def _sync(code: str | None, expect: str) -> bool:
         return True
 
     print("[同步] 验证线上是否生效…")
-    rc = subprocess.call([sys.executable, DEPLOY_SCRIPT, "check", code, "--expect", expect])
+    rc = subprocess.call([python_exe(), DEPLOY_SCRIPT, "check", code, "--expect", expect])
     if rc == 0:
         print("[同步] ✓ 线上已生效")
         return True
@@ -157,7 +200,7 @@ def main():
     args = p.parse_args(argv)
 
     if args.cmd == "deploy":
-        sys.exit(subprocess.call([sys.executable, DEPLOY_SCRIPT, "deploy"]))
+        sys.exit(subprocess.call([python_exe(), DEPLOY_SCRIPT, "deploy"]))
 
     path = args.file
     doc = load(path)

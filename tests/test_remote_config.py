@@ -1,15 +1,17 @@
-"""远程配置链路测试：服务端 config.json → 激活 → 客户端拿到 → 映射成 cfg。"""
+﻿"""远程配置链路测试：服务端 config.json → 激活 → 客户端拿到 → 映射成 cfg。"""
 import json
 import os
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(r"D:\批量视频任务设计区")
-TMP = Path(tempfile.mkdtemp(prefix="rc-"))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tmpdir import tempdir  # noqa: E402
+
+TMP = tempdir("rc-")
 os.environ["APPDATA"] = str(TMP / "appdata")
 os.environ["LICENSE_SECRET"] = "remote-config-test"
 os.environ["LICENSE_PASSWORDS"] = str(TMP / "passwords.json")

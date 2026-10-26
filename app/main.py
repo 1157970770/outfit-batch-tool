@@ -38,7 +38,7 @@ from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 测试版"
-APP_VERSION = "0.8"
+APP_VERSION = "0.9"
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,12 @@ def _make_storage(cfg: dict, bucket: str, prefix: str):
         "prefix": prefix,
         "domain": (cfg.get("COS_DOMAIN") or "").strip(),
     }
+    # 服务端下发的凭证优先（子账号，仅 output/*）；没下发则回退本机凭证/环境变量
+    sid = (cfg.get("COS_SECRET_ID") or "").strip()
+    skey = (cfg.get("COS_SECRET_KEY") or "").strip()
+    if sid and skey:
+        manual["secret_id"] = sid
+        manual["secret_key"] = skey
     resolved = StorageConfig.from_local_profile(**manual)
     if not (resolved.secret_id and resolved.secret_key):
         raise StorageError(

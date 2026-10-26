@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """授权链路测试：本地起服务，跑 激活/校验/换机器/停用/过期 五个场景。"""
 
@@ -9,12 +9,14 @@ import os
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TMP = Path(tempfile.mkdtemp(prefix="lic-"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tmpdir import tempdir  # noqa: E402
+
+TMP = tempdir("lic-")
 
 # 必须在 import app.license 之前改，它按 APPDATA 决定缓存位置
 os.environ["APPDATA"] = str(TMP / "appdata")

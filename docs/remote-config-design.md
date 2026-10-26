@@ -88,7 +88,7 @@ SERVICE_URL = "https://xxx.tencentscf.com"   # 配置/授权/代理三合一
 ### 4.1 `POST /activate`
 
 ```json
-{ "action": "activate", "password": "RH-2026-001-mj45", "machine": "880bad89..." }
+{ "action": "activate", "password": "RH-2026-001-xxxx", "machine": "880bad89..." }
 ```
 
 ```json
