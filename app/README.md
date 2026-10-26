@@ -78,6 +78,17 @@
 > ⚠️ 打包会**删掉 dist 里其它版本的 zip**，要留旧包就先复制出去。
 > 想换个输出目录试打：`.\scripts\build.ps1 -OutRoot build\release`。
 
+**首次启动被 Windows 拦（「Windows 已保护你的电脑」）**：这是 SmartScreen 对**未签名**程序的信誉拦截，
+不是报毒。点「更多信息 → 仍要运行」即可，或先双击包里的 `解除锁定并启动.bat`（清掉下载标记）。
+要彻底不弹，必须买代码签名证书——证书到手后一条命令签名：
+
+```powershell
+$env:CODESIGN_THUMBPRINT = "<证书指纹>"
+.\scripts\build.ps1 -Sign
+```
+
+原因、四种处理方式、多少钱，见 [../docs/distribution-signing.md](../docs/distribution-signing.md)。
+
 **别用 `--onefile`**：单文件版每次启动都要把几百 MB 依赖解压到 `%TEMP%`，
 在 TEMP 被管控（或被杀软实时扫描）的机器上会直接弹 `Could not create temporary directory!`
 然后打不开。文件夹版不解压、启动更快，也更好排查。

@@ -3,6 +3,10 @@
 # Windows 脚本必须保持 CRLF，否则 cmd 解析会出错
 *.bat text eol=crlf
 
+# PowerShell 脚本同样要 CRLF；另外请用 UTF-8 **with BOM** 保存——
+# 无 BOM 时 Windows PowerShell 5.1 会把中文按 ANSI 解码，导致语法错误（踩过一次）
+*.ps1 text eol=crlf
+
 # 二进制
 *.png binary
 *.jpg binary

@@ -214,3 +214,20 @@ M tools/build_manifest.py     ← 清单生成器改造（未完成）
 **后续建议**：模板补到 500（当前 108，第 2–5 组点不了）；把 `GROUP_SIZE` 分组改成按清单实际条数动态算；
 `build_storages` 给模板桶也用了只能写成品桶的子账号（签模板 GET 会 403），走公有直链时无影响但仍是隐患。
 
+**17:55 补充：分发时的 SmartScreen 拦截**
+
+现象：双击 exe 弹「Windows 已保护你的电脑 / 无法识别的应用」，只有「不运行」。
+原因不是报毒，是**未签名 + 文件带 MOTW** 的信誉拦截（实测 `Get-AuthenticodeSignature` → `NotSigned`，
+且此前 exe **完全没有版本信息**）。
+
+| 已做 | 效果 |
+| --- | --- |
+| 打包时生成**版本信息资源**（CompanyName / FileDescription / FileVersion，`scripts/make_version_file.py`） | exe 属性面板不再空白，少一类误报理由 |
+| 构建加 `--noupx` | 避开 UPX 加壳的误报高发组合 |
+| 包内附 `解除锁定并启动.bat` | 收件人双击一次即清 MOTW 再启动 |
+| `build.ps1` 新增 `-Sign` / `CODESIGN_THUMBPRINT` | 买到证书后一条命令签名 |
+
+> 注意：这些**不能**让弹窗消失——要"不弹"，只有去 MOTW（内部够用）或**买代码签名证书**（对外必须）。
+> 完整对比与操作见 [distribution-signing.md](distribution-signing.md)。
+> 另：`scripts/build.ps1` 必须保存为 **UTF-8 with BOM**，否则 Windows PowerShell 5.1 会把中文按 ANSI 解码而报语法错（已写进 `.gitattributes` 注释）。
+
