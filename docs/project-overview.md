@@ -60,6 +60,8 @@
 | `app/config.py` | 140 | `配置.ini` 读写、旧 JSON 配置迁移 | 键名全大写 |
 | `app/license.py` | 140 | 授权客户端：机器码、激活、token 缓存 | token 绑机器、14 天 |
 | `app/startup.py` | 45 | 启动门禁：密码对话框，3 次失败退出 | 未配服务器则直接放行 |
+| `app/prompts.py` | 245 | 提示词库：JSON 加载、场景+标签筛选、`{{变量}}` 渲染 | 只读；坏条目跳过，不炸整页（分支 `feature/prompt-library`） |
+| `app/prompts_page.py` | 374 | 提示词库页面：筛选 → 填变量 → 预览 → 复制/填入生产页 | 第三个标签页，未合入主干 |
 | `run_app.py` | 12 | PyInstaller 入口 | |
 
 ### 3.2 命令行工具

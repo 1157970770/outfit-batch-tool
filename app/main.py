@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """换装批量生产器 · 桌面界面（PySide6）。
 
-两个页面：
+三个页面：
   · 小批量试跑：随机 3 条，用来调提示词、验效果
   · 大批量生产：按 5 组固定编号或随机 100 条
+  · 提示词库：按场景 + 标签筛沉淀好的提示词，填变量后预览/复制/填入生产页
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from app.core import (  # noqa: E402
     DEFAULT_PROMPT, GROUP_SIZE, TOTAL_TEMPLATES, BatchRunner, BatchSpec,
     EngineError, check_account, load_manifest, plan_batch, unique_batch_dir,
 )
+from app.prompts_page import PromptLibraryPage  # noqa: E402
 from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
@@ -619,8 +621,11 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.small_panel = BatchPanel(self.cfg, small=True, window=self)
         self.big_panel = BatchPanel(self.cfg, small=False, window=self)
+        self.prompts_page = PromptLibraryPage()
+        self.prompts_page.use_requested.connect(self._apply_prompt)
         self.tabs.addTab(self.small_panel, "小批量试跑")
         self.tabs.addTab(self.big_panel, "大批量生产")
+        self.tabs.addTab(self.prompts_page, "提示词库")
         layout.addWidget(self.tabs, 1)
 
         footer = QLabel("720P · 7s · 9:16 · 无音轨 ｜ 结果链接 24 小时失效，本工具已自动下载归档")
@@ -667,6 +672,20 @@ class MainWindow(QMainWindow):
             self.banner.show()
         else:
             self.banner.hide()
+
+    # ---- 提示词库 ----
+    def _apply_prompt(self, text: str) -> None:
+        """提示词库选中 → 填进两个生产页的提示词框，并切回小批量试跑去调效果。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        if self.busy:
+            QMessageBox.information(self, "正在出片", "当前批次还在跑，等结束后再替换提示词。")
+            return
+        for panel in (self.small_panel, self.big_panel):
+            panel.prompt_edit.setPlainText(text)
+        self.tabs.setCurrentWidget(self.small_panel)
+        self._log(f"提示词库：已填入生产页（{len(text)} 字）")
 
     # ---- 输出目录 ----
     def _pick_output_dir(self):
@@ -764,6 +783,15 @@ QHeaderView::section { background: #fafafc; border: none; border-bottom: 1px sol
 QTabWidget::pane { border: none; }
 QTabBar::tab { padding: 8px 18px; border: none; color: #6b6b70; }
 QTabBar::tab:selected { color: #1f6feb; border-bottom: 2px solid #1f6feb; }
+#libTitle { font-size: 14px; font-weight: 600; }
+#libMeta { color: #6b6b70; font-size: 12px; }
+#libSummary { color: #4a4a4f; font-size: 12px; }
+#libStatus { color: #0a7d32; font-size: 12px; }
+#libStatus[tone="bad"] { color: #b3261e; }
+#libWarn { color: #a86400; font-size: 12px; }
+QGroupBox { border: 1px solid #e6e6ea; border-radius: 6px; margin-top: 7px; padding-top: 5px; font-size: 12px; color: #6b6b70; }
+QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
+QListWidget { border: 1px solid #e6e6ea; border-radius: 6px; background: white; }
 """
 
 

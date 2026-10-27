@@ -22,6 +22,7 @@ python3 wan3_r2v.py run --tasks tasks.example.json --limit 1 --interval 0.2 --ti
 ```bash
 python3 tests/test_storage.py    # 假 COS 客户端 + 本机 HTTP 服务
 python3 tests/test_core.py       # 核心引擎（第二遍会验证归档到"本地对象存储"）
+python3 tests/test_prompts.py    # 提示词库：筛选/变量/坏数据 + 离屏页面（需要 PySide6）
 ```
 
 `test_storage.py` 不联网、不需要 `cos-python-sdk-v5`，覆盖：Key 规则、内容指纹、
