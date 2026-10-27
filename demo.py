@@ -4,7 +4,7 @@
 
     python3 demo.py              # 默认跑 5 条，验证整条流水线
     python3 demo.py --count 20   # 想看更大批量
-    python3 demo.py --real       # 换成真接口（需要 RUNNINGHUB_API_KEY，会真实扣费，只跑 1 条）
+    python3 demo.py --real       # 换成真接口（需要 DASHSCOPE_API_KEY，会真实扣费，只跑 1 条）
 
 它做的事：造一张占位定妆图 → 起本地假服务 → 走完 上传/提交/轮询/下载/记账 → 出结果表 → 收工。
 """
@@ -86,17 +86,20 @@ def build_demo_tasks(count: int) -> Path:
     return out
 
 
-def run_client(tasks_file: Path, count: int, base_url: str) -> int:
+def run_client(tasks_file: Path, count: int, base_url: str, real: bool = False) -> int:
     env = {
-        "RH_BASE_URL": base_url,
-        "RUNNINGHUB_API_KEY": "demo-key-0123456789abcdef",
+        "WAN_PROVIDER": "dashscope",
+        "WAN_BASE_URL": base_url,
+        "WAN_API_KEY": "demo-key-0123456789abcdef",
         "PYTHONIOENCODING": "utf-8",
     }
+    if real:
+        env["WAN_API_KEY"] = os.environ.get("DASHSCOPE_API_KEY", "")
     cmd = [sys.executable, str(ROOT / "wan3_r2v.py"), "run",
            "--tasks", str(tasks_file),
            "--concurrency", "2",
-           "--interval", "0.3",
-           "--timeout", "60",
+           "--interval", "0.3" if not real else "15",
+           "--timeout", "60" if not real else "1800",
            "--fresh",
            "--state-file", str(DEMO_DIR / "state.json"),
            "--limit", str(count)]
@@ -118,8 +121,12 @@ def report(count: int) -> None:
             ok += 1
         print(f"{tid:<8}{rec.get('status', '-'):<10}{size:>10}   {path.name if path.name else '-'}")
     print("-" * 78)
-    cost = sum(float(r.get("cost") or 0) for r in state.values())
-    print(f"成功 {ok} 条 | 演示扣费 ¥{cost:.2f}（假服务，未真实扣款）")
+    billable = sum(float(r.get("billable_seconds") or 0) for r in state.values())
+    estimated = sum(float(r.get("estimated_cost") or 0) for r in state.values()
+                    if r.get("estimated_cost") is not None)
+    has_estimate = any(r.get("estimated_cost") is not None for r in state.values())
+    tail = f" · 预估 ¥{estimated:.2f}" if has_estimate else " · 未配置单价，只记秒数"
+    print(f"成功 {ok} 条 | 计费 {billable:g}s{tail}（假服务/按官方 usage 计）")
     print(f"产物目录：{DEMO_DIR}")
     print("=" * 78)
 
@@ -144,31 +151,31 @@ def main() -> int:
     print(f"   {tasks_file.relative_to(ROOT)}")
 
     server = None
-    if args.real and not os.environ.get("RUNNINGHUB_API_KEY", "").strip():
-        print("\n③ 缺少 RUNNINGHUB_API_KEY，真实模式无法继续。")
-        print("   set RUNNINGHUB_API_KEY=你的32位Key")
+    if args.real and not os.environ.get("DASHSCOPE_API_KEY", "").strip():
+        print("\n③ 缺少 DASHSCOPE_API_KEY，真实模式无法继续。")
+        print("   set DASHSCOPE_API_KEY=sk-你的Key")
         print("   或先去掉 --real 跑离线演练： python3 demo.py")
         return 1
 
     try:
         if args.real:
-            print("\n③ 真实模式：确认已设置 RUNNINGHUB_API_KEY，将真实提交 1 条（会扣费）")
-            base = "https://www.runninghub.cn/openapi/v2"
+            print("\n③ 真实模式：确认已设置 DASHSCOPE_API_KEY，将真实提交 1 条（会扣费）")
+            base = (os.environ.get("WAN_BASE_URL") or "https://dashscope.aliyuncs.com/api/v1").rstrip("/")
         else:
             port = free_port()
             print(f"\n③ 启动本地假服务 :{port}")
             server = subprocess.Popen(
-                [sys.executable, str(ROOT / "tests" / "mock_runninghub.py"), str(port)],
+                [sys.executable, str(ROOT / "tests" / "mock_dashscope.py"), str(port)],
                 cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             if not wait_port(port):
                 print("   假服务启动失败")
                 return 1
-            base = f"http://127.0.0.1:{port}/openapi/v2"
+            base = f"http://127.0.0.1:{port}/api/v1"
             print("   就绪")
 
-        print("\n④ 跑生产流程：上传 → 提交 → 轮询 → 下载 → 记账")
-        code = run_client(tasks_file, 1 if args.real else args.count, base)
+        print("\n④ 跑生产流程：准备服装图 → 提交 → 轮询 → 下载 → 记账")
+        code = run_client(tasks_file, 1 if args.real else args.count, base, real=args.real)
     finally:
         if server:
             server.terminate()
@@ -185,8 +192,8 @@ def main() -> int:
         else:
             print("\n真实调用未成功，原因见上面的错误信息（常见：Key 无效、余额不足、素材不可达）。")
     else:
-        print("\n链路已打通（离线）。素材准备好后，去掉 RH_BASE_URL 直接跑真实任务：")
-        print("  set RUNNINGHUB_API_KEY=你的Key")
+        print("\n链路已打通（离线）。素材准备好后，去掉 WAN_BASE_URL 直接跑真实任务：")
+        print("  set DASHSCOPE_API_KEY=sk-你的Key")
         print("  python3 wan3_r2v.py run --tasks batch/tasks.batch.json --limit 1")
     return code
 

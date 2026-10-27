@@ -6,7 +6,7 @@
     python scripts/license_deploy.py pack        # 把 server/ 两个文件打成 dist/license-deploy.zip
     python scripts/license_deploy.py deploy      # 打包 + 上传 + 等函数变 Active（函数不存在则创建）
     python scripts/license_deploy.py check CODE  # 验某个密码在线上是否可用（--expect reject 验是否被拒）
-    python scripts/license_deploy.py config      # 看运行配置（RH Key / 清单）填全了没，线上有没有下发
+    python scripts/license_deploy.py config      # 看运行配置（wan.api_key / 清单）填全了没，线上有没有下发
     python scripts/license_deploy.py test        # 线上验收：激活/复核/换机/错密码
 
 依赖：本机已安装 tccli 并完成登录（tccli auth login --profile agent1）。
@@ -41,7 +41,7 @@ if not __import__("shutil").which(TCCLI):
             break
 
 # 部署包必须包含的文件。缺任何一个都直接失败——宁可不部署，也别部署半套。
-# config.json 是运行必需（新版靠它下发 RH Key / 模板清单 / COS）。
+# config.json 是运行必需（新版靠它下发 百炼 Key / 模板清单 / COS）。
 ZIP_FILES = ["license_api.py", "passwords.json", "config.json"]
 
 MISSING_HINT = {
@@ -262,9 +262,17 @@ def config_status() -> int:
     with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
     key = str(data.get("rh_api_key") or "")
+    wan = data.get("wan") or {}
+    if not isinstance(wan, dict):
+        wan = {}
+    wan_key = str(wan.get("api_key") or "")
+    wan_model = str(wan.get("model") or "")
+    wan_base = str(wan.get("base_url") or "")
     manifest = str(data.get("manifest_url") or "")
     cos = data.get("cos") or {}
-    print(f"[config] 本地 rh_api_key   : {'已填（长度 ' + str(len(key)) + '）' if key else '未填 ← 客户端会显示「配置：未下发」'}")
+    print(f"[config] 本地 wan.api_key : {'已填（长度 ' + str(len(wan_key)) + '）' if wan_key else '未填 ← 新客户端会显示「配置：未下发」'}")
+    print(f"[config] 本地 wan         : provider={wan.get('provider') or 'dashscope'} model={wan_model or '未填'} base={wan_base or '未填'}")
+    print(f"[config] 本地 rh_api_key   : {'已填（长度 ' + str(len(key)) + '）' if key else '未填（旧客户端不可用；新客户端用 wan）'}")
     print(f"[config] 本地 manifest_url : {manifest or '未填 ← 客户端显示「模板清单：未下发」'}")
     print(f"[config] 本地 cos          : enabled={cos.get('enabled')} bucket={cos.get('bucket')} region={cos.get('region')} prefix={cos.get('prefix')}")
     tpl_b, out_b = (cos.get("template_bucket") or ""), (cos.get("output_bucket") or "")
@@ -274,7 +282,7 @@ def config_status() -> int:
         print(f"[config] 本地 双桶          : 两桶相同（{tpl_b}）← 双桶未生效，确认是否有意为之")
     else:
         print(f"[config] 本地 双桶          : 模板={tpl_b} | 成品={out_b}")
-    ok &= bool(key) and bool(manifest) and bool(tpl_b) and bool(out_b)
+    ok &= bool(wan_key) and bool(wan_model) and bool(wan_base) and bool(manifest) and bool(tpl_b) and bool(out_b)
 
     base = function_url()
     if not base:
@@ -292,10 +300,16 @@ def config_status() -> int:
         print("[config] 线上 /activate 没有返回 config ← 服务端还是旧版，或 config.json 没传上去")
         return 1
     lkey = str(live.get("rh_api_key") or "")
+    lwan = live.get("wan") or {}
+    if not isinstance(lwan, dict):
+        lwan = {}
+    lwan_key = str(lwan.get("api_key") or "")
+    print(f"[config] 线上 wan.api_key : {'已下发（长度 ' + str(len(lwan_key)) + '）' if lwan_key else '未下发（空）'}")
+    print(f"[config] 线上 wan         : model={lwan.get('model') or '未下发'} base={lwan.get('base_url') or '未下发'}")
     print(f"[config] 线上 rh_api_key   : {'已下发（长度 ' + str(len(lkey)) + '）' if lkey else '未下发（空）'}")
     print(f"[config] 线上 manifest_url : {live.get('manifest_url') or '未下发（空）'}")
     print(f"[config] 线上多余字段      : {[k for k in live if k.startswith('_')] or '无'}")
-    ok &= bool(lkey)
+    ok &= bool(lwan_key) and bool(lwan.get("model")) and bool(lwan.get("base_url"))
     print("[config] 结论:", "配置完整，客户端可用" if ok else "还缺东西，见上面标 ← 的行")
     return 0 if ok else 1
 

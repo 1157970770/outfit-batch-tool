@@ -1,5 +1,24 @@
 {
-  "_说明": "这份文件放在云函数代码目录，随激活/复核下发给客户端。改完重新部署即可，客户端下次启动生效。",
+  "_说明": "这份文件放在云函数代码目录，随激活/复核下发给客户端。改完重新部署即可，客户端下次启动生效。真实密钥只放 server/config.json（不入库）。",
+  "wan": {
+    "provider": "dashscope",
+    "api_key": "",
+    "model": "wan3.0-video",
+    "base_url": "https://dashscope.aliyuncs.com/api/v1",
+    "region": "cn-beijing",
+    "default_mode": "edit",
+    "default_duration": -1,
+    "default_ratio": "adaptive",
+    "poll_interval": 15,
+    "poll_timeout": 1800,
+    "max_concurrency": 3,
+    "query_qps": 10,
+    "price_per_second": {
+      "480P": null,
+      "720P": null,
+      "1080P": null
+    }
+  },
   "rh_api_key": "",
   "manifest_url": "",
   "cos": {
@@ -7,7 +26,12 @@
     "bucket": "",
     "region": "ap-guangzhou",
     "prefix": "",
-    "domain": ""
+    "source_prefix": "",
+    "domain": "",
+    "template_bucket": "",
+    "output_bucket": "",
+    "secret_id": "",
+    "secret_key": ""
   },
   "notice": "",
   "min_client_version": ""

@@ -1,4 +1,4 @@
-﻿"""远程配置链路测试：服务端 config.json → 激活 → 客户端拿到 → 映射成 cfg。"""
+"""远程配置链路测试：服务端 config.json → 激活 → 客户端拿到 → 映射成 cfg。"""
 import json
 import os
 import socket
@@ -23,6 +23,14 @@ sys.path.insert(0, str(ROOT))
     "RC-TEST": {"note": "测试", "expires": "2099-12-31", "revoked": False}}}), encoding="utf-8")
 (TMP / "config.json").write_text(json.dumps({
     "rh_api_key": "rh-key-from-server",
+    "wan": {
+        "provider": "dashscope",
+        "api_key": "sk-wan-from-server",
+        "model": "wan3.0-video",
+        "base_url": "https://dashscope.aliyuncs.com/api/v1",
+        "default_mode": "edit",
+        "price_per_second": {"720P": 0.5},
+    },
     "manifest_url": "https://cdn.example.com/manifest.json",
     "cos": {"enabled": True, "bucket": "b-1463907213", "region": "ap-guangzhou",
             "prefix": "prod", "domain": ""},
@@ -57,6 +65,7 @@ print("下发字段:", sorted(remote))
 
 cfg = cfgmod.load()
 print("RH_API_KEY:", cfg["RH_API_KEY"])
+print("WAN:", cfg["WAN_PROVIDER"], cfg["WAN_MODEL"], cfg["WAN_DEFAULT_MODE"], cfg["WAN_PRICE_PER_SECOND"])
 print("MANIFEST:", cfg["MANIFEST"])
 print("COS_ENABLED:", cfg["COS_ENABLED"], "| BUCKET:", cfg["COS_BUCKET"], "| PREFIX:", cfg["COS_PREFIX"])
 print("NOTICE:", cfg["NOTICE"])
@@ -66,7 +75,15 @@ cache_file = Path(os.environ["APPDATA"]) / "RHOutfitTool" / "license.json"
 raw = cache_file.read_text(encoding="utf-8")
 print("缓存文件前缀:", raw[:10], "| 含明文 rh-key:", "rh-key-from-server" in raw)
 
-ok = (cfg["RH_API_KEY"] == "rh-key-from-server" and cfg["COS_ENABLED"] == "true"
-      and cfg["MANIFEST"].endswith("manifest.json") and "rh-key-from-server" not in raw)
+ok = (cfg["RH_API_KEY"] == "rh-key-from-server"
+      and cfg["WAN_API_KEY"] == "sk-wan-from-server"
+      and cfg["WAN_PROVIDER"] == "dashscope"
+      and cfg["WAN_MODEL"] == "wan3.0-video"
+      and cfg["WAN_DEFAULT_MODE"] == "edit"
+      and cfg["WAN_PRICE_PER_SECOND"].get("720P") == 0.5
+      and cfg["COS_ENABLED"] == "true"
+      and cfg["MANIFEST"].endswith("manifest.json")
+      and "rh-key-from-server" not in raw
+      and "sk-wan-from-server" not in raw)
 proc.terminate()
 print("OK 远程配置链路通过" if ok else "FAIL")

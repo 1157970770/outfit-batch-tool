@@ -4,13 +4,15 @@
 
 职责：模板清单 → 任务规划 → 上传服装图 → 并发提交 → 轮询 → 下载 → 校验 → 记账落盘。
 界面层只负责调用 run() 并接收事件回调。
+
+API 协议在 app/wan_api.py（官方 DashScope / 旧 RunningHub 双通道），
+素材上传在 app/media.py（COS 源目录 / Base64 兜底），本文件只编排。
 """
 
 from __future__ import annotations
 
 import csv
 import json
-import os
 import random
 import shutil
 import subprocess
@@ -24,18 +26,26 @@ from pathlib import Path
 
 try:                      # 作为包导入（测试/界面）
     from .storage import Storage, file_fingerprint, object_key
+    from .wan_api import (
+        STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
+        TaskCanceled, TaskExpired, WaitTimeout, WanClient, WanConfig, WanError,
+        estimate_cost,
+    )
+    from .media import MediaError, SourceUploader, describe_media_source, resolve_body, resolve_image
 except ImportError:       # 直接 python3 app/core.py 时
     from storage import Storage, file_fingerprint, object_key  # type: ignore
-
-BASE_DEFAULT = "https://www.runninghub.cn/openapi/v2"
-SUBMIT_PATH = "/alibaba/wan-3.0/reference-to-video"
-QUERY_PATH = "/query"
-UPLOAD_PATH = "/media/upload/binary"
-ACCOUNT_URL = "https://www.runninghub.cn/uc/openapi/accountStatus"
+    from wan_api import (  # type: ignore
+        STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
+        TaskCanceled, TaskExpired, WaitTimeout, WanClient, WanConfig, WanError,
+        estimate_cost,
+    )
+    from media import (  # type: ignore
+        MediaError, SourceUploader, describe_media_source, resolve_body, resolve_image,
+    )
 
 DEFAULT_PROMPT = (
-    "视频1中的人物，保留其面部、发型、肤色与动作不变，"
-    "仅将身上服装更换为图1中无头模特展示的这套服装（版型、颜色、材质、细节一致），"
+    "编辑视频1：保持视频1中人物的面部、发型、肤色、动作、背景与镜头不变，"
+    "仅将人物身上服装替换为图1中无头模特展示的这套服装（版型、颜色、材质、细节一致），"
     "人物头部完整、面部清晰、颈部衔接自然，画面自然真实，布料质感清晰"
 )
 
@@ -52,7 +62,7 @@ class EngineError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def load_manifest(source: str, timeout: int = 15) -> list[dict]:
-    """source 可以是 https URL、本地文件路径。返回 [{id, url, duration}]。"""
+    """source 可以是 https URL、本地文件路径。返回 [{id, url, key, duration}]。"""
     if source.startswith(("http://", "https://")):
         try:
             with urllib.request.urlopen(source, timeout=timeout) as resp:
@@ -104,92 +114,16 @@ def plan_batch(templates: list[dict], mode: str, group: int | None = None,
 
 
 # ---------------------------------------------------------------------------
-# HTTP
+# HTTP / 本地工具
 # ---------------------------------------------------------------------------
-
-def post_json(path: str, payload: dict, key: str, base: str, timeout: int = 90) -> dict:
-    req = urllib.request.Request(
-        f"{base}{path}",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
-        raise EngineError(f"HTTP {exc.code}: {raw[:300]}") from None
-    except urllib.error.URLError as exc:
-        raise EngineError(f"网络错误：{exc.reason}") from None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        raise EngineError(f"响应不是 JSON：{raw[:200]}") from None
-
-
-def upload_media(path: str, key: str, base: str) -> str:
-    exe = shutil.which("curl")
-    if not exe:
-        raise EngineError("缺少 curl，无法上传素材")
-    result = subprocess.run(
-        [exe, "-sS", "--fail-with-body", "-X", "POST", f"{base}{UPLOAD_PATH}",
-         "-H", f"Authorization: Bearer {key}", "-F", f"file=@{path}", "--max-time", "600"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise EngineError(f"上传失败：{(result.stdout or result.stderr)[:300]}")
-    data = json.loads(result.stdout)
-    if data.get("code") != 0:
-        raise EngineError(f"上传被拒：{json.dumps(data, ensure_ascii=False)[:300]}")
-    url = data["data"]["download_url"]
-    if not url.startswith(("http://", "https://")):
-        raise EngineError(f"上传返回的地址不完整：{url}")
-    return url
-
 
 def download_file(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=600) as resp, open(tmp, "wb") as fh:
+    req = urllib.request.Request(url, headers={"User-Agent": "outfit-batch/1.0", "Accept": "*/*"})
+    with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as fh:
         shutil.copyfileobj(resp, fh)
     tmp.replace(dest)
-
-
-def check_account(key: str, timeout: int = 15) -> dict:
-    """校验 RunningHub Key 并读取余额。返回 {ok, balance, coins, currency, api_type, message}。"""
-    req = urllib.request.Request(
-        ACCOUNT_URL,
-        data=json.dumps({"apikey": key}).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        return {"ok": False, "message": f"HTTP {exc.code}"}
-    except urllib.error.URLError as exc:
-        return {"ok": False, "message": f"网络错误：{exc.reason}"}
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {"ok": False, "message": f"返回不是 JSON：{raw[:120]}"}
-
-    if data.get("code") != 0:
-        return {"ok": False, "message": data.get("msg") or "Key 无效"}
-
-    info = data.get("data") or {}
-    return {
-        "ok": True,
-        "balance": info.get("remainMoney"),
-        "coins": info.get("remainCoins"),
-        "currency": info.get("currency", "CNY"),
-        "api_type": info.get("apiType", ""),
-        "running": info.get("currentTaskCounts", "0"),
-        "message": "Key 有效",
-    }
 
 
 def probe_duration(path: Path) -> float | None:
@@ -210,6 +144,16 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
+def _as_seconds(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # 批量执行
 # ---------------------------------------------------------------------------
@@ -222,20 +166,27 @@ class BatchSpec:
     out_dir: Path
     templates: list[dict]
     api_key: str
-    base: str = BASE_DEFAULT
+    base: str = ""
+    provider: str = "dashscope"
+    model: str = "wan3.0-video"
+    mode: str = "edit"
     resolution: str = "720P"
-    duration: str = "7"
-    aspect_ratio: str = "9:16"
+    duration: str | int | None = None
+    aspect_ratio: str | None = None
     concurrency: int = 3
-    poll_interval: float = 5.0
+    poll_interval: float = 15.0
     poll_timeout: int = 1800
     expect_seconds: float = 7.0
-    # 可选：产物同步到对象存储（None = 只落本地，保持旧行为）
+    # 可选：产物同步到对象存储（None = 只落本地）
     storage: Storage | None = None
     # 可选：模板视频所在桶（清单里写 key 时用它签名）；缺省复用 storage
     template_storage: Storage | None = None
     archive_prefix: str = "output"
     archive_expires: int = 7 * 24 * 3600
+    # 服装图源目录：默认 {COS_PREFIX}/output/source
+    source_prefix: str = ""
+    source_expires: int = 7 * 24 * 3600
+    price_per_second: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -246,11 +197,27 @@ class BatchState:
 
     def snapshot(self) -> dict:
         with self.lock:
+            billable = 0.0
+            estimated = 0.0
+            for rec in self.records.values():
+                try:
+                    billable += float(rec.get("billable_seconds") or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    estimated += float(rec.get("estimated_cost") or 0)
+                except (TypeError, ValueError):
+                    pass
             return {
                 "batch_id": self.spec.batch_id,
                 "started": getattr(self, "started", ""),
+                "provider": self.spec.provider,
+                "model": self.spec.model,
+                "mode": self.spec.mode,
                 "concurrency": self.spec.concurrency,
                 "prompt": self.spec.prompt,
+                "billable_seconds": round(billable, 2),
+                "estimated_cost": round(estimated, 2) if estimated else None,
                 "records": list(self.records.values()),
             }
 
@@ -270,6 +237,37 @@ class BatchRunner:
         self._image_url: str | None = None
         self._upload_lock = threading.Lock()
         self._save_lock = threading.Lock()
+        self._media_cache: dict = {}
+        self._client = WanClient(self._wan_config())
+        # 本地目录后端只用于测试/离线演练，签名出来是 file://，官方拉不到；
+        # 这种场景直接走 Base64，避免把 file:// 塞进请求体。
+        remote_storage = (
+            spec.storage is not None
+            and str(getattr(spec.storage.cfg, "provider", "")).lower() != "local"
+        )
+        self._uploader = (
+            SourceUploader(
+                spec.storage, spec.source_prefix,
+                expires=spec.source_expires, log=self.log,
+            )
+            if remote_storage else None
+        )
+
+    def _wan_config(self) -> WanConfig:
+        spec = self.spec
+        return WanConfig(
+            provider=spec.provider,
+            api_key=spec.api_key,
+            base_url=spec.base,
+            model=spec.model,
+            default_mode=spec.mode,
+            default_duration=spec.duration,
+            default_ratio=spec.aspect_ratio,
+            poll_interval=spec.poll_interval,
+            poll_timeout=spec.poll_timeout,
+            max_concurrency=spec.concurrency,
+            price_per_second=spec.price_per_second,
+        )
 
     # ---- 控制 ----
     def pause(self) -> None:
@@ -305,11 +303,8 @@ class BatchRunner:
                     rec = fut.result()
                 except Exception as exc:  # 单条异常不影响整批
                     rec = {"id": tpl["id"], "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
-                    with self.state.lock:
-                        self.state.records[tpl["id"]] = rec
-                else:
-                    with self.state.lock:
-                        self.state.records[tpl["id"]] = rec
+                with self.state.lock:
+                    self.state.records[tpl["id"]] = rec
                 done += 1
                 self._save_state()
                 self._emit("progress", done=done, total=total, record=rec)
@@ -320,8 +315,17 @@ class BatchRunner:
             "total": total,
             "success": sum(1 for r in self.state.records.values() if r.get("status") == "success"),
             "failed": sum(1 for r in self.state.records.values() if r.get("status") == "failed"),
-            "cost": self._total_cost(),
+            "running": sum(1 for r in self.state.records.values() if r.get("status") == "running"),
+            "expired": sum(1 for r in self.state.records.values() if r.get("status") == "expired"),
+            "canceled": sum(1 for r in self.state.records.values() if r.get("status") == "canceled"),
+            "billable_seconds": round(sum(
+                float(r.get("billable_seconds") or 0) for r in self.state.records.values()
+            ), 2),
+            "estimated_cost": self._total_estimated_cost(),
+            "cost": self._total_estimated_cost(),  # 兼容旧界面字段
             "out_dir": str(spec.out_dir),
+            "provider": spec.provider,
+            "model": spec.model,
             "archived": sum(1 for r in self.state.records.values() if r.get("cos_key")),
             "archive_failed": sum(1 for r in self.state.records.values() if r.get("archive_error")),
         }
@@ -329,11 +333,7 @@ class BatchRunner:
         return summary
 
     def _prepare_templates(self) -> None:
-        """清单里写的是对象 key（私有桶）时，开工前统一签成有效 URL。
-
-        签名有效期 24 小时：一批 100 条通常 1 小时内跑完，够用；
-        又不用把桶改成公有读，模板不会被白拿。
-        """
+        """清单里写的是对象 key（私有桶）时，开工前统一签成有效 URL。"""
         pending = [t for t in self.spec.templates if not t.get("url") and t.get("key")]
         if not pending:
             return
@@ -341,7 +341,7 @@ class BatchRunner:
         if signer is None:
             raise EngineError(
                 "模板清单用的是 COS 对象 key，需要签名才能给模型访问，"
-                "但当前没有启用 COS（配置.ini 里 COS_ENABLED=false）。"
+                "但当前没有启用 COS。"
             )
         self.log(f"为 {len(pending)} 个模板生成签名链接（24 小时有效）")
         for tpl in pending:
@@ -354,78 +354,126 @@ class BatchRunner:
         with self._upload_lock:
             if self._image_url:
                 return
-            self.log(f"上传服装图：{Path(self.spec.image_path).name}")
-            self._image_url = upload_media(self.spec.image_path, self.spec.api_key, self.spec.base)
-            self.log("服装图已就绪，100 条任务共用这一个地址")
+            self.log(f"准备服装图：{Path(self.spec.image_path).name}")
+            try:
+                self._image_url = resolve_image(self.spec.image_path, self._uploader)
+            except MediaError as exc:
+                raise EngineError(str(exc)) from None
+            self.log(f"服装图已就绪（{describe_media_source(self._image_url)}），100 条任务共用")
 
     def _run_one(self, tpl: dict) -> dict:
         spec = self.spec
         tid = tpl["id"]
         out_file = spec.out_dir / f"{tid}.mp4"
+        template_seconds = _as_seconds(tpl.get("duration"))
         rec = {"id": tid, "template": tpl["url"], "status": "pending",
-               "file": str(out_file), "cost": None, "seconds": None, "error": None}
+               "provider": spec.provider, "model": spec.model, "mode": spec.mode,
+               "resolution": spec.resolution, "file": str(out_file),
+               "billable_seconds": None, "estimated_cost": None, "cost": None,
+               "seconds": None, "error": None}
 
         self.pause_event.wait()
         if self.stop_event.is_set():
             rec["status"] = "skipped"
             return rec
 
-        body = {
+        task = {
+            "id": tid,
+            "mode": spec.mode,
             "prompt": spec.prompt,
             "imageUrls": [self._image_url],
             "videoUrls": [tpl["url"]],
             "resolution": spec.resolution,
-            "aspectRatio": spec.aspect_ratio,
-            "duration": spec.duration,
             "audio": False,
             "promptExtend": False,
             "watermark": False,
         }
+        if spec.duration is not None:
+            task["duration"] = spec.duration
+        if spec.aspect_ratio:
+            task["aspectRatio"] = spec.aspect_ratio
+
+        body, errors, warnings = self._client.build_body(
+            task, video_durations=[template_seconds], default_mode=spec.mode,
+        )
+        for msg in warnings:
+            self.log(f"[{tid}] 提示：{msg}")
+        if errors:
+            rec["status"] = "invalid"
+            rec["error"] = "; ".join(errors)
+            return rec
+
         started = time.time()
         try:
-            resp = post_json(SUBMIT_PATH, body, spec.api_key, spec.base)
-            task_id = resp.get("taskId")
-            if not task_id:
-                raise EngineError(f"提交失败：{resp.get('errorMessage') or resp}")
-            rec["task_id"] = task_id
+            # 桌面链路里 image/video 通常已是 URL；这里兜底处理本地路径
+            body = resolve_body(body, self._uploader, cache=self._media_cache)
+            wire = self._client.wire_body(body)
+            resp = self._client.submit(wire)
+            rec["task_id"] = resp.task_id
+            rec["request_id"] = resp.request_id
+            rec["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            rec["task_expires_at"] = int(time.time()) + 24 * 3600
+            rec["status"] = "running"
             with self.state.lock:
                 self.state.records[tid] = dict(rec)
             self._save_state()
+            self.log(f"[{tid}] 已提交 taskId={resp.task_id} status={resp.status}")
 
-            final = self._wait(task_id)
-            results = final.get("results") or []
-            if not results or not results[0].get("url"):
-                raise EngineError("任务成功但没有结果地址")
-            download_file(results[0]["url"], out_file)
+            final = self._client.wait_task(
+                resp.task_id, timeout=spec.poll_timeout, interval=spec.poll_interval,
+                on_status=lambda status: self.log(f"[{tid}] {status}"),
+            )
+            if final.status == STATUS_UNKNOWN:
+                raise TaskExpired(resp.task_id)
+            if final.status == STATUS_CANCELED:
+                raise TaskCanceled(resp.task_id)
+            if final.status == STATUS_FAILED:
+                raise EngineError(
+                    f"任务失败 [{final.code or 'UNKNOWN'}] {final.message or '无错误信息'}"
+                    + (f" request_id={final.request_id}" if final.request_id else "")
+                )
+            if final.status != STATUS_SUCCEEDED or not final.video_url:
+                raise EngineError(f"任务状态 {final.status} 但没有结果地址")
 
-            rec["status"] = "success"
-            rec["cost"] = ((final.get("usage") or {}).get("consumeMoney"))
-            rec["seconds"] = round(time.time() - started, 1)
-            rec["verify"] = self._verify(out_file)
+            download_file(final.video_url, out_file)
+
+            usage = final.usage or {}
+            billable, estimated = estimate_cost(usage, spec.resolution, spec.price_per_second)
+            rec.update({
+                "status": "success",
+                "request_id": final.request_id or rec.get("request_id", ""),
+                "usage": usage,
+                "billable_seconds": billable,
+                "estimated_cost": estimated,
+                "seconds": round(time.time() - started, 1),
+                "verify": self._verify(out_file, template_seconds),
+            })
             self._archive(rec, out_file)
-        except EngineError as exc:
+        except WaitTimeout as exc:
+            rec["status"] = "running"
+            rec["error"] = str(exc)
+        except TaskExpired as exc:
+            rec["status"] = "expired"
+            rec["error"] = str(exc)
+        except TaskCanceled as exc:
+            rec["status"] = "canceled"
+            rec["error"] = str(exc)
+        except WanError as exc:
             rec["status"] = "failed"
             rec["error"] = str(exc)
-        except Exception as exc:
+            if exc.request_id:
+                rec["request_id"] = exc.request_id
+        except (EngineError, MediaError) as exc:
+            rec["status"] = "failed"
+            rec["error"] = str(exc)
+        except Exception as exc:  # 单个任务炸掉不影响整批
             rec["status"] = "failed"
             rec["error"] = f"{type(exc).__name__}: {exc}"
-        return rec
 
-    def _wait(self, task_id: str) -> dict:
-        spec = self.spec
-        deadline = time.time() + spec.poll_timeout
-        while time.time() < deadline:
-            self.pause_event.wait()
-            if self.stop_event.is_set():
-                raise EngineError("已停止")
-            time.sleep(spec.poll_interval)
-            resp = post_json(QUERY_PATH, {"taskId": task_id}, spec.api_key, spec.base, timeout=45)
-            status = resp.get("status")
-            if status == "SUCCESS":
-                return resp
-            if status == "FAILED":
-                raise EngineError(f"[{resp.get('errorCode')}] {resp.get('errorMessage') or '任务失败'}")
-        raise EngineError(f"等待超时（{spec.poll_timeout}s）")
+        with self.state.lock:
+            self.state.records[tid] = rec
+        self._save_state()
+        return rec
 
     def _archive(self, rec: dict, path: Path) -> None:
         """把刚下载的成品推进对象存储。
@@ -437,7 +485,7 @@ class BatchRunner:
             return
         key = object_key(
             self.spec.archive_prefix, path.name, batch=self.spec.batch_id,
-            prefix=getattr(storage.cfg, "clean_prefix", lambda: "")(),
+            prefix=storage.cfg.clean_prefix(),
             digest=file_fingerprint(path),
         )
         try:
@@ -448,25 +496,31 @@ class BatchRunner:
             rec["archive_error"] = f"{type(exc).__name__}: {exc}"
             self.log(f"[{rec['id']}] 归档失败：{exc}")
 
-    def _verify(self, path: Path) -> dict:
+    def _verify(self, path: Path, expected: float | None = None) -> dict:
         info = {"size_kb": round(path.stat().st_size / 1024) if path.exists() else 0}
         if info["size_kb"] < 50:
             info["warn"] = "文件过小，疑似下载不完整"
         secs = probe_duration(path)
         if secs is not None:
             info["duration"] = round(secs, 2)
-            if abs(secs - self.spec.expect_seconds) > 2.0:
-                info["warn"] = f"时长 {secs:.1f}s 与预期 {self.spec.expect_seconds:g}s 不符"
+            target = expected if expected is not None else self.spec.expect_seconds
+            if target and abs(secs - target) > 2.0:
+                info["warn"] = f"时长 {secs:.1f}s 与预期 {target:g}s 不符"
         return info
 
-    def _total_cost(self) -> float:
+    def _total_estimated_cost(self) -> float | None:
         total = 0.0
+        found = False
         for rec in self.state.records.values():
+            value = rec.get("estimated_cost")
+            if value is None:
+                continue
+            found = True
             try:
-                total += float(rec.get("cost") or 0)
+                total += float(value)
             except (TypeError, ValueError):
                 pass
-        return round(total, 2)
+        return round(total, 2) if found else None
 
     def _save_state(self) -> None:
         path = self.spec.out_dir / "batch.json"
@@ -479,13 +533,22 @@ class BatchRunner:
         path = self.spec.out_dir / "report.csv"
         with path.open("w", encoding="utf-8-sig", newline="") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["模板编号", "状态", "耗时(秒)", "扣费", "文件大小(KB)", "时长(秒)", "错误", "对象Key"])
+            writer.writerow([
+                "模板编号", "状态", "模式", "耗时(秒)", "计费秒数", "输出时长(秒)",
+                "分辨率", "预估费用", "文件大小(KB)", "实测时长(秒)", "错误",
+                "对象Key", "request_id",
+            ])
             for rid in sorted(self.state.records):
                 rec = self.state.records[rid]
                 verify = rec.get("verify") or {}
-                writer.writerow([rid, rec.get("status"), rec.get("seconds"), rec.get("cost"),
-                                 verify.get("size_kb"), verify.get("duration"), rec.get("error"),
-                                 rec.get("cos_key") or ""])
+                usage = rec.get("usage") or {}
+                writer.writerow([
+                    rid, rec.get("status"), rec.get("mode"), rec.get("seconds"),
+                    rec.get("billable_seconds"), usage.get("output_video_duration"),
+                    rec.get("resolution"), rec.get("estimated_cost"),
+                    verify.get("size_kb"), verify.get("duration"), rec.get("error"),
+                    rec.get("cos_key") or "", rec.get("request_id") or "",
+                ])
 
     def _emit(self, kind: str, **payload) -> None:
         self.on_event({"type": kind, **payload})

@@ -4,7 +4,7 @@
 
 没有任何 ini / 用户可编辑的配置文件。
   · 服务地址：内置常量 SERVICE_URL（改不了）
-  · RH Key / 模板清单 / COS：登录时由服务端随票下发，加密缓存在 license.json
+  · 百炼 Key / 模板清单 / COS：登录时由服务端随票下发，加密缓存在 license.json
   · 输出目录：用户用"浏览"选一次，记在 ui.json（加密）
 """
 
@@ -86,14 +86,43 @@ def truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "是"}
 
 
+def _price_map(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float | None] = {}
+    for key, raw in value.items():
+        key = str(key).strip().upper()
+        if not key:
+            continue
+        if raw in (None, ""):
+            out[key] = None
+            continue
+        try:
+            out[key] = float(raw)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def load() -> dict:
     """组装成界面/引擎使用的扁平字典（键名保持历史一致，减少改动面）。"""
     from app import license as licensemod
 
     remote = licensemod.get_config() or {}
     cos = remote.get("cos") or {}
+    wan = remote.get("wan") or {}
+    if not isinstance(wan, dict):
+        wan = {}
+
+    rh_key = str(remote.get("rh_api_key") or "").strip()
+    wan_key = str(wan.get("api_key") or "").strip()
+    provider = str(wan.get("provider") or "").strip().lower()
+    if provider not in ("dashscope", "runninghub"):
+        # 兼容：服务端只有旧 rh_api_key 时仍走 RunningHub
+        provider = "runninghub" if (rh_key and not wan_key) else "dashscope"
+
     return {
-        "RH_API_KEY": str(remote.get("rh_api_key") or "").strip(),
+        "RH_API_KEY": rh_key,
         "MANIFEST": str(remote.get("manifest_url") or "").strip(),
         "OUTPUT_ROOT": str(output_dir()),
         "COS_ENABLED": "true" if truthy(cos.get("enabled")) else "false",
@@ -104,9 +133,37 @@ def load() -> dict:
         "COS_REGION": str(cos.get("region") or "ap-guangzhou").strip(),
         "COS_PREFIX": str(cos.get("prefix") or "").strip(),
         "COS_DOMAIN": str(cos.get("domain") or "").strip(),
+        # 服装图源目录；留空回退 {COS_PREFIX}/output/source
+        "COS_SOURCE_PREFIX": str(cos.get("source_prefix") or "").strip(),
         # 服务端下发的 COS 凭证（子账号：只能写成品桶）；没下发时留空，客户端回退本机凭证
         "COS_SECRET_ID": str(cos.get("secret_id") or "").strip(),
         "COS_SECRET_KEY": str(cos.get("secret_key") or "").strip(),
+        # 百炼官方 API（新）
+        "WAN_PROVIDER": provider,
+        "WAN_API_KEY": wan_key,
+        "WAN_MODEL": str(wan.get("model") or "wan3.0-video").strip(),
+        "WAN_BASE_URL": str(wan.get("base_url") or "").strip(),
+        "WAN_REGION": str(wan.get("region") or "").strip(),
+        "WAN_DEFAULT_MODE": str(wan.get("default_mode") or "edit").strip().lower(),
+        "WAN_DEFAULT_DURATION": wan.get("default_duration"),
+        "WAN_DEFAULT_RATIO": wan.get("default_ratio"),
+        "WAN_POLL_INTERVAL": float(wan.get("poll_interval") or 15),
+        "WAN_POLL_TIMEOUT": int(wan.get("poll_timeout") or 1800),
+        "WAN_MAX_CONCURRENCY": int(wan.get("max_concurrency") or 3),
+        "WAN_QUERY_QPS": float(wan.get("query_qps") or 10),
+        "WAN_PRICE_PER_SECOND": _price_map(wan.get("price_per_second")),
         "NOTICE": str(remote.get("notice") or "").strip(),
         "SERVICE_URL": SERVICE_URL,
     }
+
+
+def active_api_key(cfg: dict) -> str:
+    """当前 provider 对应的 Key；新客户端优先 wan，旧配置回退 rh。"""
+    provider = str(cfg.get("WAN_PROVIDER") or "dashscope").strip().lower()
+    if provider == "runninghub":
+        return str(cfg.get("RH_API_KEY") or cfg.get("WAN_API_KEY") or "").strip()
+    return str(cfg.get("WAN_API_KEY") or "").strip()
+
+
+def wan_configured(cfg: dict) -> bool:
+    return bool(active_api_key(cfg) and str(cfg.get("WAN_MODEL") or "").strip())

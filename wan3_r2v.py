@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""万相 3.0 · 参考生视频（alibaba/wan-3.0/reference-to-video）批量客户端。
+"""万相 3.0 · 阿里云百炼官方 API 批量客户端（参考生视频 / 视频编辑）。
 
-只依赖标准库（HTTP 上传用系统自带 curl.exe）。
-规格见 docs/wan-3.0-reference-to-video.md，本文件每条校验都对应其中一节。
+默认走官方 DashScope 协议；保留 `--provider runninghub` 作为旧链路回滚。
 
 用法:
   python3 wan3_r2v.py validate --tasks tasks.example.json
   python3 wan3_r2v.py build    --tasks tasks.example.json --index 0
-  python3 wan3_r2v.py run      --tasks tasks.example.json [--limit N] [--concurrency 1]
+  python3 wan3_r2v.py run      --tasks tasks.example.json [--limit N] [--concurrency 3]
   python3 wan3_r2v.py upload   ./assets/role.mp4
-  python3 wan3_r2v.py query    2013508786110730241
+  python3 wan3_r2v.py query    <task_id>
+  python3 wan3_r2v.py emit     --tasks tasks.example.json --out batch/requests.jsonl
+
+规格与字段见 docs/wan-3.0-reference-to-video.md。
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -35,72 +38,58 @@ try:  # Windows 控制台中文输出
 except Exception:
     pass
 
-BASE = os.environ.get("RH_BASE_URL", "https://www.runninghub.cn/openapi/v2").rstrip("/")
-SUBMIT_PATH = "/alibaba/wan-3.0/reference-to-video"
-QUERY_PATH = "/query"
-UPLOAD_PATH = "/media/upload/binary"
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-RESOLUTIONS = ("480P", "720P", "1080P")
-ASPECT_RATIOS = ("adaptive", "16:9", "4:3", "1:1", "3:4", "9:16")
-DURATIONS = ("auto",) + tuple(str(i) for i in range(2, 31))
-MAX_VIDEOS, MAX_IMAGES, MAX_AUDIOS = 5, 10, 5
-MAX_VIDEO_SEGMENT = 15.0   # 单段 1–15 秒
-MAX_VIDEO_TOTAL = 15.0     # 参考视频总时长 ≤15 秒
-MAX_INPUT_PLUS_OUTPUT = 30.0
-MAX_SEED = 2147483647
-
-BODY_KEYS = (
-    "prompt", "videoUrls", "imageUrls", "audioUrls", "fileUrl", "linkUrl",
-    "resolution", "aspectRatio", "duration", "audio", "seed",
-    "promptExtend", "watermark", "webhookUrl",
+from app.wan_api import (  # noqa: E402
+    DASHSCOPE_DEFAULT_BASE, PROVIDER_DASHSCOPE, PROVIDER_RUNNINGHUB,
+    RUNNINGHUB_DEFAULT_BASE, STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED,
+    STATUS_UNKNOWN, SUBMIT_SUFFIX, TaskCanceled, TaskExpired, WaitTimeout,
+    WanClient, WanConfig, WanError, estimate_cost, to_wire_body, validate_task,
 )
-MEDIA_KEYS = ("videoUrls", "imageUrls", "audioUrls")
-TASK_META_KEYS = ("id", "output", "note")
+from app.media import (  # noqa: E402
+    MediaError, describe_media_source, resolve_audio, resolve_body,
+    resolve_image, resolve_video, uploader_from_env,
+)
+
+PROVIDER = (os.environ.get("WAN_PROVIDER") or PROVIDER_DASHSCOPE).strip().lower()
+MODEL = (os.environ.get("WAN_MODEL") or "wan3.0-video").strip()
+BASE = (
+    os.environ.get("WAN_BASE_URL")
+    or (os.environ.get("RH_BASE_URL") if PROVIDER == PROVIDER_RUNNINGHUB else "")
+    or (RUNNINGHUB_DEFAULT_BASE if PROVIDER == PROVIDER_RUNNINGHUB else DASHSCOPE_DEFAULT_BASE)
+).rstrip("/")
 
 
 class ApiError(RuntimeError):
     pass
 
 
-class WaitTimeout(ApiError):
-    """轮询超时：任务可能还在跑，保留 taskId 便于续查，不要重复提交。"""
+class WaitTimeoutError(ApiError):
+    """轮询超时：任务可能还在跑，保留 task_id 便于续查，不要重复提交。"""
 
 
 # ---------------------------------------------------------------------------
 # 基础工具
 # ---------------------------------------------------------------------------
 
-def api_key(explicit: str | None) -> str:
-    key = (explicit or os.environ.get("RUNNINGHUB_API_KEY", "")).strip()
+def _env_key(provider: str) -> str:
+    for name in ("WAN_API_KEY", "DASHSCOPE_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    if provider == PROVIDER_RUNNINGHUB:
+        return os.environ.get("RUNNINGHUB_API_KEY", "").strip()
+    return ""
+
+
+def api_key(explicit: str | None, provider: str = PROVIDER) -> str:
+    key = (explicit or _env_key(provider)).strip()
     if not key:
-        raise SystemExit("缺少 API Key：设置环境变量 RUNNINGHUB_API_KEY，或传 --api-key。")
+        names = "WAN_API_KEY / DASHSCOPE_API_KEY" if provider != PROVIDER_RUNNINGHUB else "RUNNINGHUB_API_KEY"
+        raise SystemExit(f"缺少 API Key：设置环境变量 {names}，或传 --api-key。")
     return key
-
-
-def as_bool(value, field: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        low = value.strip().lower()
-        if low in ("true", "1", "yes", "on"):
-            return True
-        if low in ("false", "0", "no", "off"):
-            return False
-    raise ValueError(f"{field} 需要布尔值，收到 {value!r}")
-
-
-def as_int(value, field: str) -> int:
-    if isinstance(value, bool):
-        raise ValueError(f"{field} 需要整数，收到布尔值")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
-        return int(value.strip())
-    raise ValueError(f"{field} 需要整数，收到 {value!r}")
 
 
 def ffprobe_duration(src: str) -> float | None:
@@ -124,218 +113,62 @@ def ffprobe_duration(src: str) -> float | None:
     return value if value > 0 else None
 
 
-# ---------------------------------------------------------------------------
-# 构造 + 校验
-# ---------------------------------------------------------------------------
-
-def build_body(task: dict, defaults: dict, probe: bool = True) -> tuple[dict, list[str], list[str]]:
-    """返回 (请求体, errors, warnings)。errors 非空时不要提交。"""
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    unknown = set(task) - set(BODY_KEYS) - set(TASK_META_KEYS)
-    if unknown:
-        errors.append(f"未知字段: {', '.join(sorted(unknown))}（拼错的字段会被服务端静默忽略，这里直接拦下）")
-
-    body: dict = {}
-    for key in BODY_KEYS:
-        if key in task:
-            value = task[key]
-        elif key in defaults:
-            value = defaults[key]
-        else:
-            continue
-        if value is None:
-            continue
-        body[key] = value
-
-    # prompt
-    prompt = body.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        errors.append("prompt 必填，且不能为空字符串")
-        prompt = prompt if isinstance(prompt, str) else ""
-    elif len(prompt) > 5000:
-        warnings.append(f"prompt 长度 {len(prompt)}，建议精简到 2000 字以内")
-
-    # 三个素材数组
-    for key in MEDIA_KEYS:
-        if key not in body:
-            continue
-        value = body[key]
-        if isinstance(value, str):
-            errors.append(f"{key} 必须是数组，收到字符串（单个素材也要包成 [\"...\"]）")
-            body[key] = [value]
-        elif not isinstance(value, list):
-            errors.append(f"{key} 必须是数组，收到 {type(value).__name__}")
-            body[key] = []
-        for idx, item in enumerate(body[key]):
-            if not isinstance(item, str) or not item.strip():
-                errors.append(f"{key}[{idx}] 必须是非空字符串（URL 或本地路径）")
-
-    for key in MEDIA_KEYS:
-        for idx, item in enumerate(body.get(key) or []):
-            if isinstance(item, str) and not item.startswith(("http://", "https://", "data:")):
-                if not Path(item).exists():
-                    warnings.append(f"{key}[{idx}] 本地文件不存在: {item}（提交前需上传或改成 URL）")
-
-    videos = body.get("videoUrls") or []
-    images = body.get("imageUrls") or []
-    audios = body.get("audioUrls") or []
-
-    if len(videos) > MAX_VIDEOS:
-        errors.append(f"videoUrls 最多 {MAX_VIDEOS} 段，当前 {len(videos)} 段")
-    if len(images) > MAX_IMAGES:
-        errors.append(f"imageUrls 最多 {MAX_IMAGES} 张，当前 {len(images)} 张")
-    if len(audios) > MAX_AUDIOS:
-        errors.append(f"audioUrls 最多 {MAX_AUDIOS} 段，当前 {len(audios)} 段")
-
-    # fileUrl / linkUrl
-    file_url, link_url = body.get("fileUrl"), body.get("linkUrl")
-    if file_url and link_url:
-        errors.append("fileUrl 与 linkUrl 互斥，只能二选一")
-    for field, value in (("fileUrl", file_url), ("linkUrl", link_url)):
-        if value is not None and not isinstance(value, str):
-            errors.append(f"{field} 必须是字符串 URL")
-
-    # 枚举字段
-    resolution = body.get("resolution", "1080P")
-    if resolution not in RESOLUTIONS:
-        errors.append(f"resolution 只能是 {RESOLUTIONS}，收到 {resolution!r}")
-    body["resolution"] = resolution
-
-    aspect = body.get("aspectRatio", "adaptive")
-    if aspect not in ASPECT_RATIOS:
-        errors.append(f"aspectRatio 只能是 {ASPECT_RATIOS}，收到 {aspect!r}")
-    body["aspectRatio"] = aspect
-
-    duration = body.get("duration", "5")
-    if isinstance(duration, bool):
-        errors.append(f"duration 需要字符串枚举，收到 {duration!r}")
-        duration = "5"
-    elif isinstance(duration, (int, float)):
-        warnings.append(f"duration 传了数字 {duration}，已自动转成字符串 \"{int(duration)}\"（接口要字符串）")
-        duration = str(int(duration))
-    elif isinstance(duration, str):
-        duration = duration.strip()
-    if duration not in DURATIONS:
-        errors.append(f"duration 只能是 auto 或 \"2\"-\"30\"，收到 {duration!r}")
-        duration = "5"
-    body["duration"] = duration
-
-    # 布尔 / 整数
-    for field, default in (("audio", True), ("promptExtend", True), ("watermark", False)):
-        try:
-            body[field] = as_bool(body.get(field, default), field)
-        except ValueError as exc:
-            errors.append(str(exc))
-
-    if "seed" in body:
-        try:
-            seed = as_int(body["seed"], "seed")
-            if not 0 <= seed <= MAX_SEED:
-                errors.append(f"seed 超范围 [0, {MAX_SEED}]，收到 {seed}")
-            body["seed"] = seed
-        except ValueError as exc:
-            errors.append(str(exc))
-            body.pop("seed", None)
-
-    # 深度思考模式：带文档/网页时 promptExtend 必须为 true
-    if (file_url or link_url) and body.get("promptExtend") is False:
-        errors.append("传了 fileUrl/linkUrl 时 promptExtend 必须为 true（会自动开深度思考）")
-
-    # 视频时长约束
-    video_durations: list[float | None] = []
-    if videos and probe:
-        for src in videos:
-            video_durations.append(ffprobe_duration(src))
-    else:
-        video_durations = [None] * len(videos)
-
-    for idx, secs in enumerate(video_durations):
-        if secs is None:
-            continue
-        if not 1.0 - 1e-6 <= secs <= MAX_VIDEO_SEGMENT + 1e-6:
-            errors.append(f"videoUrls[{idx}] 时长 {secs:.1f}s，单段必须在 1–15 秒内")
-
-    if videos and any(s is not None for s in video_durations) and len(videos) == len(video_durations):
-        known = [s for s in video_durations if s is not None]
-        if len(known) == len(videos):
-            total = sum(known)
-            if total > MAX_VIDEO_TOTAL + 1e-6:
-                errors.append(f"参考视频总时长 {total:.1f}s，超过 15 秒上限")
-            if duration != "auto":
-                combined = total + int(duration)
-                if combined > MAX_INPUT_PLUS_OUTPUT + 1e-6:
-                    errors.append(
-                        f"参考视频 {total:.1f}s + 输出 {duration}s = {combined:.0f}s，超过 30 秒上限"
-                    )
-
-    if videos and duration != "auto" and any(s is None for s in video_durations):
-        if int(duration) > 15:
-            warnings.append(
-                f"有参考视频但检测不到其时长，输出 {duration}s 时请自行确认「输入+输出 ≤30 秒」"
-            )
-
-    # prompt 指代提示
-    if (videos or images or audios) and prompt and not re.search(r"(视频|图|音频)\s*\d+", prompt):
-        warnings.append("prompt 里没有「视频1 / 图1 / 音频1」这类指代，模型可能不会用上参考素材")
-
-    return body, errors, warnings
-
-
-# ---------------------------------------------------------------------------
-# HTTP
-# ---------------------------------------------------------------------------
-
-def post_json(path: str, payload: dict, key: str, timeout: int = 90) -> dict:
-    url = f"{BASE}{path}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-        method="POST",
-    )
+def _price_map() -> dict:
+    raw = os.environ.get("WAN_PRICE_PER_SECOND", "").strip()
+    if not raw:
+        return {}
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
-        raise ApiError(f"HTTP {exc.code}: {raw[:600]}") from None
-    except urllib.error.URLError as exc:
-        raise ApiError(f"网络错误: {exc.reason}") from None
-    try:
-        return json.loads(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError:
-        raise ApiError(f"响应不是 JSON: {raw[:300]}") from None
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for key, value in data.items():
+        try:
+            out[str(key).upper()] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
-def upload(path: str, key: str) -> str:
-    exe = shutil.which("curl")
-    if not exe:
-        raise SystemExit("上传需要 curl，未找到可执行的 curl。")
-    result = subprocess.run(
-        [exe, "-sS", "--fail-with-body", "-X", "POST", f"{BASE}{UPLOAD_PATH}",
-         "-H", f"Authorization: Bearer {key}", "-F", f"file=@{path}", "--max-time", "300"],
-        capture_output=True, text=True,
+def make_config(args, *, require_key: bool = False) -> WanConfig:
+    provider = (getattr(args, "provider", None) or PROVIDER).strip().lower()
+    base = (
+        getattr(args, "base_url", None)
+        or os.environ.get("WAN_BASE_URL")
+        or (RUNNINGHUB_DEFAULT_BASE if provider == PROVIDER_RUNNINGHUB else DASHSCOPE_DEFAULT_BASE)
+    ).rstrip("/")
+    cfg = WanConfig(
+        provider=provider,
+        api_key=api_key(getattr(args, "api_key", None), provider) if require_key else (
+            getattr(args, "api_key", None) or _env_key(provider)
+        ),
+        base_url=base,
+        model=(getattr(args, "model", None) or MODEL),
+        default_mode=(getattr(args, "mode", None) or "reference"),
+        poll_interval=float(getattr(args, "interval", None) or 15),
+        poll_timeout=int(getattr(args, "timeout", None) or 1800),
+        max_concurrency=int(getattr(args, "concurrency", None) or 3),
+        query_qps=float(os.environ.get("WAN_QUERY_QPS") or 10),
+        price_per_second=_price_map(),
     )
-    if result.returncode != 0:
-        raise ApiError(f"上传失败: {(result.stdout or result.stderr)[:400]}")
-    data = json.loads(result.stdout)
-    if data.get("code") != 0:
-        raise ApiError(f"上传被拒: {json.dumps(data, ensure_ascii=False)[:400]}")
-    url = data["data"]["download_url"]
-    if not url.startswith(("http://", "https://")):
-        print(f"⚠ 上传返回的 download_url 不是完整地址（{url}），"
-              f"若提交报素材不可达，尝试拼上 CDN 前缀或改用 fileName={data['data'].get('fileName')}",
-              file=sys.stderr)
-    return url
+    return cfg
 
 
-def download(url: str, dest: Path) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url, timeout=300) as resp, open(dest, "wb") as fh:
-        shutil.copyfileobj(resp, fh)
-    return dest
+# ---------------------------------------------------------------------------
+# 构造 + 校验（make_batch.py 也复用这个入口）
+# ---------------------------------------------------------------------------
+
+def build_body(task: dict, defaults: dict, probe: bool = True,
+               default_mode: str = "reference") -> tuple[dict, list[str], list[str]]:
+    """返回 (内部请求体, errors, warnings)。errors 非空时不要提交。"""
+    return validate_task(
+        task, defaults,
+        provider=PROVIDER,
+        default_mode=default_mode,
+        probe=ffprobe_duration if probe else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,83 +188,48 @@ def note_warning(tid: str, msg: str) -> None:
     print(f"[{tid}] 提示: {msg}", file=sys.stderr)
 
 
-_upload_locks: dict[str, threading.Lock] = {}
-_upload_locks_guard = threading.Lock()
+def download(url: str, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    req = urllib.request.Request(url, headers={"User-Agent": "batch-video-client/1.0"})
+    with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as fh:
+        shutil.copyfileobj(resp, fh)
+    tmp.replace(dest)
+    return dest
 
 
-def _upload_lock_for(key: str) -> threading.Lock:
-    with _upload_locks_guard:
-        return _upload_locks.setdefault(key, threading.Lock())
+def wait(client: WanClient, task_id: str, timeout: int, interval: float):
+    return client.wait_task(task_id, timeout=timeout, interval=interval,
+                            on_status=lambda status: print(f"  · {status}", flush=True))
 
 
-def resolve_media(body: dict, key: str, cache: dict, cache_lock: threading.Lock) -> dict:
-    """把本地素材路径替换成上传后的 URL（同一文件并发下也只传一次）。"""
-    for field in MEDIA_KEYS:
-        values = body.get(field) or []
-        if not values:
-            continue
-        resolved = []
-        for value in values:
-            if value.startswith(("http://", "https://", "data:")):
-                resolved.append(value)
-                continue
-            path = Path(value)
-            if not path.exists():
-                raise ApiError(f"本地素材不存在: {value}")
-            cache_key = str(path.resolve())
-            with cache_lock:
-                cached = cache.get(cache_key)
-            if cached:
-                resolved.append(cached)
-                continue
-            with _upload_lock_for(cache_key):  # 同一文件串行上传，避免并发重复传
-                with cache_lock:
-                    cached = cache.get(cache_key)
-                if not cached:
-                    print(f"  上传素材 {path.name} ...", flush=True)
-                    cached = upload(str(path), key)
-                    with cache_lock:
-                        cache[cache_key] = cached
-            resolved.append(cached)
-        body[field] = resolved
-    return body
-
-
-def submit(body: dict, key: str) -> dict:
-    return post_json(SUBMIT_PATH, body, key)
-
-
-def wait(task_id: str, key: str, timeout: int, interval: float) -> dict:
-    deadline = time.time() + timeout
-    last = ""
-    while time.time() < deadline:
-        time.sleep(interval)
-        try:
-            resp = post_json(QUERY_PATH, {"taskId": task_id}, key, timeout=45)
-        except ApiError as exc:
-            print(f"  ! 轮询失败（继续重试）: {exc}", file=sys.stderr)
-            continue
-        status = resp.get("status", "UNKNOWN")
-        if status != last:
-            print(f"  · {status}", flush=True)
-            last = status
-        if status == "SUCCESS":
-            return resp
-        if status == "FAILED":
-            reason = resp.get("errorMessage") or json.dumps(resp.get("failedReason") or {}, ensure_ascii=False)
-            raise ApiError(f"任务失败 [{resp.get('errorCode', '')}] {reason}")
-    raise WaitTimeout(f"等待超时（{timeout}s），taskId={task_id} 可能仍在运行；重跑会续查该任务而不重复提交")
-
-
-def run_one(task: dict, defaults: dict, key: str, args, state: dict, lock: threading.Lock,
-            cache: dict, cache_lock: threading.Lock) -> dict:
+def run_one(task: dict, defaults: dict, client: WanClient, args, state: dict,
+            lock: threading.Lock, cache: dict, cache_lock: threading.Lock) -> dict:
     tid = str(task.get("id") or f"task{len(state) + 1}")
-    record: dict = {"id": tid, "status": "pending", "started": time.strftime("%Y-%m-%d %H:%M:%S")}
+    record: dict = {
+        "id": tid, "status": "pending", "provider": client.cfg.provider,
+        "model": client.cfg.model, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
     previous = state.get(tid) or {}
-    if previous.get("taskId") and previous.get("status") == "running":
-        record["taskId"] = previous["taskId"]  # 上次提交过但没等到结果
+    previous_task_id = previous.get("task_id") or previous.get("taskId")  # 兼容旧状态
+    if previous_task_id and previous.get("status") == "running":
+        expires = int(previous.get("task_expires_at") or 0)
+        # 旧状态没有 provider 字段 = RunningHub 时代，不能拿它的 taskId 问官方接口
+        same_provider = previous.get("provider") == client.cfg.provider
+        if same_provider and (not expires or expires > time.time()):
+            record["task_id"] = previous_task_id
+        else:
+            record["status"] = "legacy" if not same_provider else "expired"
+            record["error"] = (
+                "旧接口 taskId，无法用官方接口续查，请重跑"
+                if not same_provider else "task_id 已超过 24h，请重跑"
+            )
+            return record
 
-    body, errors, warnings = build_body(task, defaults, probe=not args.no_probe)
+    body, errors, warnings = client.build_body(
+        task, defaults, default_mode=(args.mode or "reference"),
+        probe=(None if args.no_probe else ffprobe_duration),
+    )
     for msg in warnings:
         note_warning(tid, msg)
     if errors:
@@ -440,52 +238,69 @@ def run_one(task: dict, defaults: dict, key: str, args, state: dict, lock: threa
         return record
 
     try:
-        body = resolve_media(body, key, cache, cache_lock)
-        if not record.get("taskId"):
-            resp = submit(body, key)
-            task_id = resp.get("taskId")
-            if not task_id:
-                raise ApiError(f"提交未返回 taskId: {json.dumps(resp, ensure_ascii=False)[:300]}")
-            record["taskId"] = task_id
+        with cache_lock:
+            body = resolve_body(body, getattr(args, "uploader", None), cache=cache)
+        wire = client.wire_body(body)
+        if not record.get("task_id"):
+            resp = client.submit(wire)
+            record["task_id"] = resp.task_id
+            record["request_id"] = resp.request_id
             record["status"] = "running"
+            record["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            record["task_expires_at"] = int(time.time()) + 24 * 3600
             with lock:  # 立即落盘：进程中途挂掉后重启只续查，不重复扣费
                 state[tid] = dict(record)
                 save_state(args.state_file, state)
-            print(f"[{tid}] 已提交 taskId={task_id} status={resp.get('status')}", flush=True)
+            print(f"[{tid}] 已提交 taskId={resp.task_id} status={resp.status}", flush=True)
         else:
-            print(f"[{tid}] 复用已有 taskId={record['taskId']}，继续等待结果", flush=True)
+            print(f"[{tid}] 复用已有 taskId={record['task_id']}，继续等待结果", flush=True)
 
-        final = wait(record["taskId"], key, args.timeout, args.interval)
-        results = final.get("results") or []
-        if not results:
-            raise ApiError("SUCCESS 但没有 results")
-        first = results[0]
-        url = first.get("url")
-        if not url:
-            record["status"] = "success"
-            record["text"] = first.get("text")
-            return record
+        final = wait(client, record["task_id"], args.timeout, args.interval)
+        if final.status == STATUS_UNKNOWN:
+            raise TaskExpired(record["task_id"])
+        if final.status == STATUS_CANCELED:
+            raise TaskCanceled(record["task_id"])
+        if final.status == STATUS_FAILED:
+            raise ApiError(
+                f"任务失败 [{final.code or 'UNKNOWN'}] {final.message or '无错误信息'}"
+                + (f" request_id={final.request_id}" if final.request_id else "")
+            )
+        if final.status != STATUS_SUCCEEDED or not final.video_url:
+            raise ApiError("SUCCESS 但没有结果地址")
 
-        ext = first.get("outputType") or "mp4"
-        out_name = task.get("output") or f"out/{tid}.{ext}"
-        dest = Path(out_name)
-        if dest.suffix.lower().lstrip(".") != ext.lower():
-            dest = dest.with_suffix(f".{ext}")
-        download(url, dest)
+        out_name = task.get("output") or f"out/{tid}.mp4"
+        dest = Path(out_name).with_suffix(".mp4")
+        download(final.video_url, dest)
 
-        usage = final.get("usage") or {}
+        usage = final.usage or {}
+        billable, estimated = estimate_cost(usage, body.get("resolution", "720P"),
+                                           client.cfg.price_per_second)
         record.update({
             "status": "success",
+            "request_id": final.request_id or record.get("request_id", ""),
             "file": str(dest.resolve()),
-            "outputType": ext,
-            "cost": usage.get("consumeMoney") or usage.get("thirdPartyConsumeMoney"),
-            "costTime": usage.get("taskCostTime"),
-            "expiresNote": "结果链接 24 小时失效，已下载到本地",
+            "usage": usage,
+            "billable_seconds": billable,
+            "estimated_cost": estimated,
+            "cost": None,
+            "costTime": usage.get("task_cost_time") or usage.get("taskCostTime"),
+            "expiresNote": "官方结果链接 24 小时失效，已下载到本地",
         })
     except WaitTimeout as exc:
         record["status"] = "running"
         record["error"] = str(exc)
-    except ApiError as exc:
+    except TaskExpired as exc:
+        record["status"] = "expired"
+        record["error"] = str(exc)
+    except TaskCanceled as exc:
+        record["status"] = "canceled"
+        record["error"] = str(exc)
+    except WanError as exc:
+        record["status"] = "failed"
+        record["error"] = str(exc)
+        if exc.request_id:
+            record["request_id"] = exc.request_id
+    except (ApiError, MediaError) as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
     except Exception as exc:  # 单个任务炸掉不影响整批
@@ -529,14 +344,23 @@ def load_tasks(path: Path) -> tuple[dict, list[dict]]:
     return defaults, tasks
 
 
+def _provider_of(args) -> str:
+    return (getattr(args, "provider", None) or PROVIDER).strip().lower()
+
+
 def cmd_validate(args) -> int:
     defaults, tasks = load_tasks(Path(args.tasks))
+    provider = _provider_of(args)
     failures = 0
     warn_counts: dict[str, int] = {}
     quiet = len(tasks) > 10  # 大批量只汇总，不刷屏
     for idx, task in enumerate(tasks):
         tid = task.get("id") or f"#{idx}"
-        _, errors, warnings = build_body(task, defaults, probe=not args.no_probe)
+        _, errors, warnings = validate_task(
+            task, defaults, provider=provider,
+            default_mode=(args.mode or "reference"),
+            probe=(None if args.no_probe else ffprobe_duration),
+        )
         for msg in warnings:
             warn_counts[msg] = warn_counts.get(msg, 0) + 1
             if not quiet:
@@ -559,22 +383,39 @@ def cmd_build(args) -> int:
     idx = args.index if args.index is not None else 0
     if not 0 <= idx < len(tasks):
         raise SystemExit(f"--index 超出范围 0..{len(tasks) - 1}")
-    body, errors, warnings = build_body(tasks[idx], defaults, probe=not args.no_probe)
+    provider = _provider_of(args)
+    body, errors, warnings = validate_task(
+        tasks[idx], defaults, provider=provider,
+        default_mode=(args.mode or "reference"),
+        probe=(None if args.no_probe else ffprobe_duration),
+    )
     for msg in warnings:
         print(f"提示: {msg}", file=sys.stderr)
     for msg in errors:
         print(f"错误: {msg}", file=sys.stderr)
-    print(json.dumps(body, ensure_ascii=False, indent=2))
+    wire = to_wire_body(body, provider, args.model or MODEL)
+    print(json.dumps(wire, ensure_ascii=False, indent=2))
+    if not getattr(args, "no_endpoint", False):
+        base = (args.base_url or BASE).rstrip("/")
+        path = f"{base}{SUBMIT_SUFFIX}" if provider != PROVIDER_RUNNINGHUB else f"{base}/alibaba/wan-3.0/reference-to-video"
+        print(f"\n# endpoint: {path}", file=sys.stderr)
+        if provider != PROVIDER_RUNNINGHUB:
+            print("# header:   X-DashScope-Async: enable", file=sys.stderr)
     return 2 if errors else 0
 
 
 def cmd_run(args) -> int:
     defaults, tasks = load_tasks(Path(args.tasks))
     _warned.clear()
-    _upload_locks.clear()
+    config = make_config(args, require_key=True)
+    client = WanClient(config)
+    args.uploader = uploader_from_env(log=lambda msg: print(f"  {msg}", flush=True))
+    if args.uploader is None:
+        print("  提示: 没有 COS_* 环境变量，本地图片将走 Base64；本地视频/音频会直接报错。",
+              file=sys.stderr)
+
     if args.limit:
         tasks = tasks[: args.limit]
-    key = api_key(args.api_key)
 
     state_file = Path(args.state_file)
     state = load_state(state_file)
@@ -586,52 +427,58 @@ def cmd_run(args) -> int:
         tid = str(task.get("id") or f"task{idx + 1}")
         prev = state.get(tid)
         if prev and prev.get("status") == "success" and not args.force:
-            print(f"[{tid}] 已完成，跳过（--force 重跑）")
-            continue
+            file_path = prev.get("file")
+            if file_path and Path(file_path).exists():
+                print(f"[{tid}] 已完成，跳过（--force 重跑）")
+                continue
+            print(f"[{tid}] 记录为成功但本地文件不见了，重新跑")
         todo.append(task)
 
     if not todo:
         print("没有待执行任务。")
         return 0
 
-    print(f"待执行 {len(todo)} 个任务，并发 {args.concurrency}，轮询上限 {args.timeout}s\n")
+    print(f"接口 {config.provider} · 模型 {config.model} · 待执行 {len(todo)} 条，"
+          f"并发 {args.concurrency}，轮询 {args.interval:g}s / 上限 {args.timeout}s\n")
     lock = threading.Lock()
     cache: dict = {}
     cache_lock = threading.Lock()
     records = []
     if args.concurrency <= 1:
         for task in todo:
-            rec = run_one(task, defaults, key, args, state, lock, cache, cache_lock)
+            rec = run_one(task, defaults, client, args, state, lock, cache, cache_lock)
             records.append(rec)
-            print(f"[{rec['id']}] -> {rec['status']}"
-                  + (f" | {rec.get('file')}" if rec.get("file") else "")
-                  + (f" | {rec.get('error')}" if rec.get("error") else ""), flush=True)
+            _print_record(rec)
     else:
         with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-            futures = [pool.submit(run_one, t, defaults, key, args, state, lock, cache, cache_lock)
+            futures = [pool.submit(run_one, t, defaults, client, args, state, lock, cache, cache_lock)
                        for t in todo]
             for fut in as_completed(futures):
                 rec = fut.result()
                 records.append(rec)
-                print(f"[{rec['id']}] -> {rec['status']}"
-                      + (f" | {rec.get('file')}" if rec.get("file") else "")
-                      + (f" | {rec.get('error')}" if rec.get("error") else ""), flush=True)
+                _print_record(rec)
 
     ok = sum(1 for r in records if r["status"] == "success")
     failed = sum(1 for r in records if r["status"] == "failed")
     running = sum(1 for r in records if r["status"] == "running")
     invalid = sum(1 for r in records if r["status"] == "invalid")
-    cost = 0.0
-    for rec in records:
-        try:
-            cost += float(rec.get("cost") or 0)
-        except (TypeError, ValueError):
-            pass
-    print(f"\n完成 {ok} / 失败 {failed} / 超时待续 {running} / 校验不通过 {invalid}")
-    if cost:
-        print(f"本批实际扣费 ¥{cost:.2f}")
+    expired = sum(1 for r in records if r["status"] in ("expired", "legacy"))
+    canceled = sum(1 for r in records if r["status"] == "canceled")
+    billable = sum(float(r.get("billable_seconds") or 0) for r in records)
+    estimated = sum(float(r.get("estimated_cost") or 0) for r in records if r.get("estimated_cost") is not None)
+    has_estimate = any(r.get("estimated_cost") is not None for r in records)
+
+    print(f"\n完成 {ok} / 失败 {failed} / 超时待续 {running} / 校验不通过 {invalid} "
+          f"/ 过期 {expired} / 取消 {canceled}")
+    print(f"计费秒数 {billable:g}s" + (f" · 预估 ¥{estimated:.2f}（以阿里云账单为准）" if has_estimate else "（官方未返回金额）"))
     print(f"状态文件: {state_file.resolve()}")
-    return 0 if failed == 0 and invalid == 0 and running == 0 else 1
+    return 0 if failed == 0 and invalid == 0 and running == 0 and expired == 0 and canceled == 0 else 1
+
+
+def _print_record(rec: dict) -> None:
+    print(f"[{rec['id']}] -> {rec['status']}"
+          + (f" | {rec.get('file')}" if rec.get("file") else "")
+          + (f" | {rec.get('error')}" if rec.get("error") else ""), flush=True)
 
 
 def cmd_emit(args) -> int:
@@ -641,54 +488,90 @@ def cmd_emit(args) -> int:
         tasks = tasks[: args.count]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    provider = _provider_of(args)
+    base = (args.base_url or BASE).rstrip("/")
+    endpoint = (f"{base}{SUBMIT_SUFFIX}" if provider != PROVIDER_RUNNINGHUB
+                else f"{base}/alibaba/wan-3.0/reference-to-video")
+    headers = {"X-DashScope-Async": "enable"} if provider != PROVIDER_RUNNINGHUB else {}
 
-    key = api_key(args.api_key) if args.upload else None
+    uploader = uploader_from_env() if args.upload else None
+    if args.upload and uploader is None:
+        print("⚠ --upload 需要 COS_* 环境变量；本次仍写本地路径。", file=sys.stderr)
+
     cache: dict = {}
-    cache_lock = threading.Lock()
     local_left = 0
     lines = 0
     with out.open("w", encoding="utf-8") as fh:
         for task in tasks:
-            body, errors, _ = build_body(task, defaults, probe=not args.no_probe)
+            body, errors, _ = validate_task(
+                task, defaults, provider=provider,
+                default_mode=(args.mode or "reference"),
+                probe=(None if args.no_probe else ffprobe_duration),
+            )
             if errors:
                 print(f"✗ {task.get('id')}: {'; '.join(errors)}", file=sys.stderr)
                 return 2
-            if key:
-                body = resolve_media(body, key, cache, cache_lock)
+            if uploader is not None:
+                body = resolve_body(body, uploader, cache=cache)
             else:
-                for field in MEDIA_KEYS:
+                for field in ("imageUrls", "videoUrls", "audioUrls"):
                     local_left += sum(1 for v in (body.get(field) or [])
-                                      if not v.startswith(("http://", "https://", "data:")))
-            fh.write(json.dumps({"id": task.get("id"), "endpoint": f"{BASE}{SUBMIT_PATH}", "body": body},
-                                ensure_ascii=False) + "\n")
+                                      if not str(v).startswith(("http://", "https://", "data:", "oss://")))
+            wire = to_wire_body(body, provider, args.model or MODEL)
+            fh.write(json.dumps(
+                {"id": task.get("id"), "endpoint": endpoint,
+                 "headers": headers, "body": wire},
+                ensure_ascii=False,
+            ) + "\n")
             lines += 1
     print(f"已写出 {lines} 个请求 -> {out}")
-    print("每行一个请求：endpoint + body，可直接用任何 HTTP 客户端回放。")
+    print("每行一个请求：endpoint + headers + body，可直接用任何 HTTP 客户端回放。")
     if local_left:
-        print(f"⚠ 其中 {local_left} 处是本地路径，服务端读不到；加 --upload 上传后再写，或先换成公网 URL。",
-              file=sys.stderr)
+        print(f"⚠ 其中 {local_left} 处是本地路径，服务端读不到；加 --upload（需 COS_*）后再写，"
+              f"或先换成公网 URL。", file=sys.stderr)
     return 0
 
 
 def cmd_upload(args) -> int:
-    key = api_key(args.api_key)
-    print(upload(args.file, key))
+    uploader = uploader_from_env(log=lambda msg: print(msg, file=sys.stderr))
+    if uploader is None:
+        raise SystemExit("上传需要 COS_* 环境变量（COS_ENABLED/COS_BUCKET/COS_SECRET_ID/COS_SECRET_KEY）。")
+    suffix = Path(args.file).suffix.lower()
+    if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+        url = resolve_image(args.file, uploader)
+    elif suffix in (".mp4", ".mov", ".m4v"):
+        url = resolve_video(args.file, uploader)
+    elif suffix in (".wav", ".mp3"):
+        url = resolve_audio(args.file, uploader)
+    else:
+        raise SystemExit(f"不认识的素材类型：{suffix}")
+    print(url)
     return 0
 
 
 def cmd_query(args) -> int:
-    key = api_key(args.api_key)
-    resp = post_json(QUERY_PATH, {"taskId": args.task_id}, key)
-    print(json.dumps(resp, ensure_ascii=False, indent=2))
+    config = make_config(args, require_key=True)
+    client = WanClient(config)
+    result = client.get_task(args.task_id)
+    print(json.dumps(result.raw or {
+        "task_id": result.task_id, "status": result.status,
+        "video_url": result.video_url, "usage": result.usage,
+        "code": result.code, "message": result.message,
+        "request_id": result.request_id,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="万相3.0 参考生视频 批量客户端")
+    parser = argparse.ArgumentParser(description="万相3.0 官方 API 批量客户端")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def common(p):
         p.add_argument("--api-key")
+        p.add_argument("--provider", choices=(PROVIDER_DASHSCOPE, PROVIDER_RUNNINGHUB))
+        p.add_argument("--model")
+        p.add_argument("--base-url")
+        p.add_argument("--mode", choices=("edit", "reference"))
         p.add_argument("--no-probe", action="store_true", help="不调用 ffprobe 检测素材时长")
 
     p_val = sub.add_parser("validate", help="只校验任务文件")
@@ -696,9 +579,10 @@ def main() -> int:
     common(p_val)
     p_val.set_defaults(func=cmd_validate)
 
-    p_build = sub.add_parser("build", help="打印将发送的 JSON（不提交）")
+    p_build = sub.add_parser("build", help="打印将发送的官方 JSON（不提交）")
     p_build.add_argument("--tasks", required=True)
     p_build.add_argument("--index", type=int)
+    p_build.add_argument("--no-endpoint", action="store_true")
     common(p_build)
     p_build.set_defaults(func=cmd_build)
 
@@ -706,19 +590,19 @@ def main() -> int:
     p_run.add_argument("--tasks", required=True)
     common(p_run)
     p_run.add_argument("--limit", type=int)
-    p_run.add_argument("--concurrency", type=int, default=1)
+    p_run.add_argument("--concurrency", type=int, default=3)
     p_run.add_argument("--timeout", type=int, default=1800)
-    p_run.add_argument("--interval", type=float, default=5.0)
+    p_run.add_argument("--interval", type=float, default=15.0)
     p_run.add_argument("--force", action="store_true", help="重跑已成功的任务")
     p_run.add_argument("--fresh", action="store_true", help="忽略已有状态文件")
     p_run.add_argument("--state-file", default="out/state.json")
     p_run.set_defaults(func=cmd_run)
 
-    p_emit = sub.add_parser("emit", help="把任务编译成 100 个请求原文（JSONL，不提交）")
+    p_emit = sub.add_parser("emit", help="把任务编译成请求原文（JSONL，不提交）")
     p_emit.add_argument("--tasks", required=True)
     p_emit.add_argument("--out", default="batch/requests.jsonl")
     p_emit.add_argument("--count", type=int)
-    p_emit.add_argument("--upload", action="store_true", help="把本地素材上传后写入 URL（需要 API Key）")
+    p_emit.add_argument("--upload", action="store_true", help="把本地素材上传后写入 URL（需要 COS_*）")
     common(p_emit)
     p_emit.set_defaults(func=cmd_emit)
 
@@ -729,10 +613,12 @@ def main() -> int:
 
     p_q = sub.add_parser("query", help="查询单个任务")
     p_q.add_argument("task_id")
-    p_q.add_argument("--api-key")
+    common(p_q)
     p_q.set_defaults(func=cmd_query)
 
     args = parser.parse_args()
+    if args.cmd in ("build", "validate", "emit") and getattr(args, "mode", None) is None:
+        args.mode = "reference"
     return args.func(args)
 
 

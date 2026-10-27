@@ -33,7 +33,7 @@ from app import config as appconfig  # noqa: E402
 from app import license as licensemod  # noqa: E402
 from app.core import (  # noqa: E402
     DEFAULT_PROMPT, GROUP_SIZE, TOTAL_TEMPLATES, BatchRunner, BatchSpec,
-    EngineError, check_account, load_manifest, plan_batch, unique_batch_dir,
+    EngineError, load_manifest, plan_batch, unique_batch_dir,
 )
 from app.prompts_page import PromptLibraryPage  # noqa: E402
 from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
@@ -192,7 +192,7 @@ class BatchPanel(QWidget):
         # 批次参数
         param_row = QHBoxLayout()
         if self.small:
-            tip = QLabel("固定随机 3 条 · 720P / 7s / 9:16 · 无音轨")
+            tip = QLabel("固定随机 3 条 · 720P · 跟随模板时长/比例 · 无音轨")
             tip.setStyleSheet("color:#666;")
             param_row.addWidget(tip)
         else:
@@ -379,11 +379,12 @@ class BatchPanel(QWidget):
             )
             return
 
-        key = (self.cfg.get("RH_API_KEY") or "").strip()
+        key = appconfig.active_api_key(self.cfg)
+        provider = str(self.cfg.get("WAN_PROVIDER") or "dashscope").strip().lower()
         if not key:
             QMessageBox.warning(
                 self, "还没拿到 Key",
-                "服务端没有下发 RH Key，暂时无法生成。\n\n"
+                "服务端没有下发可用的 API Key（wan.api_key），暂时无法生成。\n\n"
                 "请联系管理员在服务端 config.json 里补齐后重启软件。",
             )
             return
@@ -396,7 +397,10 @@ class BatchPanel(QWidget):
         try:
             template_storage, storage = build_storages(self.cfg)
         except StorageError as exc:
-            QMessageBox.warning(self, "COS 配置有误", f"{exc}\n\n可先关掉 配置.ini 里的 COS_ENABLED。")
+            QMessageBox.warning(
+                self, "COS 配置有误",
+                f"{exc}\n\n可联系管理员在服务端关掉 cos.enabled，或先不归档。",
+            )
             return
 
         if self.small:
@@ -409,6 +413,14 @@ class BatchPanel(QWidget):
             else:
                 mode, group, count = "group", int(group_value), GROUP_SIZE
             concurrency = int(self.concurrency_combo.currentData())
+
+        max_concurrency = max(1, int(self.cfg.get("WAN_MAX_CONCURRENCY") or 3))
+        if concurrency > max_concurrency:
+            self.window_ref.write_log(
+                f"[{time.strftime('%H:%M:%S')}] 并发 {concurrency} 超过服务端上限 "
+                f"{max_concurrency}，已自动降到 {max_concurrency}"
+            )
+            concurrency = max_concurrency
 
         try:
             picked = plan_batch(self.templates, mode, group=group, count=count)
@@ -426,6 +438,10 @@ class BatchPanel(QWidget):
         self._log_file = out_dir / "log.txt"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        api_mode = str(self.cfg.get("WAN_DEFAULT_MODE") or "edit").strip().lower()
+        if api_mode not in ("edit", "reference"):
+            api_mode = "edit"
+
         spec = BatchSpec(
             batch_id=batch_id,
             image_path=image,
@@ -433,10 +449,19 @@ class BatchPanel(QWidget):
             out_dir=out_dir,
             templates=picked,
             api_key=key,
-            base=self.cfg.get("base_url") or "https://www.runninghub.cn/openapi/v2",
+            base=str(self.cfg.get("WAN_BASE_URL") or ""),
+            provider=provider,
+            model=str(self.cfg.get("WAN_MODEL") or "wan3.0-video"),
+            mode=api_mode,
+            duration=self.cfg.get("WAN_DEFAULT_DURATION"),
+            aspect_ratio=self.cfg.get("WAN_DEFAULT_RATIO"),
             concurrency=concurrency,
+            poll_interval=float(self.cfg.get("WAN_POLL_INTERVAL") or 15),
+            poll_timeout=int(self.cfg.get("WAN_POLL_TIMEOUT") or 1800),
             storage=storage,
             template_storage=template_storage,
+            source_prefix=str(self.cfg.get("COS_SOURCE_PREFIX") or ""),
+            price_per_second=self.cfg.get("WAN_PRICE_PER_SECOND") or {},
         )
         self.worker = BatchWorker(spec)
         self.worker.progressed.connect(self._on_progress)
@@ -496,6 +521,14 @@ class BatchPanel(QWidget):
             return "完成", f"⚠ {warn}" if warn else ""
         if status == "failed":
             return "失败", (rec.get("error") or "")[:120]
+        if status == "expired":
+            return "已过期", "需重跑（结果链接/task_id 超过 24h）"
+        if status == "canceled":
+            return "已取消", (rec.get("error") or "")[:120]
+        if status == "legacy":
+            return "旧任务", "旧接口 taskId，无法续查，请重跑"
+        if status == "invalid":
+            return "校验失败", (rec.get("error") or "")[:120]
         if status == "skipped":
             return "跳过", ""
         return "运行中", ""
@@ -516,19 +549,28 @@ class BatchPanel(QWidget):
         self._set_running(False)
         self.window_ref.set_busy(False)
         self.progress.setValue(summary["total"])
+        billable = float(summary.get("billable_seconds") or 0)
+        estimated = summary.get("estimated_cost")
+        cost_line = (f"计费 {billable:g}s · 预估 ¥{estimated:.2f}（以阿里云账单为准）"
+                     if estimated is not None else
+                     f"计费 {billable:g}s（官方未返回金额，以阿里云账单为准）")
         self.status_label.setText(
-            f"完成 · 成功 {summary['success']} / 失败 {summary['failed']} · 扣费 ¥{summary['cost']}"
+            f"完成 · 成功 {summary['success']} / 失败 {summary['failed']} · {cost_line}"
         )
         self.ended.emit()
         archive_line = ""
         if summary.get("archived") or summary.get("archive_failed"):
             archive_line = (f"\n已归档到 COS：{summary.get('archived', 0)} 条"
                             f"（失败 {summary.get('archive_failed', 0)} 条）")
+        extra_line = ""
+        if summary.get("expired") or summary.get("canceled"):
+            extra_line = (f"\n过期/需重跑：{summary.get('expired', 0)} 条"
+                          f" · 取消：{summary.get('canceled', 0)} 条")
         QMessageBox.information(
             self, "批次完成",
             f"批次 {self.id_edit.text()} 已结束\n\n"
             f"成功：{summary['success']}\n失败：{summary['failed']}\n"
-            f"扣费：¥{summary['cost']}{archive_line}\n\n输出目录：\n{summary['out_dir']}",
+            f"{cost_line}{archive_line}{extra_line}\n\n输出目录：\n{summary['out_dir']}",
         )
         self._open_folder()
 
@@ -627,7 +669,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.prompts_page, "提示词库")
         layout.addWidget(self.tabs, 1)
 
-        footer = QLabel("720P · 7s · 9:16 · 无音轨 ｜ 结果链接 24 小时失效，本工具已自动下载归档")
+        footer = QLabel("720P · 跟随模板时长/比例 · 无音轨 ｜ 官方结果链接 24 小时失效，本工具已自动下载归档")
         footer.setObjectName("footer")
         layout.addWidget(footer)
 
@@ -646,9 +688,12 @@ class MainWindow(QMainWindow):
             label.style().unpolish(label)
             label.style().polish(label)
 
-        key_ok = bool((cfg.get("RH_API_KEY") or "").strip())
+        key_ok = appconfig.wan_configured(cfg)
         badge(self.badge_key, "配置：已下发" if key_ok else "配置：未下发",
               "ok" if key_ok else "bad")
+        self.badge_key.setToolTip(
+            f"provider={cfg.get('WAN_PROVIDER', '')} · model={cfg.get('WAN_MODEL', '')}"
+        )
 
         cos_on = appconfig.truthy(cfg.get("COS_ENABLED", ""))
         badge(self.badge_cos, "COS：开" if cos_on else "COS：关", "ok" if cos_on else "idle")
@@ -663,7 +708,8 @@ class MainWindow(QMainWindow):
 
         if not key_ok or not (cfg.get("MANIFEST") or "").strip():
             self.banner.setText(
-                "⚠ 服务端还没下发完整配置（RH Key / 模板清单）。请联系管理员在服务端 config.json 里补齐，重启即可生效。"
+                "⚠ 服务端还没下发完整配置（wan.api_key / 模板清单）。"
+                "请联系管理员在服务端 config.json 里补齐，重启即可生效。"
             )
             self.banner.show()
         elif (cfg.get("NOTICE") or "").strip():

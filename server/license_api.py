@@ -34,7 +34,7 @@ from pathlib import Path
 
 SECRET = os.environ.get("LICENSE_SECRET", "")
 PASSWORDS_PATH = Path(os.environ.get("LICENSE_PASSWORDS", "") or Path(__file__).with_name("passwords.json"))
-# 运行配置（RH Key / 模板清单 / COS / 公告），随激活与复核一起下发
+# 运行配置（百炼 Key / 旧 RH Key / 模板清单 / COS / 公告），随激活与复核一起下发
 CONFIG_PATH = Path(os.environ.get("LICENSE_CONFIG", "") or Path(__file__).with_name("config.json"))
 
 # 密码表里没写 expires（= 永久）时，票的有效期给一个足够远的日期，避免出现"永久密码 14 天后失效"
@@ -131,7 +131,7 @@ def verify_token(token: str, machine: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def load_runtime_config() -> dict:
-    """运行配置（RH Key / 模板清单 / COS / 公告）。文件不存在就返回空对象，不影响授权。
+    """运行配置（百炼 Key / 旧 RH Key / 模板清单 / COS / 公告）。文件不存在就返回空对象，不影响授权。
 
     下划线开头的字段（如 `_说明`）是给人看的注释，不下发给客户端。
     """

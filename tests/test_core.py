@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """核心引擎冒烟测试：不联网、不花钱，用本地假服务跑 3 条。"""
 
@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from app.core import BatchRunner, BatchSpec, load_manifest  # noqa: E402
 from app.storage import StorageConfig, open_storage  # noqa: E402
 
-MOCK = ROOT / "tests" / "mock_runninghub.py"
+MOCK = ROOT / "tests" / "mock_dashscope.py"
 
 
 def free_port() -> int:
@@ -73,7 +73,11 @@ def main() -> int:
             out_dir=tmp / "out" / "TEST01",
             templates=templates,
             api_key="demo-key-0123456789abcdef",
-            base=f"http://127.0.0.1:{port}/openapi/v2",
+            base=f"http://127.0.0.1:{port}/api/v1",
+            provider="dashscope",
+            model="wan3.0-video",
+            mode="edit",
+            duration="-1",
             concurrency=3,
             poll_interval=0.2,
             poll_timeout=30,
@@ -102,7 +106,11 @@ def main() -> int:
             out_dir=tmp / "out" / "TEST02",
             templates=templates,
             api_key="demo-key-0123456789abcdef",
-            base=f"http://127.0.0.1:{port}/openapi/v2",
+            base=f"http://127.0.0.1:{port}/api/v1",
+            provider="dashscope",
+            model="wan3.0-video",
+            mode="edit",
+            duration="-1",
             concurrency=2,
             poll_interval=0.2,
             poll_timeout=30,

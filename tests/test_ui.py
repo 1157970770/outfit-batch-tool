@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """界面集成测试：离屏启动窗口，用假服务完整跑一批（3 条），验证表格/CSV/日志。"""
 
@@ -44,7 +44,7 @@ def wait_port(port: int, timeout: float = 10.0) -> bool:
 
 def main() -> int:
     port = free_port()
-    mock = subprocess.Popen([sys.executable, str(ROOT / "tests" / "mock_runninghub.py"), str(port)],
+    mock = subprocess.Popen([sys.executable, str(ROOT / "tests" / "mock_dashscope.py"), str(port)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not wait_port(port):
         print("假服务没起来")
@@ -71,9 +71,18 @@ def main() -> int:
     window.cfg.update({
         "OUTPUT_ROOT": str(tmp / "out"),
         "MANIFEST": str(manifest),
-        "RH_API_KEY": "demo-key-0123456789abcdef",
+        "WAN_PROVIDER": "dashscope",
+        "WAN_API_KEY": "demo-key-0123456789abcdef",
+        "WAN_MODEL": "wan3.0-video",
+        "WAN_BASE_URL": f"http://127.0.0.1:{port}/api/v1",
+        "WAN_DEFAULT_MODE": "edit",
+        "WAN_DEFAULT_DURATION": "-1",
+        "WAN_DEFAULT_RATIO": "adaptive",
+        "WAN_POLL_INTERVAL": 0.2,
+        "WAN_POLL_TIMEOUT": 30,
+        "WAN_MAX_CONCURRENCY": 3,
+        "WAN_PRICE_PER_SECOND": {},
         "LICENSE_SERVER": "",
-        "base_url": f"http://127.0.0.1:{port}/openapi/v2",
     })
     window.small_panel.cfg = window.cfg
     window.big_panel.cfg = window.cfg
@@ -83,7 +92,7 @@ def main() -> int:
     panel = window.small_panel
     panel.image_edit.setText(str(image))
     panel.id_edit.setText("UI01")
-    panel.prompt_edit.setPlainText("视频1中的人物，把服装换成图1这套")
+    panel.prompt_edit.setPlainText("编辑视频1，把服装替换成图1这套，动作和背景保持不变")
     panel.start()
 
     deadline = time.time() + 60
