@@ -5,7 +5,7 @@
 三个页面：
   · 小批量试跑：随机 3 条，用来调提示词、验效果
   · 大批量生产：按 5 组固定编号或随机 100 条
-  · 提示词库：按场景 + 标签筛沉淀好的提示词，填变量后预览/复制/填入生产页
+  · 提示词库：按名字取沉淀好的提示词，复制或直接填入生产页
 """
 
 from __future__ import annotations
@@ -785,13 +785,10 @@ QTabBar::tab { padding: 8px 18px; border: none; color: #6b6b70; }
 QTabBar::tab:selected { color: #1f6feb; border-bottom: 2px solid #1f6feb; }
 #libTitle { font-size: 14px; font-weight: 600; }
 #libMeta { color: #6b6b70; font-size: 12px; }
-#libSummary { color: #4a4a4f; font-size: 12px; }
 #libStatus { color: #0a7d32; font-size: 12px; }
 #libStatus[tone="bad"] { color: #b3261e; }
-#libWarn { color: #a86400; font-size: 12px; }
-QGroupBox { border: 1px solid #e6e6ea; border-radius: 6px; margin-top: 7px; padding-top: 5px; font-size: 12px; color: #6b6b70; }
-QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
 QListWidget { border: 1px solid #e6e6ea; border-radius: 6px; background: white; }
+QListWidget::item { padding: 6px 8px; }
 """
 
 

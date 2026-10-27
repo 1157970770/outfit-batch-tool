@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,13 +20,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _tmpdir import tempdir  # noqa: E402
-
-from app.prompts import (  # noqa: E402
-    ALL_SCENES, PromptLibrary, PromptLibraryError, extract_variables,
-    library_path, render_body,
-)
+from app.prompts import PromptLibrary, PromptLibraryError, library_path  # noqa: E402
 
 LIB = ROOT / "prompts" / "prompt-library.json"
+RAW = ROOT / "prompts" / "raw"
+
+TITLES = ["服装定妆", "换装有字幕", "换装无字幕", "手串", "项链", "换装同时加手串/项链"]
 
 failures: list[str] = []
 
@@ -36,6 +36,11 @@ def check(cond: bool, msg: str) -> None:
         failures.append(msg)
 
 
+def raw_body(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    return re.search(r"```text\n(.*?)\n```", text, re.S).group(1).strip()
+
+
 # ---------------------------------------------------------------------------
 # 数据层
 # ---------------------------------------------------------------------------
@@ -43,84 +48,41 @@ def check(cond: bool, msg: str) -> None:
 def test_load() -> None:
     print("加载真实库文件")
     lib = PromptLibrary.load(LIB)
-    check(len(lib) >= 8, f"条目数 {len(lib)} >= 8")
+    check(len(lib) == 6, f"6 条（实际 {len(lib)}）")
     check(not lib.issues, f"没有坏条目（issues={lib.issues}）")
-    check("换装" in lib.scenes, f"场景含「换装」：{lib.scenes}")
+    check([p.title for p in lib.prompts] == TITLES, f"名字与顺序：{[p.title for p in lib.prompts]}")
+    check([p.id for p in lib.prompts] == [f"p{i:02d}" for i in range(1, 7)], "编号 p01–p06")
+    check(all(p.chars >= 100 for p in lib.prompts), f"每条都有正文：{[p.chars for p in lib.prompts]}")
     check(lib.path == LIB, "记录了来源路径")
-
-    # 种子里的「生产默认」必须和代码常量一字不差，否则一改就悄悄分叉
-    from app.core import DEFAULT_PROMPT
-    default_entry = next((p for p in lib.prompts if p.id == "outfit-face-lock"), None)
-    check(default_entry is not None, "存在 outfit-face-lock")
-    check(default_entry is not None and default_entry.body == DEFAULT_PROMPT,
-          "outfit-face-lock 正文与 app.core.DEFAULT_PROMPT 完全一致")
+    check(lib.get("p04").title == "手串", "按 id 取得到")
 
 
-def test_filter() -> None:
-    print("场景单选 + 标签全包含")
+def test_raw_matches_json() -> None:
+    """JSON 里的正文必须与 prompts/raw 里的逐字记录一致（防止哪天手滑改了一个字）。"""
+    if not RAW.exists():
+        print("跳过与原文比对（没有 prompts/raw）")
+        return
+    print("JSON 正文 vs 原始记录")
     lib = PromptLibrary.load(LIB)
-
-    outfit = lib.filter(scene="换装")
-    check(outfit and all(p.scene == "换装" for p in outfit), f"场景=换装 → {len(outfit)} 条且场景都对")
-
-    all_of = lib.filter(scene=ALL_SCENES)
-    check(len(all_of) == len(lib), "「全部场景」不筛")
-
-    face = lib.filter(tags=["面部保持"])
-    check(face and all("面部保持" in p.tags for p in face), f"标签=面部保持 → {len(face)} 条")
-
-    combo = lib.filter(scene="换装", tags=["面部保持"])
-    check(len(combo) == 1, f"换装 + 面部保持 → {len(combo)} 条（同时满足）")
-
-    both = lib.filter(scene="换装", tags=["近景", "面料质感"])
-    check(len(both) == 1 and both[0].id == "outfit-closeup-fabric", "两个标签都要命中")
-
-    check(lib.filter(scene="换装", tags=["台词"]) == [], "换装 + 台词 → 0 条")
-    check(lib.filter(tags=["不存在的标签"]) == [], "未知标签 → 0 条")
-    check(lib.filter(scene=" 换装 ") == lib.filter(scene="换装"), "场景首尾空格忽略")
-
-    # 顺序 = 文件顺序（人工排的优先级），不按标题字母排
-    check([p.id for p in lib.filter(scene="换装")][0] == "outfit-face-lock", "换装第一条是生产默认")
-
-    facets = dict(lib.scene_facets())
-    check(facets.get("换装") == 3, f"场景计数换装=3（实际 {facets}）")
-    check(lib.tag_facets()[0][1] >= 1, "标签按条数降序，首项有效")
-
-
-def test_variables() -> None:
-    print("{{变量}} 识别与渲染")
-    check(extract_variables("{{a}} 和 {{ b }} 再来一次 {{a}}") == ["a", "b"], "按首次出现去重")
-    check(extract_variables("没有变量的正文") == [], "无变量 → 空表")
-    check(extract_variables("{{}} 空名字不算") == [], "空变量名忽略")
-
-    text, missing = render_body("穿{{颜色}}的{{面料}}", {"颜色": "雾霾蓝", "面料": "亚麻"})
-    check(text == "穿雾霾蓝的亚麻" and missing == [], "全部填完 → 无缺失")
-
-    text, missing = render_body("穿{{颜色}}的{{面料}}", {"颜色": "雾霾蓝", "面料": ""})
-    check(missing == ["面料"], f"漏填报告：{missing}")
-    check("{{面料}}" in text, "漏填的位置保留占位符，肉眼可见")
-
-    text, missing = render_body("穿{{ 颜色 }}", {"颜色": " 墨绿 "})
-    check(text == "穿墨绿" and missing == [], "花括号内空格 + 值首尾空格都处理掉")
-
-    seed = next(p for p in PromptLibrary.load(LIB).prompts if p.id == "outfit-closeup-fabric")
-    check(seed.variables == ["性别", "部位", "面料", "颜色"], f"种子变量顺序：{seed.variables}")
+    files = sorted(RAW.glob("P-*.md"))
+    check(len(files) == len(lib), f"原文 {len(files)} 份 / 库 {len(lib)} 条")
+    for prompt, path in zip(lib.prompts, files):
+        check(prompt.body == raw_body(path), f"{prompt.id} {prompt.title} 逐字一致")
 
 
 def test_bad_data() -> None:
     print("坏数据不炸整页")
     lib = PromptLibrary.from_data({
         "prompts": [
-            {"title": "正常", "body": "正文", "scene": "展示", "tags": "白底, 特写"},
+            {"title": "正常", "body": "正文"},
             {"title": "没正文"},
-            {"title": "", "body": "没标题"},
+            {"title": "", "body": "没名字"},
             "不是对象",
         ]
     })
     check(len(lib) == 1, "只保留 1 条可用")
     check(len(lib.issues) == 3, f"3 条坏条目进 issues：{lib.issues}")
-    check(lib.prompts[0].tags == ("白底", "特写"), "字符串标签按中英文逗号拆开")
-    check(lib.prompts[0].scene == "展示", "场景保留")
+    check(lib.prompts[0].id == "p01", "缺 id 时按位置补 p01")
 
     try:
         PromptLibrary.from_data({"prompts": "nope"})
@@ -163,8 +125,7 @@ def test_path_override() -> None:
 # ---------------------------------------------------------------------------
 
 def test_ui() -> None:
-    print("离屏界面：筛选 / 详情 / 变量 / 复制 / 填入生产页")
-    from PySide6.QtCore import Qt
+    print("离屏界面：列表 / 全文 / 复制 / 填入生产页")
     from PySide6.QtWidgets import QApplication
 
     from app.prompts_page import PromptLibraryPage
@@ -175,71 +136,39 @@ def test_ui() -> None:
     page.show()
     app.processEvents()
 
-    total = len(PromptLibrary.load(LIB))
-    check(page.table.rowCount() == total, f"默认「全部场景」列出 {page.table.rowCount()} 条")
-    check(page.copy_btn.isEnabled(), "默认自动选中第一条，复制按钮可用")
+    lib = PromptLibrary.load(LIB)
+    check(page.list.count() == 6, f"列表 6 行（实际 {page.list.count()}）")
+    check(page.list.item(0).text() == "1. 服装定妆", f"首项：{page.list.item(0).text()}")
+    check(page.body_edit.toPlainText().strip() == lib.prompts[0].body, "默认选中第一条并显示全文")
+    check(page.copy_btn.isEnabled(), "复制按钮可用")
 
-    # 场景单选
-    index = page.scene_combo.findData("换装")
-    page.scene_combo.setCurrentIndex(index)
+    page.list.setCurrentRow(3)          # 第 4 条：手串
     app.processEvents()
-    check(page.table.rowCount() == 3, f"场景=换装 → {page.table.rowCount()} 行")
-
-    # 标签（同时满足）
-    for row in range(page.tag_list.count()):
-        item = page.tag_list.item(row)
-        if str(item.data(Qt.UserRole)) == "面部保持":
-            item.setCheckState(Qt.Checked)
-    app.processEvents()
-    check(page.checked_tags() == ["面部保持"], f"勾选状态：{page.checked_tags()}")
-    check(page.table.rowCount() == 1, f"换装 + 面部保持 → {page.table.rowCount()} 行")
-
-    # 取消勾选 + 回全部场景 → 验证变量填值
-    for row in range(page.tag_list.count()):
-        page.tag_list.item(row).setCheckState(Qt.Unchecked)
-    page.scene_combo.setCurrentIndex(0)
-    app.processEvents()
-
-    target = next(i for i in range(page.table.rowCount())
-                  if "近景" in page.table.item(i, 0).text())
-    page.table.selectRow(target)
-    app.processEvents()
-    check(len(page._var_edits) == 4, f"详情里生成 4 个变量输入框（实际 {len(page._var_edits)}）")
-    check(page.hint.isVisible(), "未填时显示缺值提示")
-
-    values = {"性别": "女孩", "部位": "领口", "面料": "粗花呢", "颜色": "奶油白"}
-    for name, value in values.items():
-        page._var_edits[name].setText(value)
-    app.processEvents()
-    text = page.final_text()
-    check(all(v in text for v in values.values()), "预览实时反映了填值")
-    check("{{" not in text, "填完后没有残留占位符")
-    check(not page.hint.isVisible(), "填完后缺值提示消失")
+    check(page.detail_title.text() == "手串", f"标题：{page.detail_title.text()}")
+    check(page.body_edit.toPlainText().strip() == lib.get("p04").body, "全文与库一致")
+    check("字" in page.detail_meta.text(), f"字数提示：{page.detail_meta.text()}")
 
     page.copy_btn.click()
     app.processEvents()
-    check(QApplication.clipboard().text() == text, "复制进剪贴板的是最终提示词")
+    check(QApplication.clipboard().text() == lib.get("p04").body, "复制进剪贴板的是全文")
     check("已复制" in page.status_label.text(), f"状态栏反馈：{page.status_label.text()}")
 
     captured: list[str] = []
     page.use_requested.connect(captured.append)
     page.use_btn.click()
     app.processEvents()
-    check(captured == [text], "「填入生产页」发出最终文本")
+    check(captured == [lib.get("p04").body], "「填入生产页」发出全文")
 
-    # 无结果时给出去掉条件的提示
-    page.scene_combo.setCurrentIndex(page.scene_combo.findData("展示"))
-    for row in range(page.tag_list.count()):
-        item = page.tag_list.item(row)
-        if str(item.data(Qt.UserRole)) == "台词":
-            item.setCheckState(Qt.Checked)
+    # 空库：不该崩，也不该给出可点的复制
+    empty = tempdir("prompts-empty-") / "empty.json"
+    empty.write_text(json.dumps({"version": 1, "prompts": []}, ensure_ascii=False), encoding="utf-8")
+    empty_page = PromptLibraryPage(path=empty)
     app.processEvents()
-    check(page.table.rowCount() == 0, "展示 + 台词 → 0 行")
-    check("去掉一个标签" in page.detail_title.text(), "无结果时提示怎么放宽条件")
-    check(not page.copy_btn.isEnabled(), "无结果时复制不可用")
+    check(empty_page.list.count() == 0, "空库列表 0 行")
+    check(not empty_page.copy_btn.isEnabled(), "空库时复制不可用")
 
     page.close()
-    return app
+    empty_page.close()
 
 
 def test_window_integration() -> None:
@@ -253,18 +182,17 @@ def test_window_integration() -> None:
     labels = [window.tabs.tabText(i) for i in range(window.tabs.count())]
     check(labels == ["小批量试跑", "大批量生产", "提示词库"], f"标签页：{labels}")
 
-    window._apply_prompt("视频1中的人物，把服装换成图1这套")
-    check(window.small_panel.prompt_edit.toPlainText() == "视频1中的人物，把服装换成图1这套", "小批量页已填入")
-    check(window.big_panel.prompt_edit.toPlainText() == "视频1中的人物，把服装换成图1这套", "大批量页已填入")
+    text = "视频1中的人物，把服装换成图1这套"
+    window._apply_prompt(text)
+    check(window.small_panel.prompt_edit.toPlainText() == text, "小批量页已填入")
+    check(window.big_panel.prompt_edit.toPlainText() == text, "大批量页已填入")
     check(window.tabs.currentWidget() is window.small_panel, "切回小批量试跑")
     window.close()
-    return app
 
 
 def main() -> int:
     test_load()
-    test_filter()
-    test_variables()
+    test_raw_matches_json()
     test_bad_data()
     test_path_override()
     test_ui()
