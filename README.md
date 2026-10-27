@@ -76,7 +76,8 @@ python3 demo.py --count 5
 set DASHSCOPE_API_KEY=sk-你的Key
 
 # 3) 先打样 1 条，确认换装效果、官方拉取与计费秒数
-python3 wan3_r2v.py run --tasks batch/tasks.batch.json --limit 1 --mode edit
+#    这份清单只有服装图（reference 模式）；桌面版有模板视频，默认走 edit 模式
+python3 wan3_r2v.py run --tasks batch/tasks.batch.json --limit 1 --mode reference
 
 # 4) 全量跑（并发 3，轮询 15s，断点续跑）
 python3 wan3_r2v.py run --tasks batch/tasks.batch.json --concurrency 3

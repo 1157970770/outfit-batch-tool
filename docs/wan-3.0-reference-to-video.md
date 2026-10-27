@@ -250,9 +250,12 @@ python3 wan3_r2v.py validate --tasks batch/tasks.batch.json
 # 2) 打印官方请求体（不提交）
 python3 wan3_r2v.py build --tasks batch/tasks.batch.json --index 0
 
-# 3) 打样 1 条（真实扣费）
+# 3) 打样 1 条（真实扣费；这份清单只有服装图，所以 reference）
 set DASHSCOPE_API_KEY=sk-xxxxxxxx
-python3 wan3_r2v.py run --tasks batch/tasks.batch.json --limit 1 --mode edit
+python3 wan3_r2v.py run --tasks batch/tasks.batch.json --limit 1 --mode reference
+
+# 桌面版有模板视频，默认走 edit；想用 CLI 跑 edit，任务里要带 videoUrls
+python3 wan3_r2v.py run --tasks my-edit-tasks.json --limit 1 --mode edit
 
 # 4) 全量（并发 3，轮询 15s）
 python3 wan3_r2v.py run --tasks batch/tasks.batch.json --concurrency 3
