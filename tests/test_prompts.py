@@ -134,7 +134,7 @@ def test_path_override() -> None:
 # ---------------------------------------------------------------------------
 
 def test_ui() -> None:
-    print("离屏界面：六条全文可见 / 复制按钮")
+    print("离屏界面：缩小 / 展开两种模式 + 复制")
     from PySide6.QtWidgets import QApplication
 
     from app.prompts_page import PromptLibraryPage
@@ -150,15 +150,50 @@ def test_ui() -> None:
     check(page.blocks[0].title_label.text() == "1. 服装定妆", f"首块标题：{page.blocks[0].title_label.text()}")
     check(page.blocks[5].title_label.text() == "6. 换装同时加手串/项链", "第六块名字对")
 
-    # 全文必须完整呈现，且与库里一字不差
-    same = all(visible_text(b.body_label) == lib.prompts[i].body for i, b in enumerate(page.blocks))
-    check(same, "六条全文与库正文一致（逐字）")
-    check(visible_text(page.blocks[0].body_label).startswith("负责定妆照提示词"), "开头就是原文第一行")
-    check(page.blocks[2].body_label.wordWrap(), "长句自动换行，不被截断")
+    # 默认是「缩小」：只露标题行，正文不占高度
+    check(all(not b.expanded for b in page.blocks), "默认六条都是缩小态")
+    check(not page.blocks[0].body_label.isVisible(), "缩小态正文不可见")
+    check(page.blocks[0].toggle_btn.text() == "展开", "按钮写「展开」")
+    collapsed_hint = page.blocks[0].height()
 
+    # 点「展开」→ 正文出现，按钮变「收起」
+    page.blocks[0].toggle_btn.click()
+    app.processEvents()
+    check(page.blocks[0].expanded and page.blocks[0].body_label.isVisible(), "展开后正文可见")
+    check(page.blocks[0].toggle_btn.text() == "收起", "按钮变「收起」")
+    check(page.blocks[0].height() > collapsed_hint, f"展开后变高（{collapsed_hint} → {page.blocks[0].height()}）")
+    check(visible_text(page.blocks[0].body_label).startswith("负责定妆照提示词"), "展开后从第一行开始显示原文")
+
+    # 再点收起
+    page.blocks[0].toggle_btn.click()
+    app.processEvents()
+    check(not page.blocks[0].body_label.isVisible(), "再点一次回到缩小态")
+
+    # 全部展开 / 全部收起
+    page.expand_all_btn.click()
+    app.processEvents()
+    check(all(b.expanded for b in page.blocks), "「全部展开」→ 六条都展开")
+    check(page.expand_all_btn.text() == "全部收起", "顶部按钮变「全部收起」")
+    book_height = page.blocks[5].height()
+    check(book_height > 100, f"第 6 条展开后高度 {book_height}")
+
+    page.expand_all_btn.click()
+    app.processEvents()
+    check(all(not b.expanded for b in page.blocks), "再点 → 六条都收起")
+    check(page.expand_all_btn.text() == "全部展开", "顶部按钮变回「全部展开」")
+
+    # 全文逐字：展开态下核对显示文本与库正文一致
+    page.expand_all_btn.click()
+    app.processEvents()
+    same = all(visible_text(b.body_label) == lib.prompts[i].body for i, b in enumerate(page.blocks))
+    check(same, "六条显示出来的全文与库正文逐字一致")
+
+    # 缩小态也能复制（不用先展开）
+    page.expand_all_btn.click()
+    app.processEvents()
     page.blocks[3].copy_btn.click()      # 第 4 块：手串
     app.processEvents()
-    check(QApplication.clipboard().text() == lib.get("p04").body, "复制按钮 = 复制全文")
+    check(QApplication.clipboard().text() == lib.get("p04").body, "缩小态点复制 = 复制全文")
     check("已复制" in page.status_label.text() and "手串" in page.status_label.text(),
           f"状态反馈：{page.status_label.text()}")
 

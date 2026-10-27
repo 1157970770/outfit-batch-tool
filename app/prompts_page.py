@@ -30,16 +30,17 @@ def _as_html(text: str) -> str:
 
 
 class PromptBlock(QFrame):
-    """一条提示词：标题行（序号+名字+字数+复制按钮）+ 全文。"""
+    """一条提示词：标题行（序号+名字+字数+复制+展开/收起）+ 可折叠全文。"""
 
     def __init__(self, page: "PromptLibraryPage", index: int, prompt: Prompt):
         super().__init__()
         self.page_ref = page
         self.prompt = prompt
+        self.expanded = False
         self.setObjectName("promptBlock")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 14)
+        layout.setContentsMargins(16, 10, 16, 10)
         layout.setSpacing(8)
 
         header = QHBoxLayout()
@@ -59,6 +60,13 @@ class PromptBlock(QFrame):
         self.copy_btn.clicked.connect(lambda: self.page_ref.copy_prompt(self.prompt))
         header.addWidget(self.copy_btn)
 
+        self.toggle_btn = QPushButton("展开")
+        self.toggle_btn.setObjectName("ghost")
+        self.toggle_btn.setFixedWidth(64)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.clicked.connect(lambda: self.set_expanded(not self.expanded))
+        header.addWidget(self.toggle_btn)
+
         layout.addLayout(header)
 
         self.body_label = QLabel()
@@ -68,6 +76,13 @@ class PromptBlock(QFrame):
         self.body_label.setText(_as_html(prompt.body))
         self.body_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.body_label)
+
+        self.set_expanded(False)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.expanded = expanded
+        self.body_label.setVisible(expanded)
+        self.toggle_btn.setText("收起" if expanded else "展开")
 
 
 class PromptLibraryPage(QWidget):
@@ -95,6 +110,11 @@ class PromptLibraryPage(QWidget):
         self.status_label.setObjectName("libStatus")
         self.status_label.setWordWrap(True)
         top.addWidget(self.status_label, 1)
+        self.expand_all_btn = QPushButton("全部展开")
+        self.expand_all_btn.setObjectName("ghost")
+        self.expand_all_btn.setToolTip("六条一起展开 / 收起")
+        self.expand_all_btn.clicked.connect(self.toggle_all)
+        top.addWidget(self.expand_all_btn)
         self.reload_btn = QPushButton("重新加载")
         self.reload_btn.setObjectName("ghost")
         self.reload_btn.setToolTip(f"改完 {self.path.name} 后点这里，不用重启")
@@ -137,14 +157,25 @@ class PromptLibraryPage(QWidget):
             return
 
         suffix = f"；{len(self.lib.issues)} 条被跳过：{self.lib.issues[0]}" if self.lib.issues else ""
-        self._set_status(f"共 {len(self.blocks)} 条 · 改完 JSON 点右侧「重新加载」{suffix}",
+        self._set_status(f"共 {len(self.blocks)} 条 · 点「展开」看全文{suffix}",
                          bad=bool(self.lib.issues))
+        self.expand_all_btn.setText("全部展开")
 
     def _clear_blocks(self) -> None:
         for block in self.blocks:
             self.host_layout.removeWidget(block)
             block.deleteLater()
         self.blocks = []
+
+    # ------------------------------------------------------------------
+    # 展开 / 收起
+    # ------------------------------------------------------------------
+    def toggle_all(self) -> None:
+        """六条一起：只要有一条是收起的，就全展开；全展开了再点就全收起。"""
+        target = not all(block.expanded for block in self.blocks) if self.blocks else False
+        for block in self.blocks:
+            block.set_expanded(target)
+        self.expand_all_btn.setText("全部收起" if target else "全部展开")
 
     # ------------------------------------------------------------------
     # 动作
