@@ -14,12 +14,13 @@
 | --- | --- | --- |
 | 云函数 | ✅ Active，`/health` 200 | `python3 scripts\license_deploy.py status` |
 | 线上代码 | ✅ 与仓库 `server/license_api.py` **字节一致** | `dist\license-deploy.zip` 里的文件哈希与 `server\` 对得上 |
-| 运行配置下发 | ✅ `/activate` 返回 `config`（清单地址、COS 双桶、子账号凭证都在） | `python3 scripts\license_deploy.py config` |
+| 运行配置下发 | ✅ `/activate` 返回 `config`（百炼 Key、模型、清单地址、COS 双桶、子账号凭证都在） | `python3 scripts\license_deploy.py config` |
 | 模板清单 | ✅ 已发布，**108 条**（目标 500） | `python3 tools\publish_manifest.py --verify-only` |
-| **`rh_api_key`** | ❌ **空** | 同上 `config` 命令，会打印「未填」 |
-| 分发包 | v0.9 |
+| **`wan.api_key`** | ❌ **空**（`rh_api_key` 也空） | 同上 `config` 命令，会打印「未填」 |
+| 分发包 | v0.9（切官方 API 后升 v1.0） |
 
-> 结论：**只差 `rh_api_key` 一处**。填完 `deploy` 一次，客户端「配置：未下发」就变成「已下发」。
+> 结论：**只差 `wan.api_key` 一处**。填完 `deploy` 一次，客户端「配置：未下发」就变成「已下发」。
+> 过渡期同时保留 `rh_api_key`，旧客户端仍能启动；新客户端优先 `wan`。
 
 ---
 
@@ -40,7 +41,7 @@
 
 ```powershell
 # ① 改 server\config.json（唯一真源；已被 .gitignore 排除）
-#    rh_api_key / manifest_url / cos.* —— 只改需要改的字段
+#    wan.api_key / wan.model / wan.base_url / manifest_url / cos.* —— 只改需要改的字段
 
 # ② 查本地填全了没（不打印 Key 值）
 python3 scripts\license_deploy.py config
@@ -55,7 +56,8 @@ python3 scripts\license_deploy.py config
 期望最后三行：
 
 ```
-[config] 线上 rh_api_key   : 已下发（长度 32）
+[config] 线上 wan.api_key : 已下发（长度 35）
+[config] 线上 wan         : model=wan3.0-video base=https://.../api/v1
 [config] 线上 manifest_url : https://...
 [config] 结论: 配置完整，客户端可用
 ```
@@ -78,7 +80,7 @@ python3 scripts\license_deploy.py config    # 配置是否完整下发
 | # | 检查 | 期望 |
 | --- | --- | --- |
 | 1 | `/health` | 200 + `{"ok":true,...}` |
-| 2 | `/activate` 的 `config.rh_api_key` | 非空，长度 32 |
+| 2 | `/activate` 的 `config.wan.api_key` / `model` / `base_url` | 非空；Key 形如 `sk-...` |
 | 3 | `/activate` 的 `config.cos.secret_id` / `secret_key` | 36 / 32 位，均非空 |
 | 4 | 清单地址 | 浏览器打开能下载 JSON，条数与 `build\manifest\manifest.json` 一致 |
 | 5 | 客户端首次启动 | 状态灯「配置：已下发」「模板清单：108 个」 |
@@ -94,7 +96,7 @@ python3 scripts\license_deploy.py config    # 配置是否完整下发
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `缺少文件：server\config.json` | 文件不在（`copy server\config.example.json server\config.json`） | 建好再 deploy，脚本**不会**静默少传 |
-| 线上 `rh_api_key` 仍为空 | 改了本地忘了 deploy，或 deploy 没到 Active | 重跑 `config` 对比；看函数状态 |
+| 线上 `wan.api_key` 仍为空 | 改了本地忘了 deploy，或 deploy 没到 Active | 重跑 `config` 对比；看函数状态 |
 | `tccli 调用失败` | 未登录 / 无该函数权限 | `tccli auth login --profile agent1` |
 | `deploy` 后客户端没变 | 客户端没重启 | 关掉重开；仍不对就查票是否过期 |
 | `/activate` 不返回 `config` | 上传的是旧代码，或 zip 里没 `config.json` | `python3 scripts\license_deploy.py pack` 看打进哪三个文件 |
@@ -105,8 +107,8 @@ python3 scripts\license_deploy.py config    # 配置是否完整下发
 
 1. **不要改 `LICENSE_SECRET`**：一改全员失效。
 2. **`config.json` / `passwords.json` 不进 Git、不贴对话、不随软件分发**。
-3. 协议字段名（`password` / `machine` / `token` / `action` / `config` / `rh_api_key` / `manifest_url` / `cos`）不能改，改了老客户端全废。
-4. **RH Key 不许写进客户端代码**——它是服务端下发，写进 exe 等于把所有授权门槛作废。
+3. 协议字段名（`password` / `machine` / `token` / `action` / `config` / `wan` / `rh_api_key` / `manifest_url` / `cos`）不能改，改了老客户端全废。
+4. **百炼 Key / RH Key 都不许写进客户端代码**——它们是服务端下发，写进 exe 等于把所有授权门槛作废。
 
 ---
 

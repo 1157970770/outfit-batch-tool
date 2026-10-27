@@ -18,11 +18,12 @@
 | 环境变量 | ✅ 已配 | `LICENSE_SECRET` / `LICENSE_PASSWORDS` / `LICENSE_CONFIG=/var/user/config.json`（已删废弃的 `LICENSE_TTL_DAYS`） |
 | `config.json` 打包 | ✅ 已接入（**必需项**） | `scripts/license_deploy.py` 的 `ZIP_FILES` 含它；缺这个文件部署会直接失败并提示怎么建，不会静默漏传 |
 | 服务端下发 `config` | ✅ 已通 | 线上 `/activate` 返回 `config`，`manifest_url` 与 `cos` 均已下发 |
-| **`config.rh_api_key`** | ❌ **空** | 本地与线上长度都是 0 → 客户端显示「配置：未下发」、跑不了任务 |
+| **`config.wan.api_key`** | ❌ **空**（`rh_api_key` 也为空） | 本地与线上都未填 → 客户端显示「配置：未下发」、跑不了任务 |
 | 模板清单 | ✅ 已发布（108 条／目标 500） | `video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json` → 200，客户端能解析 |
 | 分发安装包 | ✅ 已打（v0.9） | `dist\换装批量生产器-v0.9-20261026.zip` |
 
-**结论**：链路本身已通，**唯一缺口是 `server/config.json` 里的 `rh_api_key` 还没填**。填法见第 3 节。
+**结论**：链路本身已通，**唯一缺口是 `server/config.json` 里的 `wan.api_key` 还没填**。填法见第 3 节。
+过渡期同时保留 `rh_api_key`，旧客户端仍能启动；新客户端优先用 `wan`。
 
 一条命令随时复查：`python3 scripts\license_deploy.py config`
 
@@ -54,7 +55,7 @@
 | 层 | 存在哪 | 内容 | 谁改 | 改完怎么生效 |
 | --- | --- | --- | --- | --- |
 | 服务地址 | `app/config.py:18` `SERVICE_URL` | 只有 URL | 只有你（改代码） | **重新打包**，客户换 exe |
-| 运行配置 | 云函数里的 `config.json` | `rh_api_key` / `manifest_url` / `cos` / `notice` | 只有你 | `deploy` 后客户**下次启动**生效 |
+| 运行配置 | 云函数里的 `config.json` | `wan` / `rh_api_key` / `manifest_url` / `cos` / `notice` | 只有你 | `deploy` 后客户**下次启动**生效 |
 | 本机缓存 | `%APPDATA%\RHOutfitTool\license.json` | 票 + `last_ok`，**DPAPI 加密**（`dpapi:` 开头） | 客户端自己 | 删掉即要求重新激活 |
 
 `app/main.py:48`：
@@ -74,12 +75,17 @@ def resolve_license_server(cfg=None):
 
 ### A. 补齐运行配置（当前唯一待办）
 
-> ⚠️ `rh_api_key` 是 32 位密钥，**不要贴进对话、不要提交 Git**。请自己在本地文件里填。
+> ⚠️ `wan.api_key`（`sk-...`）和 `rh_api_key` 都是密钥，**不要贴进对话、不要提交 Git**。请自己在本地文件里填。
 
 1. 打开 `D:\批量视频任务设计区\server\config.json`
-2. 把 32 位 Key 填进引号：
+2. 把百炼 Key 填进引号（`wan` 块）：
    ```json
-   "rh_api_key": "在这里填 32 位 Key",
+   "wan": {
+     "provider": "dashscope",
+     "api_key": "sk-在这里填",
+     "model": "wan3.0-video",
+     "base_url": "https://dashscope.aliyuncs.com/api/v1"
+   },
    ```
 3. 保存后执行：
    ```powershell
@@ -87,7 +93,7 @@ def resolve_license_server(cfg=None):
    python3 scripts\license_deploy.py deploy     # 打包 + 上传（自动附加 config.json）
    python3 scripts\license_deploy.py config     # 看线上是否已下发
    ```
-4. 期望：`线上 rh_api_key : 已下发（长度 32）` + `结论: 配置完整，客户端可用`
+4. 期望：`线上 wan.api_key : 已下发（长度 35）` + `结论: 配置完整，客户端可用`
 
 > `config.json` 里下划线开头的字段（如 `_说明`）是注释，**不会下发给客户端**（服务端已过滤）。
 
@@ -136,7 +142,7 @@ Base = 上面的函数 URL，路径透传，POST + `application/json`。
 | `POST /config` | `token`, `machine` | `200 {ok, config}`（不激活只取配置） | 同上 |
 | `GET /health` | — | `200 {ok, service, mode}` | — |
 
-`config` 结构：`{rh_api_key, manifest_url, cos:{enabled,bucket,region,prefix,domain,secret_id,secret_key}, notice}`。
+`config` 结构：`{wan:{provider,api_key,model,base_url,region,default_mode,...}, rh_api_key, manifest_url, cos:{enabled,bucket,region,prefix,source_prefix,domain,secret_id,secret_key}, notice}`。
 
 有效期全系统只有一处：密码表 `expires`（新增默认 31 天，带 `23:59` 表示到当天结束）。`/verify` 每次都回表复查，所以**密码到期 = 下次启动即被拒**，没有宽限。
 
@@ -148,13 +154,13 @@ Base = 上面的函数 URL，路径透传，POST + `application/json`。
 
 ```powershell
 python3 scripts\license_deploy.py test      # 5 项：health / 激活 / 错密码 / 同机 / 换机
-python3 scripts\license_deploy.py config    # 运行配置是否已下发（含 rh_api_key）
+python3 scripts\license_deploy.py config    # 运行配置是否已下发（含 wan.api_key）
 ```
 
 | # | 检查 | 期望 |
 | --- | --- | --- |
 | 1 | `/health` | 200 |
-| 2 | `/activate` 里的 `config.rh_api_key` | **非空，长度 32** |
+| 2 | `/activate` 里的 `config.wan.api_key` / `model` / `base_url` | **非空**，Key 形如 `sk-...` |
 | 3 | 客户端首次启动 | 状态灯「配置：已下发」、「模板清单：N 个」 |
 | 4 | 真跑 1 条小批量 | 真的出视频（**要花钱，需确认**） |
 | 5 | 本地缓存 | `%APPDATA%\RHOutfitTool\license.json` 以 `dpapi:` 开头，全文搜不到 Key |
@@ -172,7 +178,7 @@ python3 scripts\license_deploy.py config    # 运行配置是否已下发（含 
 
 | 界面现象 | 真实原因 | 处理 |
 | --- | --- | --- |
-| 「配置：未下发」 | `/activate` 的 `config.rh_api_key` 为空 | 按第 3 节 A 填 Key 并 deploy |
+| 「配置：未下发」 | `/activate` 的 `config.wan.api_key` 为空 | 按第 3 节 A 填 Key 并 deploy |
 | 「模板清单：未下发」 | `manifest_url` 空或打不开 | 补 config.json；确认 URL 公网可访问 |
 | 「未配置授权服务」+ 直接退出 | 内置 `SERVICE_URL` 被清空 | 恢复 `app/config.py:18` 并重新打包 |
 | 「本机还没有授权，请输入分配的密码」 | 首次运行 / 缓存被清 | 输密码 |
@@ -190,8 +196,8 @@ python3 scripts\license_deploy.py config    # 运行配置是否已下发（含 
 1. **不要动 `LICENSE_SECRET`**：一动全员失效，必须重新输密码。它只在云函数环境变量里，任何时候不要打印。
 2. `server/config.json`、`server/passwords.json`、`dist/license-deploy.zip` **都不进 Git、不贴对话、不跟软件一起发**。
 3. `scripts/` 整个目录（含密码管理器）是内部工具，`build.ps1` 只打包 `run_app.py`，本来就不含它——别手动塞进去。
-4. 协议字段名（`password` / `machine` / `token` / `action` / `config` / `rh_api_key` / `manifest_url` / `cos`）与 token 结构（`p` / `m` / `e`）不能改，改了老客户端全废。
-5. **不要把 RH Key 写进客户端代码或打包进 exe**——现在是服务端下发，写进客户端等于前功尽弃。
+4. 协议字段名（`password` / `machine` / `token` / `action` / `config` / `wan` / `rh_api_key` / `manifest_url` / `cos`）与 token 结构（`p` / `m` / `e`）不能改，改了老客户端全废。
+5. **不要把百炼 Key / RH Key 写进客户端代码或打包进 exe**——现在是服务端下发，写进客户端等于前功尽弃。
 
 ---
 

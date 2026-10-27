@@ -1,5 +1,6 @@
 {
   "defaults": {
+    "mode": "reference",
     "resolution": "720P",
     "duration": "7",
     "aspectRatio": "9:16",

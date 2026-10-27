@@ -1,5 +1,10 @@
 # 换装批量生产器 · 项目状态报告
 
+> **历史文档（RunningHub 时代）**：生成链路已于 2026-10-27 切到阿里云百炼官方
+> `wan3.0-video`。现状以 [README.md](../README.md) 与
+> [adr-002-aliyun-wan3-official-api.md](adr-002-aliyun-wan3-official-api.md) 为准；
+> 本文提到的 `rh_api_key`、RunningHub 上传/查询接口仅用于回看历史。
+
 **日期**：2026-10-26　**版本**：v0.9　**仓库**：`D:\批量视频任务设计区`
 **最近提交**：见 §10 修订记录
 

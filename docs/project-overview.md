@@ -27,8 +27,8 @@
 ```
                     ┌─────────────── 生产链路 ───────────────┐
 模板清单(manifest) ──┐                                      │
-                    ├─▶ 客户端 ──▶ RunningHub 万相3.0 ──▶ 结果URL(24h)
-无头模特图(本地) ─────┘      │        reference-to-video          │
+                    ├─▶ 客户端 ──▶ 阿里云百炼 wan3.0-video ──▶ 结果URL(24h)
+无头模特图(本地) ─────┘      │        video-synthesis             │
        │                    │                                    │
        └─上传一次─▶ URL ─────┘                                    │
                                                                 ▼
@@ -53,11 +53,13 @@
 
 | 文件 | 行数量级 | 职责 | 关键点 |
 | --- | --- | --- | --- |
-| `app/main.py` | 630 | PySide6 界面：两个页面、进度、暂停、结果表 | 配置全来自 `配置.ini`，界面无输入框 |
-| `app/core.py` | 480 | 引擎：清单→规划→上传→并发提交→轮询→下载→校验→归档 | `BatchRunner` 可脱离界面单测 |
+| `app/main.py` | 840 | PySide6 界面：三个页面、进度、暂停、结果表 | 配置全来自服务端下发，界面无 Key 输入框 |
+| `app/core.py` | 560 | 引擎：清单→规划→源图→并发提交→轮询→下载→校验→归档 | `BatchRunner` 可脱离界面单测 |
+| `app/wan_api.py` | 850 | 官方 DashScope / 旧 RunningHub 双协议 | 提交/查询/状态/错误/限流/计费 |
+| `app/media.py` | 380 | 素材适配：图片预检、COS 源图、Base64、视频探测 | 本地路径 → 官方可用 URL |
 | `app/storage.py` | 660 | 存储适配层：COS / 本地目录 | 六动作：put/exists/stat/sign/delete/list |
 | `app/transfer.py` | 310 | 远端链接→对象存储的**流式**转存（不经本地） | 主流程暂未接入，预留 |
-| `app/config.py` | 140 | `配置.ini` 读写、旧 JSON 配置迁移 | 键名全大写 |
+| `app/config.py` | 190 | 服务端配置映射 + 本机缓存 | 键名全大写 |
 | `app/license.py` | 140 | 授权客户端：机器码、激活、token 缓存 | token 绑机器、14 天 |
 | `app/startup.py` | 45 | 启动门禁：密码对话框，3 次失败退出 | 未配服务器则直接放行 |
 | `app/prompts.py` | 123 | 提示词库：JSON 加载、按名字取用（无分类无筛选） | 坏条目跳过，不炸整页（分支 `feature/prompt-library`） |
@@ -91,15 +93,18 @@
 ```
 ① 读 manifest（本地/HTTP）→ 得到 [{id, url}]
 ② 选组：第1–5组（001–500）或随机 100
-③ 上传服装图一次 → 100 条共用同一 URL（1 天有效）
-④ 并发提交：POST /alibaba/wan-3.0/reference-to-video
-        body = {prompt, imageUrls:[服装图], videoUrls:[模板], resolution:"720P",
-                duration:"7", aspectRatio:"9:16", audio:false, promptExtend:false}
-⑤ 轮询 /query，SUCCESS 即下载（结果链接 24h 失效）
+③ 上传服装图一次 → COS 签名 URL（7 天），100 条共用
+④ 并发提交：POST {base}/services/aigc/video-generation/video-synthesis
+        body = {model:"wan3.0-video", input:{prompt, media:[
+                {type:"reference_video",url:模板},
+                {type:"reference_image",url:服装图}]},
+                parameters:{resolution:"720P", ratio:"adaptive", duration:-1,
+                            audio:false, prompt_extend:false}}
+⑤ GET /tasks/{task_id} 轮询，SUCCEEDED 即下载（结果链接 24h 失效）
 ⑥ 校验（>50KB、时长≈7s）→ 落盘 → 可选归档 COS → 写 report.csv / batch.json
 ```
 
-**断点续跑**：`batch.json` 记录每条 taskId；重启后已成功的跳过，超时的续查而非重提（不重复扣费）。
+**断点续跑**：`batch.json` / `state.json` 记录每条 `task_id`；重启后已成功的跳过，未过 24h 的超时任务续查而非重提（不重复扣费）。
 
 ---
 
@@ -108,14 +113,15 @@
 | 环节 | 位置 | 有效期 |
 | --- | --- | --- |
 | 模板视频 | 自有 CDN/OSS（manifest 给 URL） | 长期 |
-| 服装图 | RunningHub 上传接口 | 1 天 |
-| 生成结果 | RunningHub 返回链接 | **24 小时** |
+| 服装图 | COS `{前缀}/output/source/`，签 7 天；无 COS 时 Base64 | 7 天 URL；对象建议 30 天清理 |
+| 生成结果 | 百炼返回 `output.video_url` | **24 小时** |
 | 本地副本 | `输出根\批次号\` | 永久 |
 | COS 副本 | `{前缀}/output/{日期}/{批次}/001-{指纹8}.mp4` | 永久；签名链接 7 天 |
 
 - COS 归档失败**不算任务失败**，只记 `archive_error`。
 - 对象名带内容指纹 → 重复上传命中同一 key，不会越存越多。
 - 凭证来源：环境变量 → `~/.cos/credentials.json` → `~/.tccli/<profile>.credential`（支持 STS Token）。
+- 官方拉取器是 `DashScopeUserBot`；腾讯 COS 是否放行必须 Day-0 验证（ADR-002）。
 
 ---
 
@@ -138,14 +144,16 @@
 
 | 键 | 说明 | 默认 |
 | --- | --- | --- |
-| `RH_API_KEY` | RunningHub 32 位 Key（企业级共享） | 空 |
+| `wan.api_key` | 阿里云百炼 Key（`sk-...`） | 空 |
+| `wan.model` / `wan.base_url` | `wan3.0-video` / `.../api/v1` | 空 |
+| `rh_api_key` | 旧 RunningHub Key（回滚用，可空） | 空 |
 | `MANIFEST` | 模板清单地址（https 或本地路径） | 空 |
 | `OUTPUT_ROOT` | 输出根目录 | 留空 → exe 同目录 `输出` |
 | `COS_ENABLED` | 是否归档到 COS | `false` |
 | `COS_BUCKET` / `COS_REGION` / `COS_PREFIX` / `COS_DOMAIN` | COS 参数（**不放密钥**） | — |
 | `LICENSE_SERVER` | 授权服务地址；留空用内置地址，两者都空则**拒绝启动** | 空 |
 
-> 密钥不进 ini：COS 走本机凭证链，RH Key 由 ini 承载。
+> 密钥不进 ini：COS 走本机凭证链；百炼 Key / 旧 RH Key 都由服务端下发。
 
 ### 7.2 服务端环境变量
 
@@ -164,21 +172,21 @@
 
 | 项 | 证据 |
 | --- | --- |
-| 三个真实端点存在 | 假 Key 探测：`806` vs 乱写路径 `1001` |
+| 官方协议适配 | `test_wan_api`：体映射/约束/错误/计费全绿 |
 | COS 全链路 | 真桶写/读/签名/列举/删，7 步全绿 |
 | 归档幂等 | 3 条真传 COS，key 含指纹，验完清理 |
-| 100 条调度 | 假服务 17 秒跑完 100 条 |
+| 100 条调度 | 假百炼跑完 100 条（`demo.py --count 100`） |
 | 断点续跑 | 超时后重启续查，未重复提交 |
 | 界面批量 | 3 条：表格/CSV/日志/重名目录全对 |
 | 授权 11 项 | 激活/错误密码/停用/到期/换机器/网关重试 |
-| 打包 | onedir + zip 36.7 MB，selftest 通过 |
+| 打包 | onedir + zip 62.6 MB（v0.9 分支验证） |
 
 ### 未验证 ⚠️
 
 | 项 | 原因 | 怎么补 |
 | --- | --- | --- |
-| **真实生成效果** | 无 RH Key | 配 Key 后跑 1 条 720P/7s |
-| 真实单价/耗时 | 同上 | 读 `usage.consumeMoney` |
+| **真实生成效果** | 无百炼 Key | 配 `wan.api_key` 后跑 1 条 720P/7s |
+| 真实单价/耗时 | 同上 | 读 `usage.duration` / `output_video_duration`（官方无金额） |
 | 50/100 并发下的平台限流 | 无 Key，且不做未授权实测 | 官方文档未写并发上限，需向商务确认或阶梯实测 |
 | 500 模板真实 CDN 拉取 | 模板未上传 | 上传后跑 3 条观察 |
 
@@ -219,7 +227,7 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 | --- | --- | --- |
 | 单条 = 单请求 | 100 条 = 100 次 POST | 并发 3–10 |
 | 结果链接 24h | 过期不可恢复 | 成功即下载 |
-| 上传链接 1 天 | 不能提前一天传 | 当天传当天跑 |
+| 服装图签名 7 天 | 暂停超过 7 天需重传 | 批跑完再停；过期重跑 |
 | 并发上限未知 | 拉满可能被限流 | 阶梯测试 / 问商务 |
 | Key 内置 | exe 泄露 = 余额可被刷 | 授权密码 + 余额上限 |
 | 授权不防逆向 | 改代码可绕过 | 定位是"防随手转发" |
@@ -230,7 +238,7 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 
 ## 12. 待办（按优先级）
 
-1. **配 RH Key 跑 1 条真实** → 拿单价、验效果（唯一阻塞项）
+1. **配百炼 Key 跑 1 条真实** → 验官方拉取/效果/计费秒数（唯一阻塞项）
 2. 500 模板上 CDN → `tools/build_manifest.py` 出 manifest
 3. ~~部署授权服务~~ ✅ **已完成 2026-10-24**：腾讯云函数 `outfit-license`（ap-guangzhou，Python3.9，128MB/5s）+ 函数 URL
    `https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com`。
@@ -247,7 +255,8 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 | --- | --- |
 | [README.md](../README.md) | 入口：三条命令上手 |
 | [app/README.md](../app/README.md) | 界面使用说明、打包命令 |
-| [wan-3.0-reference-to-video.md](wan-3.0-reference-to-video.md) | 接口规格（字段/约束/状态机/计费） |
+| [wan-3.0-reference-to-video.md](wan-3.0-reference-to-video.md) | 官方接口规格（字段/约束/状态机/计费/存储） |
+| [adr-002-aliyun-wan3-official-api.md](adr-002-aliyun-wan3-official-api.md) | 切官方 API 的决策、存储/Key 风险、回滚 |
 | [cos-setup.md](cos-setup.md) | COS 接入手册（建桶/密钥/生命周期/CDN） |
 | [license-setup.md](license-setup.md) | 授权方案说明与上线手册 |
 | [license-handoff.md](license-handoff.md) | **交给执行方的完整交接文档** |

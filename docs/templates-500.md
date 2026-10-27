@@ -10,7 +10,7 @@
 
 ## 0. 为什么是"公有读直链"，不是"私有桶 + 程序签名"
 
-模型（RunningHub）自己去拉模板视频，它不会带我们的签名；而客户端手里的 COS 凭证是
+模型（阿里云百炼）自己去拉模板视频，它不会带我们的签名；而客户端手里的 COS 凭证是
 **只能写成品桶的子账号**，对模板桶**零权限**（`video-input-1463907213` 整个桶 `AccessDenied`）。
 所以"客户端给模型签模板链接"这条路**走不通**——这一点写在
 [adr-001-cos-client-credential.md](adr-001-cos-client-credential.md) §7，别重复踩。
@@ -90,7 +90,12 @@ https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json
 
 ```json
 {
-  "rh_api_key": "32 位 Key",
+  "wan": {
+    "provider": "dashscope",
+    "api_key": "sk-百炼 Key",
+    "model": "wan3.0-video",
+    "base_url": "https://dashscope.aliyuncs.com/api/v1"
+  },
   "manifest_url": "https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json",
   "cos": {
     "enabled": true,
@@ -99,6 +104,7 @@ https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json
     "output_bucket": "video-output-1463907213",
     "region": "ap-guangzhou",
     "prefix": "prod",
+    "source_prefix": "",
     "domain": "",
     "secret_id": "子账号 SecretId",
     "secret_key": "子账号 SecretKey"

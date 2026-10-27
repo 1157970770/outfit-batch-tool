@@ -5,8 +5,9 @@
 > 本文自带协议规格、文件清单、验收标准，不依赖任何对话上下文。
 
 > ⚠️ **v0.8 起「配置.ini」已被删除**：服务地址内置在 `app/config.py:18`，
-> RH Key / 模板清单 / COS 凭证全部由服务端随票下发。
-> 下文凡涉及"改 `配置.ini`"的段落均已失效，以 [license-integration.md](license-integration.md) 为准。
+> 百炼 Key / 模板清单 / COS 凭证全部由服务端随票下发。
+> 下文凡涉及"改 `配置.ini`"或"RH Key"的段落属于历史；现行配置与生成链路见
+> [license-integration.md](license-integration.md) 与 [adr-002-aliyun-wan3-official-api.md](adr-002-aliyun-wan3-official-api.md)。
 
 ---
 
