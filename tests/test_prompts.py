@@ -121,11 +121,13 @@ def test_path_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 离屏界面
+# 离屏界面（六张卡片）
 # ---------------------------------------------------------------------------
 
 def test_ui() -> None:
-    print("离屏界面：列表 / 全文 / 复制 / 填入生产页")
+    print("离屏界面：六张卡片 / 点卡复制 / 填入生产页")
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
     from app.prompts_page import PromptLibraryPage
@@ -137,38 +139,40 @@ def test_ui() -> None:
     app.processEvents()
 
     lib = PromptLibrary.load(LIB)
-    check(page.list.count() == 6, f"列表 6 行（实际 {page.list.count()}）")
-    check(page.list.item(0).text() == "1. 服装定妆", f"首项：{page.list.item(0).text()}")
-    check(page.body_edit.toPlainText().strip() == lib.prompts[0].body, "默认选中第一条并显示全文")
-    check(page.copy_btn.isEnabled(), "复制按钮可用")
+    check(len(page.cards) == 6, f"六张卡片（实际 {len(page.cards)}）")
+    check(page.cards[0].title_label.text() == "1. 服装定妆", f"首张：{page.cards[0].title_label.text()}")
+    check(page.cards[5].title_label.text() == "6. 换装同时加手串/项链", "第六张名字对")
+    check("字" in page.cards[3].toolTip() or page.cards[3].toolTip() != "", "卡片带全文预览提示")
 
-    page.list.setCurrentRow(3)          # 第 4 条：手串
+    QTest.mouseClick(page.cards[3], Qt.LeftButton)      # 点第 4 张：手串
     app.processEvents()
-    check(page.detail_title.text() == "手串", f"标题：{page.detail_title.text()}")
-    check(page.body_edit.toPlainText().strip() == lib.get("p04").body, "全文与库一致")
-    check("字" in page.detail_meta.text(), f"字数提示：{page.detail_meta.text()}")
-
-    page.copy_btn.click()
-    app.processEvents()
-    check(QApplication.clipboard().text() == lib.get("p04").body, "复制进剪贴板的是全文")
-    check("已复制" in page.status_label.text(), f"状态栏反馈：{page.status_label.text()}")
+    check(QApplication.clipboard().text() == lib.get("p04").body, "点卡身 = 复制全文")
+    check("已复制" in page.status_label.text() and "手串" in page.status_label.text(),
+          f"状态反馈：{page.status_label.text()}")
 
     captured: list[str] = []
     page.use_requested.connect(captured.append)
-    page.use_btn.click()
+    page.cards[4].fill_btn.click()                      # 第 5 张「填入生产页」
     app.processEvents()
-    check(captured == [lib.get("p04").body], "「填入生产页」发出全文")
+    check(captured == [lib.get("p05").body], "按钮 = 发出全文给生产页")
+    check("已填入生产页" in page.status_label.text(), f"状态反馈：{page.status_label.text()}")
 
-    # 空库：不该崩，也不该给出可点的复制
+    # 空库：不该崩，也不该留半张卡
     empty = tempdir("prompts-empty-") / "empty.json"
     empty.write_text(json.dumps({"version": 1, "prompts": []}, ensure_ascii=False), encoding="utf-8")
     empty_page = PromptLibraryPage(path=empty)
     app.processEvents()
-    check(empty_page.list.count() == 0, "空库列表 0 行")
-    check(not empty_page.copy_btn.isEnabled(), "空库时复制不可用")
+    check(len(empty_page.cards) == 0, "空库 0 张卡")
+    check("空" in empty_page.status_label.text(), f"空库提示：{empty_page.status_label.text()}")
+
+    # 坏文件：状态栏报错，不崩
+    bad_page = PromptLibraryPage(path=tempdir("prompts-bad-") / "nope.json")
+    app.processEvents()
+    check(len(bad_page.cards) == 0 and "读不到" in bad_page.status_label.text(), "坏路径 → 状态栏报错")
 
     page.close()
     empty_page.close()
+    bad_page.close()
 
 
 def test_window_integration() -> None:

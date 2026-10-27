@@ -783,12 +783,13 @@ QHeaderView::section { background: #fafafc; border: none; border-bottom: 1px sol
 QTabWidget::pane { border: none; }
 QTabBar::tab { padding: 8px 18px; border: none; color: #6b6b70; }
 QTabBar::tab:selected { color: #1f6feb; border-bottom: 2px solid #1f6feb; }
-#libTitle { font-size: 14px; font-weight: 600; }
-#libMeta { color: #6b6b70; font-size: 12px; }
 #libStatus { color: #0a7d32; font-size: 12px; }
 #libStatus[tone="bad"] { color: #b3261e; }
-QListWidget { border: 1px solid #e6e6ea; border-radius: 6px; background: white; }
-QListWidget::item { padding: 6px 8px; }
+#libHint { color: #86868b; font-size: 12px; }
+#promptCard { background: #ffffff; border: 1px solid #e3e3e7; border-radius: 8px; }
+#promptCard:hover { border-color: #1f6feb; background: #f7f9ff; }
+#cardTitle { font-size: 14px; font-weight: 600; }
+#cardMeta { color: #86868b; font-size: 12px; }
 """
 
 

@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """提示词库页面（第三个标签页）。
 
-左边是名字列表，右边是全文 + 复制 / 填入生产页。没有分类、没有筛选——条数少时名字就是索引。
+就六张卡片：点卡片 = 复制全文；卡片右下角「填入生产页」= 写进生产页的提示词框。
+没有列表、没有筛选、没有分栏。
 """
 
 from __future__ import annotations
@@ -12,15 +13,60 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout,
-    QWidget,
+    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 if __package__ in (None, ""):  # 允许直接 python app/prompts_page.py 调试
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.prompts import Prompt, PromptLibrary, PromptLibraryError, library_path  # noqa: E402
+
+COLUMNS = 3
+
+
+class PromptCard(QFrame):
+    """一张卡：名字 + 字数；点卡身复制，点按钮填进生产页。"""
+
+    def __init__(self, page: "PromptLibraryPage", index: int, prompt: Prompt):
+        super().__init__()
+        self.page_ref = page
+        self.prompt = prompt
+        self.setObjectName("promptCard")
+        self.setMinimumSize(240, 108)
+        self.setCursor(Qt.PointingHandCursor)
+        preview = prompt.body.replace("\n", " ")
+        self.setToolTip(preview[:140] + ("…" if len(preview) > 140 else ""))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(2)
+
+        self.title_label = QLabel(f"{index}. {prompt.title}")
+        self.title_label.setObjectName("cardTitle")
+        self.title_label.setWordWrap(True)
+        layout.addWidget(self.title_label)
+
+        meta = QLabel(f"{prompt.chars} 字")
+        meta.setObjectName("cardMeta")
+        layout.addWidget(meta)
+
+        layout.addStretch(1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.fill_btn = QPushButton("填入生产页")
+        self.fill_btn.setObjectName("ghost")
+        self.fill_btn.setFixedHeight(26)
+        self.fill_btn.setCursor(Qt.PointingHandCursor)
+        self.fill_btn.clicked.connect(lambda: self.page_ref.fill_prompt(self.prompt))
+        row.addWidget(self.fill_btn)
+        layout.addLayout(row)
+
+    def mousePressEvent(self, event):  # noqa: N802 (Qt 命名)
+        if event.button() == Qt.LeftButton:
+            self.page_ref.copy_prompt(self.prompt)
+        super().mousePressEvent(event)
 
 
 class PromptLibraryPage(QWidget):
@@ -32,7 +78,7 @@ class PromptLibraryPage(QWidget):
         super().__init__(parent)
         self.path = Path(path) if path else library_path()
         self.lib: PromptLibrary | None = None
-        self._current: Prompt | None = None
+        self.cards: list[PromptCard] = []
 
         self._build()
         self.reload()
@@ -42,157 +88,76 @@ class PromptLibraryPage(QWidget):
     # ------------------------------------------------------------------
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 14, 18, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(20, 16, 20, 14)
+        root.setSpacing(10)
 
+        top = QHBoxLayout()
         self.status_label = QLabel()
         self.status_label.setObjectName("libStatus")
         self.status_label.setWordWrap(True)
-        root.addWidget(self.status_label)
+        top.addWidget(self.status_label, 1)
+        self.reload_btn = QPushButton("重新加载")
+        self.reload_btn.setObjectName("ghost")
+        self.reload_btn.setToolTip(f"改完 {self.path.name} 后点这里，不用重启")
+        self.reload_btn.clicked.connect(self.reload)
+        top.addWidget(self.reload_btn)
+        root.addLayout(top)
 
-        split = QSplitter(Qt.Horizontal)
+        self.grid_host = QWidget()
+        self.grid = QGridLayout(self.grid_host)
+        self.grid.setContentsMargins(0, 2, 0, 0)
+        self.grid.setSpacing(12)
+        root.addWidget(self.grid_host)
 
-        # 左：名字列表
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        root.addStretch(1)
 
-        head = QHBoxLayout()
-        self.count_label = QLabel()
-        self.count_label.setObjectName("libMeta")
-        head.addWidget(self.count_label)
-        head.addStretch(1)
-        reload_btn = QPushButton("重新加载")
-        reload_btn.setObjectName("ghost")
-        reload_btn.setToolTip(f"改完 {self.path.name} 后点这里，不用重启")
-        reload_btn.clicked.connect(self.reload)
-        head.addWidget(reload_btn)
-        left_layout.addLayout(head)
-
-        self.list = QListWidget()
-        self.list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.list.setAlternatingRowColors(True)
-        self.list.setWordWrap(True)
-        self.list.currentRowChanged.connect(self._on_row_changed)
-        left_layout.addWidget(self.list, 1)
-        split.addWidget(left)
-
-        # 右：全文
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(8, 0, 0, 0)
-        right_layout.setSpacing(8)
-
-        self.detail_title = QLabel("← 从左边选一条")
-        self.detail_title.setObjectName("libTitle")
-        self.detail_title.setWordWrap(True)
-        right_layout.addWidget(self.detail_title)
-
-        self.detail_meta = QLabel()
-        self.detail_meta.setObjectName("libMeta")
-        right_layout.addWidget(self.detail_meta)
-
-        self.body_edit = QPlainTextEdit()
-        self.body_edit.setReadOnly(True)
-        self.body_edit.setPlaceholderText("选中一条后，这里显示可以直接复制的提示词全文")
-        right_layout.addWidget(self.body_edit, 1)
-
-        buttons = QHBoxLayout()
-        self.copy_btn = QPushButton("复制全文")
-        self.copy_btn.setObjectName("primary")
-        self.copy_btn.setEnabled(False)
-        self.copy_btn.clicked.connect(self._copy)
-        self.use_btn = QPushButton("填入生产页")
-        self.use_btn.setToolTip("把这段提示词填进生产页的提示词框，直接开跑")
-        self.use_btn.setEnabled(False)
-        self.use_btn.clicked.connect(self._use)
-        buttons.addWidget(self.copy_btn)
-        buttons.addWidget(self.use_btn)
-        buttons.addStretch(1)
-        right_layout.addLayout(buttons)
-        split.addWidget(right)
-
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 5)
-        split.setSizes([260, 700])
-        root.addWidget(split, 1)
+        hint = QLabel("点卡片复制全文 · 「填入生产页」把原文写进提示词框")
+        hint.setObjectName("libHint")
+        root.addWidget(hint)
 
     # ------------------------------------------------------------------
     # 数据
     # ------------------------------------------------------------------
     def reload(self) -> None:
+        self._clear_cards()
         try:
             self.lib = PromptLibrary.load(self.path)
         except PromptLibraryError as exc:
             self.lib = None
-            self.list.clear()
-            self.count_label.setText("")
-            self._clear_detail("读不到提示词库，修好后点「重新加载」")
-            self._set_status(f"{exc}", bad=True)
+            self._set_status(f"读不到提示词库：{exc}", bad=True)
             return
 
-        self.list.blockSignals(True)
-        self.list.clear()
-        for idx, prompt in enumerate(self.lib.prompts, 1):
-            item = QListWidgetItem(f"{idx}. {prompt.title}")
-            item.setData(Qt.UserRole, prompt.id)
-            item.setToolTip(f"{prompt.title} · {prompt.chars} 字")
-            self.list.addItem(item)
-        self.list.blockSignals(False)
+        self.cards = []
+        for idx, prompt in enumerate(self.lib.prompts):
+            card = PromptCard(self, idx + 1, prompt)
+            self.grid.addWidget(card, idx // COLUMNS, idx % COLUMNS)
+            self.cards.append(card)
 
-        self.count_label.setText(f"共 {len(self.lib)} 条")
-        note = f"；{len(self.lib.issues)} 条被跳过：{self.lib.issues[0]}" if self.lib.issues else ""
-        self._set_status(f"{self.path}{note}", bad=bool(self.lib.issues))
-
-        if self.lib.prompts:
-            self.list.setCurrentRow(0)
-        else:
-            self._clear_detail("库是空的，先往 JSON 里加一条")
-
-    # ------------------------------------------------------------------
-    # 详情
-    # ------------------------------------------------------------------
-    def _on_row_changed(self, row: int) -> None:
-        if self.lib is None or not (0 <= row < len(self.lib.prompts)):
+        if not self.cards:
+            self._set_status("库是空的，先往 JSON 里加一条", bad=True)
             return
-        self._show(self.lib.prompts[row])
 
-    def _show(self, prompt: Prompt) -> None:
-        self._current = prompt
-        self.detail_title.setText(prompt.title)
-        self.detail_meta.setText(f"{prompt.chars} 字 · 原文照抄")
-        self.body_edit.setPlainText(prompt.body)
-        self.copy_btn.setEnabled(True)
-        self.use_btn.setEnabled(True)
+        suffix = f"；{len(self.lib.issues)} 条被跳过：{self.lib.issues[0]}" if self.lib.issues else ""
+        self._set_status(f"共 {len(self.cards)} 条 · {self.path.name}{suffix}", bad=bool(self.lib.issues))
 
-    def _clear_detail(self, message: str) -> None:
-        self._current = None
-        self.detail_title.setText(message)
-        self.detail_meta.setText("")
-        self.body_edit.setPlainText("")
-        self.copy_btn.setEnabled(False)
-        self.use_btn.setEnabled(False)
+    def _clear_cards(self) -> None:
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.cards = []
 
     # ------------------------------------------------------------------
-    # 取用
+    # 动作
     # ------------------------------------------------------------------
-    def current_text(self) -> str:
-        return self.body_edit.toPlainText().strip()
+    def copy_prompt(self, prompt: Prompt) -> None:
+        QApplication.clipboard().setText(prompt.body)
+        self._set_status(f"已复制：{prompt.title}（{prompt.chars} 字）")
 
-    def _copy(self) -> None:
-        text = self.current_text()
-        if not text:
-            return
-        QApplication.clipboard().setText(text)
-        self._set_status(f"已复制（{len(text)} 字）")
-
-    def _use(self) -> None:
-        text = self.current_text()
-        if not text:
-            return
-        self.use_requested.emit(text)
-        self._set_status("已填入生产页的提示词框")
+    def fill_prompt(self, prompt: Prompt) -> None:
+        self.use_requested.emit(prompt.body)
+        self._set_status(f"已填入生产页：{prompt.title}")
 
     def _set_status(self, text: str, bad: bool = False) -> None:
         self.status_label.setText(text)

@@ -61,7 +61,7 @@
 | `app/license.py` | 140 | 授权客户端：机器码、激活、token 缓存 | token 绑机器、14 天 |
 | `app/startup.py` | 45 | 启动门禁：密码对话框，3 次失败退出 | 未配服务器则直接放行 |
 | `app/prompts.py` | 123 | 提示词库：JSON 加载、按名字取用（无分类无筛选） | 坏条目跳过，不炸整页（分支 `feature/prompt-library`） |
-| `app/prompts_page.py` | 199 | 提示词库页面：名字列表 → 全文 → 复制 / 填入生产页 | 第三个标签页，未合入主干 |
+| `app/prompts_page.py` | 163 | 提示词库页面：六张卡片，点卡片复制、按钮填入生产页 | 第三个标签页，未合入主干 |
 | `run_app.py` | 12 | PyInstaller 入口 | |
 
 ### 3.2 命令行工具
