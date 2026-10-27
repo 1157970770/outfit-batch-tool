@@ -41,6 +41,15 @@ def raw_body(path: Path) -> str:
     return re.search(r"```text\n(.*?)\n```", text, re.S).group(1).strip()
 
 
+def visible_text(label) -> str:
+    """把 QLabel 里的富文本还原成可见文本，用来核对「全文没有丢字」。"""
+    import html
+
+    text = re.sub(r"<br\s*/?>", "\n", label.text())
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
 # ---------------------------------------------------------------------------
 # 数据层
 # ---------------------------------------------------------------------------
@@ -121,54 +130,50 @@ def test_path_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 离屏界面（六张卡片）
+# 离屏界面（六条全文 + 复制按钮）
 # ---------------------------------------------------------------------------
 
 def test_ui() -> None:
-    print("离屏界面：六张卡片 / 点卡复制 / 填入生产页")
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
+    print("离屏界面：六条全文可见 / 复制按钮")
     from PySide6.QtWidgets import QApplication
 
     from app.prompts_page import PromptLibraryPage
 
     app = QApplication.instance() or QApplication([])
     page = PromptLibraryPage(path=LIB)
-    page.resize(980, 620)
+    page.resize(980, 700)
     page.show()
     app.processEvents()
 
     lib = PromptLibrary.load(LIB)
-    check(len(page.cards) == 6, f"六张卡片（实际 {len(page.cards)}）")
-    check(page.cards[0].title_label.text() == "1. 服装定妆", f"首张：{page.cards[0].title_label.text()}")
-    check(page.cards[5].title_label.text() == "6. 换装同时加手串/项链", "第六张名字对")
-    check("字" in page.cards[3].toolTip() or page.cards[3].toolTip() != "", "卡片带全文预览提示")
+    check(len(page.blocks) == 6, f"六个区块（实际 {len(page.blocks)}）")
+    check(page.blocks[0].title_label.text() == "1. 服装定妆", f"首块标题：{page.blocks[0].title_label.text()}")
+    check(page.blocks[5].title_label.text() == "6. 换装同时加手串/项链", "第六块名字对")
 
-    QTest.mouseClick(page.cards[3], Qt.LeftButton)      # 点第 4 张：手串
+    # 全文必须完整呈现，且与库里一字不差
+    same = all(visible_text(b.body_label) == lib.prompts[i].body for i, b in enumerate(page.blocks))
+    check(same, "六条全文与库正文一致（逐字）")
+    check(visible_text(page.blocks[0].body_label).startswith("负责定妆照提示词"), "开头就是原文第一行")
+    check(page.blocks[2].body_label.wordWrap(), "长句自动换行，不被截断")
+
+    page.blocks[3].copy_btn.click()      # 第 4 块：手串
     app.processEvents()
-    check(QApplication.clipboard().text() == lib.get("p04").body, "点卡身 = 复制全文")
+    check(QApplication.clipboard().text() == lib.get("p04").body, "复制按钮 = 复制全文")
     check("已复制" in page.status_label.text() and "手串" in page.status_label.text(),
           f"状态反馈：{page.status_label.text()}")
 
-    captured: list[str] = []
-    page.use_requested.connect(captured.append)
-    page.cards[4].fill_btn.click()                      # 第 5 张「填入生产页」
-    app.processEvents()
-    check(captured == [lib.get("p05").body], "按钮 = 发出全文给生产页")
-    check("已填入生产页" in page.status_label.text(), f"状态反馈：{page.status_label.text()}")
-
-    # 空库：不该崩，也不该留半张卡
+    # 空库：不该崩，也不该留半个区块
     empty = tempdir("prompts-empty-") / "empty.json"
     empty.write_text(json.dumps({"version": 1, "prompts": []}, ensure_ascii=False), encoding="utf-8")
     empty_page = PromptLibraryPage(path=empty)
     app.processEvents()
-    check(len(empty_page.cards) == 0, "空库 0 张卡")
+    check(len(empty_page.blocks) == 0, "空库 0 个区块")
     check("空" in empty_page.status_label.text(), f"空库提示：{empty_page.status_label.text()}")
 
     # 坏文件：状态栏报错，不崩
     bad_page = PromptLibraryPage(path=tempdir("prompts-bad-") / "nope.json")
     app.processEvents()
-    check(len(bad_page.cards) == 0 and "读不到" in bad_page.status_label.text(), "坏路径 → 状态栏报错")
+    check(len(bad_page.blocks) == 0 and "读不到" in bad_page.status_label.text(), "坏路径 → 状态栏报错")
 
     page.close()
     empty_page.close()
@@ -176,7 +181,7 @@ def test_ui() -> None:
 
 
 def test_window_integration() -> None:
-    print("主窗口：第三个标签页 + 填入生产页")
+    print("主窗口：第三个标签页")
     from PySide6.QtWidgets import QApplication
 
     import app.main as gui
@@ -185,12 +190,7 @@ def test_window_integration() -> None:
     window = gui.MainWindow()
     labels = [window.tabs.tabText(i) for i in range(window.tabs.count())]
     check(labels == ["小批量试跑", "大批量生产", "提示词库"], f"标签页：{labels}")
-
-    text = "视频1中的人物，把服装换成图1这套"
-    window._apply_prompt(text)
-    check(window.small_panel.prompt_edit.toPlainText() == text, "小批量页已填入")
-    check(window.big_panel.prompt_edit.toPlainText() == text, "大批量页已填入")
-    check(window.tabs.currentWidget() is window.small_panel, "切回小批量试跑")
+    check(len(window.prompts_page.blocks) == 6, "主窗口里的提示词库也铺开六条")
     window.close()
 
 

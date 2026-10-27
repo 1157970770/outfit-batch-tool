@@ -622,7 +622,6 @@ class MainWindow(QMainWindow):
         self.small_panel = BatchPanel(self.cfg, small=True, window=self)
         self.big_panel = BatchPanel(self.cfg, small=False, window=self)
         self.prompts_page = PromptLibraryPage()
-        self.prompts_page.use_requested.connect(self._apply_prompt)
         self.tabs.addTab(self.small_panel, "小批量试跑")
         self.tabs.addTab(self.big_panel, "大批量生产")
         self.tabs.addTab(self.prompts_page, "提示词库")
@@ -672,20 +671,6 @@ class MainWindow(QMainWindow):
             self.banner.show()
         else:
             self.banner.hide()
-
-    # ---- 提示词库 ----
-    def _apply_prompt(self, text: str) -> None:
-        """提示词库选中 → 填进两个生产页的提示词框，并切回小批量试跑去调效果。"""
-        text = (text or "").strip()
-        if not text:
-            return
-        if self.busy:
-            QMessageBox.information(self, "正在出片", "当前批次还在跑，等结束后再替换提示词。")
-            return
-        for panel in (self.small_panel, self.big_panel):
-            panel.prompt_edit.setPlainText(text)
-        self.tabs.setCurrentWidget(self.small_panel)
-        self._log(f"提示词库：已填入生产页（{len(text)} 字）")
 
     # ---- 输出目录 ----
     def _pick_output_dir(self):
@@ -786,8 +771,8 @@ QTabBar::tab:selected { color: #1f6feb; border-bottom: 2px solid #1f6feb; }
 #libStatus { color: #0a7d32; font-size: 12px; }
 #libStatus[tone="bad"] { color: #b3261e; }
 #libHint { color: #86868b; font-size: 12px; }
-#promptCard { background: #ffffff; border: 1px solid #e3e3e7; border-radius: 8px; }
-#promptCard:hover { border-color: #1f6feb; background: #f7f9ff; }
+#promptBlock { background: #ffffff; border: 1px solid #e3e3e7; border-radius: 8px; }
+#promptBody { color: #1d1d1f; font-size: 12px; }
 #cardTitle { font-size: 14px; font-weight: 600; }
 #cardMeta { color: #86868b; font-size: 12px; }
 """
