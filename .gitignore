@@ -1,6 +1,7 @@
 # 构建产物（体积大，放 GitHub Releases，不进仓库）
 dist/
 dist-official/
+dist-official-onefile/
 build/
 build_*/
 *.spec
