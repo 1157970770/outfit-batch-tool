@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Qt
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -81,10 +81,9 @@ class TagManager(QMainWindow):
         self.video.setMinimumSize(360, 235)
         self.video.setStyleSheet("background:#111;border-radius:8px;")
         self.player = QMediaPlayer(self)
-        self.audio = QAudioOutput(self)
-        self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
-        self.player.errorOccurred.connect(lambda *_: self.preview_status.setText("当前视频无法预览；仍可按文件名打标。"))
+        self.player.errorOccurred.connect(self._preview_error)
+        self.player.mediaStatusChanged.connect(self._preview_status_changed)
         right_layout.addWidget(self.video)
         controls = QHBoxLayout()
         self.play_btn = QPushButton("播放")
@@ -253,8 +252,22 @@ class TagManager(QMainWindow):
             return
         full = Path(self.project["source_root"]) / video["relative_path"]
         self.player.setSource(QUrl.fromLocalFile(str(full)))
-        self.preview_status.setText(full.name)
+        self.player.play()
+        self.preview_status.setText(f"正在加载预览：{full.name}")
         self._refresh_tag_checkboxes()
+
+    def _preview_error(self, _error, message: str):
+        self.preview_status.setText(f"无法预览（{message or '格式不支持'}）；仍可按文件名打标。")
+
+    def _preview_status_changed(self, status):
+        if status == QMediaPlayer.MediaStatus.LoadedMedia:
+            self.preview_status.setText("预览已加载")
+        elif status == QMediaPlayer.MediaStatus.BufferingMedia:
+            self.preview_status.setText("预览缓冲中…")
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self.preview_status.setText("该视频格式无法预览；仍可按文件名打标。")
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.preview_status.setText("播放结束")
 
     def _refresh_tag_checkboxes(self):
         self.tag_list.clear()
