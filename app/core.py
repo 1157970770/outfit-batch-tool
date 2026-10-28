@@ -187,6 +187,8 @@ class BatchSpec:
     source_prefix: str = ""
     source_expires: int = 7 * 24 * 3600
     price_per_second: dict = field(default_factory=dict)
+    # 网页多批次共享全局提交并发上限；桌面默认 None，不改变原行为。
+    submit_semaphore: threading.Semaphore | None = None
 
 
 @dataclass
@@ -359,7 +361,7 @@ class BatchRunner:
                 self._image_url = resolve_image(self.spec.image_path, self._uploader)
             except MediaError as exc:
                 raise EngineError(str(exc)) from None
-            self.log(f"服装图已就绪（{describe_media_source(self._image_url)}），100 条任务共用")
+            self.log(f"服装图已就绪（{describe_media_source(self._image_url)}），{len(self.spec.templates)} 条任务共用")
 
     def _run_one(self, tpl: dict) -> dict:
         spec = self.spec
@@ -408,7 +410,14 @@ class BatchRunner:
             # 桌面链路里 image/video 通常已是 URL；这里兜底处理本地路径
             body = resolve_body(body, self._uploader, cache=self._media_cache)
             wire = self._client.wire_body(body)
-            resp = self._client.submit(wire)
+            if spec.submit_semaphore is not None:
+                with spec.submit_semaphore:
+                    if self.stop_event.is_set():
+                        rec["status"] = "skipped"
+                        return rec
+                    resp = self._client.submit(wire)
+            else:
+                resp = self._client.submit(wire)
             rec["task_id"] = resp.task_id
             rec["request_id"] = resp.request_id
             rec["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -418,6 +427,7 @@ class BatchRunner:
                 self.state.records[tid] = dict(rec)
             self._save_state()
             self.log(f"[{tid}] 已提交 taskId={resp.task_id} status={resp.status}")
+            self._emit("update", record=dict(rec))
 
             final = self._client.wait_task(
                 resp.task_id, timeout=spec.poll_timeout, interval=spec.poll_interval,

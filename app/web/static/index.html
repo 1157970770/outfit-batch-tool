@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5f7fb">
+  <title>换装视频工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <main id="login-view" class="login-wrap">
+    <section class="login-card">
+      <div class="brand-mark">换</div>
+      <p class="eyebrow">局域网工作台</p>
+      <h1>换装视频生产</h1>
+      <p class="muted">登录后上传服装图，快速生成换装视频</p>
+      <form id="login-form">
+        <label>账号<input id="login-name" autocomplete="username" required maxlength="32" placeholder="请输入账号"></label>
+        <label>密码<input id="login-password" type="password" autocomplete="current-password" required placeholder="请输入密码"></label>
+        <p id="login-error" class="error hidden"></p>
+        <button class="primary full" type="submit">登录</button>
+      </form>
+      <p class="footnote">仅限受信任的局域网用户使用</p>
+    </section>
+  </main>
+
+  <div id="app-view" class="hidden">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark small">换</span><div><strong>换装视频工作台</strong><small id="server-summary">本机服务</small></div></div>
+      <div class="top-actions"><span id="welcome-user" class="muted"></span><button id="logout-btn" class="quiet">退出</button></div>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <div><p class="eyebrow">简单三步，开始制作</p><h1>把服装图变成换装视频</h1><p class="muted">上传图片，选择视频场景，确认后提交。</p></div>
+        <div class="hero-badge"><span class="dot"></span><span id="service-status">正在检查服务</span></div>
+      </section>
+
+      <div id="notice" class="notice hidden"></div>
+      <nav class="tabs" aria-label="页面导航">
+        <button class="tab active" data-view="create-view">新建任务</button>
+        <button class="tab" data-view="history-view">我的任务</button>
+        <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
+      </nav>
+
+      <section id="create-view" class="view active-view">
+        <div class="form-grid">
+          <article class="card upload-card">
+            <div class="step-title"><span class="step">1</span><div><h2>上传服装图片</h2><p>JPG、PNG 或 WebP，最多 20MB</p></div></div>
+            <label id="drop-zone" class="drop-zone">
+              <input id="image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
+              <img id="image-preview" class="image-preview hidden" alt="服装图片预览">
+              <span id="drop-copy"><span class="upload-icon">↑</span><strong>点击选择或拖拽图片到这里</strong><small>图片只会上传到本机服务</small></span>
+            </label>
+            <div id="image-info" class="image-info muted"></div>
+          </article>
+
+          <article class="card settings-card">
+            <div class="step-title"><span class="step">2</span><div><h2>选择生成方式</h2><p>普通试做建议先生成 1 条</p></div></div>
+            <fieldset class="choice-group">
+              <legend>视频场景</legend>
+              <label class="radio-card"><input type="radio" name="selection" value="random" checked><span><b>自动推荐</b><small>系统随机挑选，适合快速试做</small></span></label>
+              <label class="radio-card"><input type="radio" name="selection" value="selected"><span><b>我来挑选</b><small>从视频场景中选一个</small></span></label>
+            </fieldset>
+            <label id="template-wrap" class="field hidden">选择视频场景<select id="template-select"></select></label>
+            <video id="template-preview" class="template-preview hidden" controls preload="none" playsinline></video>
+            <label id="count-wrap" class="field">生成数量<select id="count-select"><option value="1">1 条（推荐先试做）</option><option value="3">3 条</option><option value="5">5 条</option><option value="10">10 条</option></select></label>
+            <label class="field">换装方案<select id="prompt-select"></select></label>
+            <details class="advanced"><summary>更多设置</summary><div class="advanced-grid">
+              <label class="field">画质<select id="resolution"><option value="480P" selected>标准 480P</option><option value="720P">高清 720P</option></select></label>
+              <label class="field">视频时长<select id="duration"><option value="5" selected>5 秒</option><option value="-1">跟随视频场景</option></select></label>
+            </div></details>
+          </article>
+        </div>
+
+        <article class="card confirmation-card">
+          <div class="step-title"><span class="step">3</span><div><h2>确认并提交</h2><p>提交后可能产生云端费用，已提交的生成任务不能撤回。</p></div></div>
+          <div class="confirm-row"><div><strong id="summary-title">准备生成 1 条视频</strong><p id="summary-detail" class="muted">480P · 5 秒 · 标准换装</p></div><button id="submit-btn" class="primary">确认提交</button></div>
+          <p id="create-error" class="error hidden"></p>
+        </article>
+      </section>
+
+      <section id="history-view" class="view">
+        <div class="section-head"><div><h2 id="jobs-heading">我的任务</h2><p class="muted">任务进度自动更新，完成后可预览和下载。</p></div><div class="top-actions"><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
+        <div id="jobs-list" class="jobs-list"><div class="empty">暂无任务。开始新建一个试试。</div></div>
+        <article id="job-detail" class="card detail-card hidden"></article>
+      </section>
+
+      <section id="admin-view" class="view">
+        <div class="section-head"><div><h2>管理员</h2><p class="muted">服务状态、用户和模板由管理员维护。</p></div><button id="reload-templates" class="quiet">重新加载视频场景</button></div>
+        <article class="card"><div id="admin-status" class="admin-status"></div></article>
+        <article class="card admin-users"><h3>添加使用者</h3><form id="add-user-form" class="user-form"><label>账号<input name="username" minlength="2" maxlength="32" required></label><label>初始密码<input name="password" type="password" minlength="8" required></label><label>权限<select name="role"><option value="user">普通使用者</option><option value="admin">管理员</option></select></label><button class="primary" type="submit">添加账号</button></form><p class="muted">密码只保存在本机。账号变更会立即生效。</p><div id="users-list" class="record-list"></div></article>
+      </section>
+      <footer>网页与任务由本机提供 · 关闭主机服务后，其他设备将暂时无法访问</footer>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

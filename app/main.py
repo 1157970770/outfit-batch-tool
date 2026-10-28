@@ -36,7 +36,8 @@ from app.core import (  # noqa: E402
     EngineError, load_manifest, plan_batch, unique_batch_dir,
 )
 from app.prompts_page import PromptLibraryPage  # noqa: E402
-from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
+from app.runtime import build_storage, build_storages  # noqa: E402
+from app.storage import StorageError  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
 APP_TITLE = "换装批量生产器 · 官方版"
@@ -54,52 +55,6 @@ def resolve_license_server(cfg: dict | None = None) -> str:
 
 def load_config() -> dict:
     return appconfig.load()
-
-
-def _make_storage(cfg: dict, bucket: str, prefix: str):
-    manual = {
-        "bucket": bucket,
-        "region": (cfg.get("COS_REGION") or "").strip(),
-        "prefix": prefix,
-        "domain": (cfg.get("COS_DOMAIN") or "").strip(),
-    }
-    # 服务端下发的凭证优先（子账号，仅 output/*）；没下发则回退本机凭证/环境变量
-    sid = (cfg.get("COS_SECRET_ID") or "").strip()
-    skey = (cfg.get("COS_SECRET_KEY") or "").strip()
-    if sid and skey:
-        manual["secret_id"] = sid
-        manual["secret_key"] = skey
-    resolved = StorageConfig.from_local_profile(**manual)
-    if not (resolved.secret_id and resolved.secret_key):
-        raise StorageError(
-            "启用了 COS，但本机找不到可用凭证。"
-            "请设置环境变量 COS_SECRET_ID/COS_SECRET_KEY，或放进 ~/.cos/credentials.json，"
-            "或先跑 tccli auth login --profile agent1"
-        )
-    return open_storage(resolved)
-
-
-def build_storages(cfg: dict) -> tuple[object | None, object | None]:
-    """返回 (模板桶, 成品桶)。双桶分离：模板只读素材桶，成品写成品桶。
-
-    任一桶名留空则回退到 COS_BUCKET；COS_ENABLED=false 时都返回 None。
-    """
-    if not appconfig.truthy(cfg.get("COS_ENABLED", "")):
-        return None, None
-
-    base_bucket = (cfg.get("COS_BUCKET") or "").strip()
-    template_bucket = (cfg.get("COS_TEMPLATE_BUCKET") or "").strip() or base_bucket
-    output_bucket = (cfg.get("COS_OUTPUT_BUCKET") or "").strip() or base_bucket
-    prefix = (cfg.get("COS_PREFIX") or "").strip()
-
-    template_store = _make_storage(cfg, template_bucket, "") if template_bucket else None
-    output_store = _make_storage(cfg, output_bucket, prefix) if output_bucket else None
-    return template_store, output_store
-
-
-def build_storage(cfg: dict):
-    """兼容旧调用：只返回成品桶。"""
-    return build_storages(cfg)[1]
 
 
 # ---------------------------------------------------------------------------

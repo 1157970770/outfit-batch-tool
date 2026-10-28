@@ -55,3 +55,8 @@ server/passwords.json
 
 # 旧 RH 版隔离工作树（不要提交；旧版原样保留在这里）
 .worktrees/
+
+# 局域网网页服务的本机数据与秘密配置
+dist-web/
+web-data/
+server/web.json

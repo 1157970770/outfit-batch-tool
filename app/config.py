@@ -105,13 +105,12 @@ def _price_map(value) -> dict:
     return out
 
 
-def load() -> dict:
-    """组装成界面/引擎使用的扁平字典（键名保持历史一致，减少改动面）。"""
-    from app import license as licensemod
-
-    remote = licensemod.get_config() or {}
+def from_remote(remote: dict, output_root: str | Path) -> dict:
+    """把服务端嵌套配置映射为引擎使用的扁平字典，不读取授权缓存。"""
     cos = remote.get("cos") or {}
     wan = remote.get("wan") or {}
+    if not isinstance(cos, dict):
+        cos = {}
     if not isinstance(wan, dict):
         wan = {}
 
@@ -119,27 +118,22 @@ def load() -> dict:
     wan_key = str(wan.get("api_key") or "").strip()
     provider = str(wan.get("provider") or "").strip().lower()
     if provider not in ("dashscope", "runninghub"):
-        # 兼容：服务端只有旧 rh_api_key 时仍走 RunningHub
         provider = "runninghub" if (rh_key and not wan_key) else "dashscope"
 
     return {
         "RH_API_KEY": rh_key,
         "MANIFEST": str(remote.get("manifest_url") or "").strip(),
-        "OUTPUT_ROOT": str(output_dir()),
+        "OUTPUT_ROOT": str(output_root),
         "COS_ENABLED": "true" if truthy(cos.get("enabled")) else "false",
         "COS_BUCKET": str(cos.get("bucket") or "").strip(),
-        # 双桶：模板只读素材桶，成品写成品桶；留空回退 COS_BUCKET
         "COS_TEMPLATE_BUCKET": str(cos.get("template_bucket") or cos.get("bucket") or "").strip(),
         "COS_OUTPUT_BUCKET": str(cos.get("output_bucket") or cos.get("bucket") or "").strip(),
         "COS_REGION": str(cos.get("region") or "ap-guangzhou").strip(),
         "COS_PREFIX": str(cos.get("prefix") or "").strip(),
         "COS_DOMAIN": str(cos.get("domain") or "").strip(),
-        # 服装图源目录；留空回退 {COS_PREFIX}/output/source
         "COS_SOURCE_PREFIX": str(cos.get("source_prefix") or "").strip(),
-        # 服务端下发的 COS 凭证（子账号：只能写成品桶）；没下发时留空，客户端回退本机凭证
         "COS_SECRET_ID": str(cos.get("secret_id") or "").strip(),
         "COS_SECRET_KEY": str(cos.get("secret_key") or "").strip(),
-        # 百炼官方 API（新）
         "WAN_PROVIDER": provider,
         "WAN_API_KEY": wan_key,
         "WAN_MODEL": str(wan.get("model") or "wan3.0-video").strip(),
@@ -156,6 +150,12 @@ def load() -> dict:
         "NOTICE": str(remote.get("notice") or "").strip(),
         "SERVICE_URL": SERVICE_URL,
     }
+
+
+def load() -> dict:
+    """组装成界面/引擎使用的扁平字典（保持历史键名）。"""
+    from app import license as licensemod
+    return from_remote(licensemod.get_config() or {}, output_dir())
 
 
 def active_api_key(cfg: dict) -> str:
