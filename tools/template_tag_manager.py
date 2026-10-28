@@ -44,20 +44,38 @@ class TagLibraryDialog(QDialog):
         self.list = QListWidget()
         self.list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         for tag in self.tags:
-            count = self.usage.get(tag, 0)
-            item = QListWidgetItem(f"{tag}（当前项目 {count} 条）" if count else tag)
-            item.setData(Qt.ItemDataRole.UserRole, tag)
-            self.list.addItem(item)
+            self._add_item(tag)
         layout.addWidget(self.list, 1)
         buttons = QHBoxLayout()
+        self.add_btn = QPushButton("＋ 新建标签")
+        self.add_btn.clicked.connect(self.add_tag)
         self.delete_btn = QPushButton("删除选中标签")
         self.delete_btn.clicked.connect(self.delete_selected)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
+        buttons.addWidget(self.add_btn)
         buttons.addWidget(self.delete_btn)
         buttons.addStretch(1)
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
+
+    def _add_item(self, tag: str):
+        count = self.usage.get(tag, 0)
+        item = QListWidgetItem(f"{tag}（当前项目 {count} 条）" if count else tag)
+        item.setData(Qt.ItemDataRole.UserRole, tag)
+        self.list.addItem(item)
+
+    def add_tag(self):
+        value, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
+        if not ok or not value.strip():
+            return
+        try:
+            add_library_tag(self.tags, value)
+        except CatalogError as exc:
+            QMessageBox.warning(self, "标签无效", str(exc))
+            return
+        self._add_item(value.strip())
+        self.list.setCurrentRow(self.list.count() - 1)
 
     def delete_selected(self):
         items = self.list.selectedItems()
@@ -852,13 +870,18 @@ class TagManager(QMainWindow):
         dialog = TagLibraryDialog(self.tag_library, usage, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        added = [tag for tag in dialog.tags if tag not in self.tag_library]
         removed = [tag for tag in self.tag_library if tag not in dialog.tags]
-        if not removed:
+        if not added and not removed:
             return
         self.tag_library = list(dialog.tags)
         if self.project:
             keep = set(self.tag_library)
-            self.project["tags"] = [tag for tag in self.project.get("tags", []) if tag in keep]
+            project_tags = [tag for tag in self.project.get("tags", []) if tag in keep]
+            for tag in added:
+                if tag not in project_tags:
+                    project_tags.append(tag)
+            self.project["tags"] = project_tags
             for row in self.project.get("videos", []):
                 row["tags"] = [tag for tag in row.get("tags", []) if tag in keep]
         try:
@@ -869,7 +892,12 @@ class TagManager(QMainWindow):
         if self.project:
             self._refresh()
             self.save_working_state()
-        self.status.setText(f"已从标签库删除 {len(removed)} 个标签。")
+        changes = []
+        if added:
+            changes.append(f"新增 {len(added)} 个")
+        if removed:
+            changes.append(f"删除 {len(removed)} 个")
+        self.status.setText("标签库已更新：" + "，".join(changes) + "标签。")
 
     def remove_tag_value(self):
         self.manage_tags()
