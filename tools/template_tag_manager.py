@@ -166,6 +166,26 @@ class BatchTagDialog(QDialog):
         buttons.addWidget(ok_btn)
         layout.addLayout(buttons)
 
+        self.list.setCurrentRow(0)
+        self.list.setFocus()
+        self.prev_shortcut = QShortcut(QKeySequence("W"), self)
+        self.prev_shortcut.activated.connect(lambda: self._move(-1))
+        self.next_shortcut = QShortcut(QKeySequence("S"), self)
+        self.next_shortcut.activated.connect(lambda: self._move(1))
+
+    def _move(self, delta: int):
+        if not self.list.count():
+            return
+        row = self.list.currentRow()
+        self.list.setCurrentRow((row + delta) % self.list.count() if row >= 0 else 0)
+        self.list.setFocus()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
     def _set_all(self, state):
         for index in range(self.list.count()):
             self.list.item(index).setCheckState(state)
@@ -316,6 +336,14 @@ class TagManager(QMainWindow):
         self.prev_tag_shortcut.activated.connect(lambda: self._move_tag(-1))
         self.next_tag_shortcut = QShortcut(QKeySequence("S"), self)
         self.next_tag_shortcut.activated.connect(lambda: self._move_tag(1))
+        self.clear_shortcut = QShortcut(QKeySequence("Q"), self)
+        self.clear_shortcut.activated.connect(self.clear_all_selection)
+        self.batch_shortcut = QShortcut(QKeySequence("E"), self)
+        self.batch_shortcut.activated.connect(self.batch_tag_selected)
+        self.check_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Return), self)
+        self.check_shortcut.activated.connect(self.toggle_current_video_check)
+        self.check_enter_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Enter), self)
+        self.check_enter_shortcut.activated.connect(self.toggle_current_video_check)
 
         tag_bar = QHBoxLayout()
         tag_bar.addWidget(QLabel("标签（当前选中视频）"))
@@ -608,6 +636,32 @@ class TagManager(QMainWindow):
     def _select_first(self):
         if self.table.rowCount() and not self.table.selectionModel().selectedRows():
             self.table.selectRow(0)
+
+    def clear_all_selection(self):
+        self.table.clearSelection()
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 6)
+                if item:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+        finally:
+            self.table.blockSignals(False)
+        self._update_batch_button()
+        self.status.setText("已清空视频选择。")
+
+    def toggle_current_video_check(self):
+        if not self.batch_mode:
+            return
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        item = self.table.item(row, 6)
+        if not item:
+            return
+        item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
+        self.table.scrollToItem(self.table.item(row, 0))
+        self.status.setText(f"第 {row + 1} 条视频已{'勾选' if item.checkState() == Qt.CheckState.Checked else '取消勾选'}。")
 
     def table_select_all(self):
         if not self.table.rowCount():
