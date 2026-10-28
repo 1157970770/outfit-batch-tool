@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtCore import QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -358,6 +358,14 @@ class TagManager(QMainWindow):
         self.tag_list = QListWidget()
         self.tag_list.setMaximumHeight(220)
         self.tag_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.tag_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.tag_list.setFlow(QListWidget.Flow.LeftToRight)
+        self.tag_list.setWrapping(True)
+        self.tag_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.tag_list.setMovement(QListWidget.Movement.Static)
+        self.tag_list.setUniformItemSizes(True)
+        self.tag_list.setGridSize(QSize(190, 34))
+        self.tag_list.setSpacing(2)
         self.tag_list.itemChanged.connect(self._tag_item_changed)
         right_layout.addWidget(self.tag_list)
         self.tags_note = QLabel("W/S 在标签间移动，空格键勾选/取消；勾选会应用到当前选中的视频。")
@@ -855,9 +863,25 @@ class TagManager(QMainWindow):
     def _move_tag(self, delta: int):
         if not self.project or not self.tag_list.count():
             return
-        row = self.tag_list.currentRow()
-        next_row = 0 if row < 0 else (row + delta) % self.tag_list.count()
-        self.tag_list.setCurrentRow(next_row)
+        current_row = self.tag_list.currentRow()
+        if current_row < 0:
+            self.tag_list.setCurrentRow(0)
+            self.tag_list.setFocus()
+            return
+        rects = [self.tag_list.visualItemRect(self.tag_list.item(i)) for i in range(self.tag_list.count())]
+        if not all(rect.isValid() and rect.height() > 0 for rect in rects):
+            self.tag_list.setCurrentRow((current_row + delta) % self.tag_list.count())
+            self.tag_list.setFocus()
+            return
+        row_tops = sorted({rect.top() for rect in rects})
+        current_top = rects[current_row].top()
+        current_band = min(range(len(row_tops)), key=lambda idx: abs(row_tops[idx] - current_top))
+        target_band = (current_band + delta) % len(row_tops)
+        target_top = row_tops[target_band]
+        current_center = rects[current_row].center()
+        candidates = [i for i, rect in enumerate(rects) if rect.top() == target_top]
+        target_row = min(candidates, key=lambda i: abs(rects[i].center().x() - current_center.x()))
+        self.tag_list.setCurrentRow(target_row)
         self.tag_list.setFocus()
 
     def _tag_item_changed(self, item: QListWidgetItem):
