@@ -366,6 +366,7 @@ class TagManager(QMainWindow):
         self.tag_list.setUniformItemSizes(True)
         self.tag_list.setGridSize(QSize(190, 34))
         self.tag_list.setSpacing(2)
+        self.tag_list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.tag_list.itemChanged.connect(self._tag_item_changed)
         right_layout.addWidget(self.tag_list)
         self.tags_note = QLabel("W/S 在标签间移动，空格键勾选/取消；勾选会应用到当前选中的视频。")
@@ -901,6 +902,8 @@ class TagManager(QMainWindow):
                 item = QListWidgetItem(tag)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
                 item.setCheckState(Qt.CheckState.Checked if tag in selected_tags else Qt.CheckState.Unchecked)
+                item.setSizeHint(QSize(184, 30))
+                item.setToolTip(tag)
                 self.tag_list.addItem(item)
             if current_tag:
                 for row in range(self.tag_list.count()):
