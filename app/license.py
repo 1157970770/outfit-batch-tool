@@ -27,7 +27,9 @@ from pathlib import Path
 
 from app.secure_store import seal, unseal
 
-CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "RHOutfitTool"
+# 与旧 RunningHub 版隔离：官方版用独立缓存目录，不能读到/覆盖旧版授权
+APP_NAME = "RHOutfitToolWan3"
+CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / APP_NAME
 CACHE_PATH = CONFIG_DIR / "license.json"
 
 # 断网救援窗口：软件反正要联网才能干活，这个只用来挡住服务端抖动导致的误锁
@@ -44,13 +46,13 @@ def _cache_candidates() -> list[Path]:
     for env_name in ("APPDATA", "LOCALAPPDATA"):
         base = os.getenv(env_name)
         if base:
-            cands.append(Path(base) / "RHOutfitTool")
+            cands.append(Path(base) / APP_NAME)
     cands.append(CONFIG_DIR)
     try:
         cands.append(Path(os.path.dirname(os.path.abspath(sys.executable))) / "_授权")
     except Exception:  # noqa: BLE001
         pass
-    cands.append(Path(tempfile.gettempdir()) / "RHOutfitTool")
+    cands.append(Path(tempfile.gettempdir()) / APP_NAME)
 
     seen: set[str] = set()
     unique: list[Path] = []

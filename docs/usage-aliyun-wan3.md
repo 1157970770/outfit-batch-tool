@@ -4,6 +4,7 @@
 > **适用对象**：桌面操作员 / 运维管理员 / 命令行开发者
 > **当前状态**：代码与离线验证完成；**真实 1 条 + 官方拉取 COS 素材的验证还没做**。
 > **相关文档**：[README.md](../README.md)、[官方接口规格](wan-3.0-reference-to-video.md)、[ADR-002](adr-002-aliyun-wan3-official-api.md)
+> **双版本隔离**：[version-isolation.md](version-isolation.md)（旧 RH 版原样保留，新版独立 exe/缓存/安装包）
 
 ---
 

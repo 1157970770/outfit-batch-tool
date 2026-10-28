@@ -71,7 +71,7 @@ print("COS_ENABLED:", cfg["COS_ENABLED"], "| BUCKET:", cfg["COS_BUCKET"], "| PRE
 print("NOTICE:", cfg["NOTICE"])
 
 # 缓存文件里不能有明文
-cache_file = Path(os.environ["APPDATA"]) / "RHOutfitTool" / "license.json"
+cache_file = lic.cache_path()
 raw = cache_file.read_text(encoding="utf-8")
 print("缓存文件前缀:", raw[:10], "| 含明文 rh-key:", "rh-key-from-server" in raw)
 

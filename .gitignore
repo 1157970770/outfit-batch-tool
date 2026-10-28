@@ -1,5 +1,6 @@
 # 构建产物（体积大，放 GitHub Releases，不进仓库）
 dist/
+dist-official/
 build/
 build_*/
 *.spec
@@ -46,3 +47,6 @@ server/passwords.json
 
 # 其他 agent 的工作记忆
 .workbuddy/
+
+# 旧 RH 版隔离工作树（不要提交；旧版原样保留在这里）
+.worktrees/

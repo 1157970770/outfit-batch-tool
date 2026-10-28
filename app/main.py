@@ -39,7 +39,7 @@ from app.prompts_page import PromptLibraryPage  # noqa: E402
 from app.storage import StorageConfig, StorageError, open_storage  # noqa: E402
 from app.startup import ensure_license  # noqa: E402
 
-APP_TITLE = "换装批量生产器 · 测试版"
+APP_TITLE = "换装批量生产器 · 官方版"
 APP_VERSION = "0.9"
 
 

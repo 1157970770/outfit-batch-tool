@@ -17,7 +17,8 @@ from pathlib import Path
 # 唯一的内置配置：配置/授权服务地址
 SERVICE_URL = "https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com"
 
-APP_NAME = "RHOutfitTool"
+# 与旧 RunningHub 版隔离：独立的缓存目录，两个版本可同时安装
+APP_NAME = "RHOutfitToolWan3"
 
 
 def app_dir() -> Path:
