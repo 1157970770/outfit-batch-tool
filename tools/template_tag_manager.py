@@ -44,12 +44,14 @@ class TagManager(QMainWindow):
         self.save_btn = QPushButton("保存标签 Excel")
         self.export_btn = QPushButton("另存为 Excel…")
         self.remove_btn = QPushButton("移除选中行")
+        self.quick_tag_btn = QPushButton("＋ 新建标签")
         self.new_btn.clicked.connect(self.choose_folder)
         self.open_btn.clicked.connect(self.open_xlsx)
         self.save_btn.clicked.connect(self.save_current)
         self.export_btn.clicked.connect(self.export_xlsx)
         self.remove_btn.clicked.connect(self.remove_selected)
-        for button in (self.new_btn, self.open_btn, self.save_btn, self.export_btn, self.remove_btn):
+        self.quick_tag_btn.clicked.connect(self.add_tag_value)
+        for button in (self.new_btn, self.open_btn, self.quick_tag_btn, self.save_btn, self.export_btn, self.remove_btn):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         outer.addLayout(toolbar)
@@ -96,7 +98,16 @@ class TagManager(QMainWindow):
         controls.addWidget(self.preview_status, 1)
         right_layout.addLayout(controls)
 
-        right_layout.addWidget(QLabel("标签（当前选中视频）"))
+        tag_bar = QHBoxLayout()
+        tag_bar.addWidget(QLabel("标签（当前选中视频）"))
+        tag_bar.addStretch(1)
+        self.add_tag_btn = QPushButton("＋ 新建")
+        self.remove_tag_btn = QPushButton("删除…")
+        self.add_tag_btn.clicked.connect(self.add_tag_value)
+        self.remove_tag_btn.clicked.connect(self.remove_tag_value)
+        tag_bar.addWidget(self.add_tag_btn)
+        tag_bar.addWidget(self.remove_tag_btn)
+        right_layout.addLayout(tag_bar)
         self.tag_list = QListWidget()
         self.tag_list.setMaximumHeight(220)
         right_layout.addWidget(self.tag_list)
@@ -104,12 +115,6 @@ class TagManager(QMainWindow):
         self.tags_note.setWordWrap(True)
         self.tags_note.setStyleSheet("color:#687386;font-size:11px;")
         right_layout.addWidget(self.tags_note)
-        self.add_tag_btn = QPushButton("＋ 新建标签")
-        self.remove_tag_btn = QPushButton("删除未使用标签…")
-        self.add_tag_btn.clicked.connect(self.add_tag_value)
-        self.remove_tag_btn.clicked.connect(self.remove_tag_value)
-        right_layout.addWidget(self.add_tag_btn)
-        right_layout.addWidget(self.remove_tag_btn)
         right_layout.addStretch(1)
         split.addWidget(right)
         split.setSizes([740, 430])
@@ -117,8 +122,11 @@ class TagManager(QMainWindow):
         self.setCentralWidget(central)
 
     def _set_enabled(self, enabled: bool):
-        for control in (self.save_btn, self.export_btn, self.remove_btn, self.add_tag_btn, self.remove_tag_btn, self.play_btn, self.stop_btn):
+        for control in (self.save_btn, self.export_btn, self.remove_btn, self.remove_tag_btn, self.play_btn, self.stop_btn):
             control.setEnabled(enabled)
+        # 新建标签始终可点；未加载文件夹时给出明确提示。
+        self.add_tag_btn.setEnabled(True)
+        self.quick_tag_btn.setEnabled(True)
 
     def choose_folder(self):
         start = self.project.get("source_root", "") if self.project else str(Path.home())
@@ -316,6 +324,7 @@ class TagManager(QMainWindow):
 
     def add_tag_value(self):
         if not self.project:
+            QMessageBox.information(self, "先选择视频文件夹", "请先点击“选择视频文件夹”，扫描视频后再新建标签。")
             return
         value, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
         if not ok:
