@@ -73,23 +73,25 @@ def library_path() -> Path:
 
 
 def load_tag_library(path: str | Path | None = None) -> list[str]:
-    """读取标签库；文件不存在或损坏时回退到默认标签。"""
+    """读取标签库；只有文件不存在/损坏时才用默认标签，已删除的默认标签不会复活。"""
     target = Path(path) if path else library_path()
-    tags = list(DEFAULT_TAGS)
-    if target.is_file():
+    if not target.is_file():
+        return list(DEFAULT_TAGS)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return list(DEFAULT_TAGS)
+    values = data.get("tags") if isinstance(data, dict) else data
+    if not isinstance(values, list):
+        return list(DEFAULT_TAGS)
+    tags: list[str] = []
+    for value in values:
         try:
-            data = json.loads(target.read_text(encoding="utf-8-sig"))
-            values = data.get("tags") if isinstance(data, dict) else data
-            if isinstance(values, list):
-                for value in values:
-                    try:
-                        name = validate_tag_name(value)
-                    except CatalogError:
-                        continue
-                    if name.casefold() not in {tag.casefold() for tag in tags}:
-                        tags.append(name)
-        except (OSError, json.JSONDecodeError):
-            pass
+            name = validate_tag_name(value)
+        except CatalogError:
+            continue
+        if name.casefold() not in {tag.casefold() for tag in tags}:
+            tags.append(name)
     return tags
 
 
@@ -144,7 +146,7 @@ def new_project(root: str | Path, progress=None) -> dict:
         "project_id": uuid.uuid4().hex[:12],
         "source_root": str(folder),
         "next_id": 1,
-        "tags": list(DEFAULT_TAGS),
+        "tags": [],
         "videos": [],
     }
     return scan_folder(folder, project, progress=progress)
@@ -162,7 +164,7 @@ def scan_folder(root: str | Path, project: dict | None = None, progress=None) ->
         raise CatalogError(f"视频文件夹不存在：{folder}")
     result = dict(project or {})
     result.setdefault("project_id", uuid.uuid4().hex[:12])
-    result.setdefault("tags", list(DEFAULT_TAGS))
+    result.setdefault("tags", [])
     result["source_root"] = str(folder)
     previous = {str(row.get("relative_path")): dict(row) for row in result.get("videos", [])}
     found: set[str] = set()

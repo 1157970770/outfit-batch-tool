@@ -3,6 +3,7 @@
 """本机视频标签项目与 XLSX 清单测试（不联网）。"""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,12 @@ def main() -> int:
     save_state({"version": 1, "recent": [{"source_root": str(tmp / "videos")}]}, state_file)
     assert load_state(state_file)["recent"][0]["source_root"].endswith("videos")
 
+    custom_library = tmp / "custom-tags.json"
+    custom_library.write_text(json.dumps({"tags": ["只有这个"]}), encoding="utf-8")
+    assert load_tag_library(custom_library) == ["只有这个"]
+    save_tag_library([], custom_library)
+    assert load_tag_library(custom_library) == []
+
     media = tmp / "local-videos"
     media.mkdir()
     (media / "autumn-coat.mp4").write_bytes(b"local-test-video-a")
@@ -38,7 +45,8 @@ def main() -> int:
     assert len(project["videos"]) == 2
     assert project["videos"][0]["id"] == "001"
     assert project["videos"][1]["id"] == "002"
-    assert project["tags"] == DEFAULT_TAGS
+    assert project["tags"] == []
+    project["tags"] = list(DEFAULT_TAGS)
     add_tag(project, "校园场景")
     set_video_tags(project, "autumn-coat.mp4", ["适合秋冬", "中远景", "校园场景"])
     set_video_tags(project, "bracelet-demo.mov", ["手串展示", "近景"])
