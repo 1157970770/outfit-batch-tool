@@ -67,7 +67,7 @@ $log = Join-Path $distRoot "build.log"
 # PyInstaller 会往 stderr 打进度，不能直接走管道（会被 $ErrorActionPreference=Stop 当错误）
 $ErrorActionPreference = "Continue"
 & $python -m PyInstaller --noconfirm --clean --onedir --windowed --noupx `
-    --name $appName --distpath $distRoot --paths "." --hidden-import app.cos_rest --version-file $versionFile run_app.py *> $log
+    --name $appName --distpath $distRoot --paths "." --hidden-import app.cos_rest --exclude-module numpy --version-file $versionFile run_app.py *> $log
 $buildCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 Get-Content $log -Tail 2

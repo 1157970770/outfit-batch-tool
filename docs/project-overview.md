@@ -179,7 +179,7 @@
 | 断点续跑 | 超时后重启续查，未重复提交 |
 | 界面批量 | 3 条：表格/CSV/日志/重名目录全对 |
 | 授权 11 项 | 激活/错误密码/停用/到期/换机器/网关重试 |
-| 打包 | onedir + zip 62.6 MB（v0.9 分支验证） |
+| 打包 | onedir + zip 51.5 MB（排除未用的 numpy，v0.9 分支验证） |
 
 ### 未验证 ⚠️
 
@@ -253,6 +253,7 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 
 | 文档 | 内容 |
 | --- | --- |
+| [handover.md](handover.md) | **项目交接手册**（资产/凭证/运维/现状/待办/签字） |
 | [README.md](../README.md) | 入口：三条命令上手 |
 | [app/README.md](../app/README.md) | 界面使用说明、打包命令 |
 | [wan-3.0-reference-to-video.md](wan-3.0-reference-to-video.md) | 官方接口规格（字段/约束/状态机/计费/存储） |

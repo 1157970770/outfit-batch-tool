@@ -13,7 +13,7 @@
 | 代码位置 | 独立 worktree：`.worktrees/rh-legacy/` | 当前工作区 |
 | 打包脚本 | `scripts/build.ps1` | `scripts/build-official.ps1` |
 | exe 名 | `换装批量生产器.exe` | `换装批量生产器-官方版.exe` |
-| 安装包 | `dist/换装批量生产器-v0.9-20261026.zip`（已存在，41.5 MB） | `dist-official/换装批量生产器-官方版-v0.9-20261028.zip`（62.6 MB） |
+| 安装包 | `dist/换装批量生产器-v0.9-20261026.zip`（已存在，41.5 MB） | `dist-official/换装批量生产器-官方版-v0.9-20261028.zip`（51.5 MB） |
 | 本机授权缓存 | `%APPDATA%\RHOutfitTool\license.json` | `%APPDATA%\RHOutfitToolWan3\license.json` |
 | 服务端 Key | `rh_api_key` | `wan.api_key` |
 | 生成接口 | RunningHub `reference-to-video` | 阿里云百炼 `wan3.0-video` |
