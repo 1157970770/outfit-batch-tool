@@ -192,6 +192,9 @@ class TagManager(QMainWindow):
         self.recent_menu = QMenu(self.recent_btn)
         self.recent_btn.setMenu(self.recent_menu)
         list_bar.addWidget(self.recent_btn)
+        self.rescan_btn = QPushButton("重新扫描")
+        self.rescan_btn.clicked.connect(self.rescan_current_folder)
+        list_bar.addWidget(self.rescan_btn)
         self.batch_mode_btn = QPushButton("进入批量打标")
         self.batch_mode_btn.clicked.connect(self.toggle_batch_mode)
         list_bar.addWidget(self.batch_mode_btn)
@@ -282,8 +285,8 @@ class TagManager(QMainWindow):
 
     def _set_enabled(self, enabled: bool):
         for control in (self.save_btn, self.export_btn, self.remove_btn, self.select_all_btn,
-                        self.clear_sel_btn, self.batch_mode_btn, self.play_btn, self.stop_btn,
-                        self.prev_btn, self.next_btn):
+                        self.clear_sel_btn, self.rescan_btn, self.batch_mode_btn, self.play_btn,
+                        self.stop_btn, self.prev_btn, self.next_btn):
             control.setEnabled(enabled)
         # 标签库独立于文件夹，新建/删除标签始终可点。
         self.add_tag_btn.setEnabled(True)
@@ -375,24 +378,44 @@ class TagManager(QMainWindow):
             return False
         try:
             project = self._merge_library_into(dict(project))
-            project = self._scan_folder(root, project)
         except Exception as exc:
             self.status.setText(f"恢复工作失败：{exc}")
             return False
         self.project = project
         self.xlsx_path = Path(xlsx_path) if xlsx_path and Path(xlsx_path).is_file() else None
         changed = [row for row in project.get("videos", []) if row.get("changed")]
-        if not startup:
-            self._confirm_changed_files()
         self._refresh()
         self._select_first()
         self._set_enabled(True)
         if startup:
-            self.status.setText(f"已恢复上次工作：{root}" + (f"（{len(changed)} 个视频内容有变化，请检查）" if changed else ""))
+            self.status.setText(
+                f"已恢复上次工作（使用缓存，未重新扫描）：{root}"
+                + (f"；{len(changed)} 个视频上次标记为有变化" if changed else "")
+                + "。需要检查新增/删除/改动视频时，请点“重新扫描”。"
+            )
         else:
-            self.status.setText(f"已打开最近文件夹：{root}")
+            self.status.setText(f"已打开最近文件夹（使用缓存）：{root}。需要检查文件变化请点“重新扫描”。")
         self.save_working_state()
         return True
+
+    def rescan_current_folder(self):
+        if not self.project:
+            return
+        root = Path(str(self.project.get("source_root") or ""))
+        if not root.is_dir():
+            QMessageBox.warning(self, "文件夹不存在", f"找不到：{root}")
+            return
+        try:
+            self.project = self._merge_library_into(self.project)
+            self.project = self._scan_folder(root, self.project)
+            self._confirm_changed_files()
+            self._refresh()
+            self._select_first()
+            self._set_enabled(True)
+            self.save_working_state()
+            self.status.setText(f"已重新扫描：{root}")
+        except Exception as exc:
+            QMessageBox.critical(self, "重新扫描失败", str(exc))
 
     def _restore_last_session(self) -> bool:
         state = load_state()
