@@ -158,7 +158,8 @@ class BatchTagDialog(QDialog):
         layout.addLayout(quick)
         buttons = QHBoxLayout()
         cancel_btn = QPushButton("取消")
-        ok_btn = QPushButton("确定")
+        ok_btn = QPushButton("确定 (Enter)")
+        ok_btn.setToolTip("快捷键：回车")
         cancel_btn.clicked.connect(self.reject)
         ok_btn.clicked.connect(self.accept)
         buttons.addStretch(1)
@@ -172,6 +173,10 @@ class BatchTagDialog(QDialog):
         self.prev_shortcut.activated.connect(lambda: self._move(-1))
         self.next_shortcut = QShortcut(QKeySequence("S"), self)
         self.next_shortcut.activated.connect(lambda: self._move(1))
+        self.ok_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Return), self)
+        self.ok_shortcut.activated.connect(self.accept)
+        self.ok_enter_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Enter), self)
+        self.ok_enter_shortcut.activated.connect(self.accept)
 
     def _move(self, delta: int):
         if not self.list.count():
