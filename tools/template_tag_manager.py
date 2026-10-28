@@ -10,7 +10,7 @@ from PySide6.QtCore import QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressDialog,
     QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
 )
@@ -76,6 +76,55 @@ class TagLibraryDialog(QDialog):
             self.usage.pop(tag, None)
 
 
+class BatchTagDialog(QDialog):
+    """把标签批量添加、移除或替换到选中的视频。"""
+
+    def __init__(self, tags: list[str], selected_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("批量打标签")
+        self.resize(420, 430)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"将对选中的 {selected_count} 条视频执行："))
+        self.mode = QComboBox()
+        self.mode.addItem("添加到现有标签", "add")
+        self.mode.addItem("从现有标签移除", "remove")
+        self.mode.addItem("替换为选中的标签", "replace")
+        layout.addWidget(self.mode)
+        self.list = QListWidget()
+        for tag in tags:
+            item = QListWidgetItem(tag)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        layout.addWidget(self.list, 1)
+        quick = QHBoxLayout()
+        all_btn = QPushButton("全选标签")
+        none_btn = QPushButton("清空勾选")
+        all_btn.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
+        none_btn.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+        quick.addWidget(all_btn)
+        quick.addWidget(none_btn)
+        quick.addStretch(1)
+        layout.addLayout(quick)
+        buttons = QHBoxLayout()
+        cancel_btn = QPushButton("取消")
+        ok_btn = QPushButton("确定")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn.clicked.connect(self.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(ok_btn)
+        layout.addLayout(buttons)
+
+    def _set_all(self, state):
+        for index in range(self.list.count()):
+            self.list.item(index).setCheckState(state)
+
+    def selected_tags(self) -> list[str]:
+        return [self.list.item(index).text() for index in range(self.list.count())
+                if self.list.item(index).checkState() == Qt.CheckState.Checked]
+
+
 class TagManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -125,6 +174,20 @@ class TagManager(QMainWindow):
         outer.addLayout(library_row)
         self._update_library_label()
 
+        list_bar = QHBoxLayout()
+        list_bar.addWidget(QLabel("视频列表（Ctrl/Shift 可多选）"))
+        list_bar.addStretch(1)
+        self.select_all_btn = QPushButton("全选视频")
+        self.clear_sel_btn = QPushButton("清空选择")
+        self.batch_tag_btn = QPushButton("批量打标签…")
+        self.select_all_btn.clicked.connect(self.table_select_all)
+        self.clear_sel_btn.clicked.connect(self.table_clear_selection)
+        self.batch_tag_btn.clicked.connect(self.batch_tag_selected)
+        list_bar.addWidget(self.select_all_btn)
+        list_bar.addWidget(self.clear_sel_btn)
+        list_bar.addWidget(self.batch_tag_btn)
+        outer.addLayout(list_bar)
+
         split = QSplitter(Qt.Orientation.Horizontal)
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["模板ID", "文件名", "时长", "大小", "标签", "状态"])
@@ -148,6 +211,7 @@ class TagManager(QMainWindow):
         self.video.setStyleSheet("background:#111;border-radius:8px;")
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
+        self.player.setLoops(QMediaPlayer.Loops.Infinite)
         self.player.errorOccurred.connect(self._preview_error)
         self.player.mediaStatusChanged.connect(self._preview_status_changed)
         right_layout.addWidget(self.video)
@@ -186,12 +250,14 @@ class TagManager(QMainWindow):
         self.setCentralWidget(central)
 
     def _set_enabled(self, enabled: bool):
-        for control in (self.save_btn, self.export_btn, self.remove_btn, self.play_btn, self.stop_btn):
+        for control in (self.save_btn, self.export_btn, self.remove_btn, self.select_all_btn,
+                        self.clear_sel_btn, self.play_btn, self.stop_btn):
             control.setEnabled(enabled)
         # 标签库独立于文件夹，新建/删除标签始终可点。
         self.add_tag_btn.setEnabled(True)
         self.quick_tag_btn.setEnabled(True)
         self.remove_tag_btn.setEnabled(True)
+        self.batch_tag_btn.setEnabled(enabled and bool(self._selected_paths()))
 
     def choose_folder(self):
         start = self.project.get("source_root", "") if self.project else str(Path.home())
@@ -328,6 +394,62 @@ class TagManager(QMainWindow):
         if self.table.rowCount() and not self.table.selectionModel().selectedRows():
             self.table.selectRow(0)
 
+    def table_select_all(self):
+        if self.table.rowCount():
+            self.table.selectAll()
+
+    def table_clear_selection(self):
+        self.table.clearSelection()
+
+    def batch_tag_selected(self):
+        if not self.project:
+            return
+        paths = self._selected_paths()
+        if not paths:
+            QMessageBox.information(self, "未选择视频", "先在视频列表中选中一条或多条视频。")
+            return
+        if not self.tag_library:
+            QMessageBox.information(self, "标签库为空", "请先新建标签。")
+            return
+        dialog = BatchTagDialog(self.tag_library, len(paths), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_tags()
+        mode = str(dialog.mode.currentData())
+        if not chosen and mode != "replace":
+            QMessageBox.information(self, "未勾选标签", "请勾选要添加或移除的标签。")
+            return
+        if mode == "replace" and not chosen:
+            if QMessageBox.question(self, "清空标签", f"将清空选中的 {len(paths)} 条视频的全部标签，继续？") != QMessageBox.StandardButton.Yes:
+                return
+        for tag in chosen:
+            if tag not in self.project.get("tags", []):
+                self.project.setdefault("tags", []).append(tag)
+        changed = {}
+        for relative in paths:
+            video = next((v for v in self.project.get("videos", []) if v.get("relative_path") == relative), None)
+            if not video:
+                continue
+            current = set(video.get("tags", []))
+            if mode == "add":
+                current.update(chosen)
+            elif mode == "remove":
+                current.difference_update(chosen)
+            else:
+                current = set(chosen)
+            set_video_tags(self.project, relative, list(current))
+            changed[relative] = video
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            relative = item.data(Qt.ItemDataRole.UserRole) if item else None
+            video = changed.get(relative)
+            if video:
+                self.table.setItem(row, 4, QTableWidgetItem("；".join(video.get("tags", []))))
+                self.table.setItem(row, 5, QTableWidgetItem(self._status_text(video)))
+        self._refresh_tag_checkboxes()
+        action = {"add": "添加", "remove": "移除", "replace": "替换"}.get(mode, "更新")
+        self.status.setText(f"已对 {len(changed)} 条视频{action}标签。")
+
     def _selected_paths(self) -> list[str]:
         paths = []
         for index in self.table.selectionModel().selectedRows():
@@ -345,6 +467,8 @@ class TagManager(QMainWindow):
         return next((v for v in self.project["videos"] if v.get("relative_path") == path), None)
 
     def _selection_changed(self):
+        if hasattr(self, "batch_tag_btn"):
+            self.batch_tag_btn.setEnabled(bool(self._selected_paths()))
         video = self._current_video()
         if not video or video.get("missing"):
             self.player.stop()
@@ -368,7 +492,7 @@ class TagManager(QMainWindow):
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             self.preview_status.setText("该视频格式无法预览；仍可按文件名打标。")
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self.preview_status.setText("播放结束")
+            self.preview_status.setText("循环播放中")
 
     def _refresh_tag_checkboxes(self):
         self.tag_list.clear()
