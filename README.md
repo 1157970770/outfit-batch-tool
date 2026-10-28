@@ -5,6 +5,8 @@
 > 生成接口已从 RunningHub 包装层切到**阿里云百炼官方** `wan3.0-video`。
 > 协议、字段、错误码、存储说明见 [docs/wan-3.0-reference-to-video.md](docs/wan-3.0-reference-to-video.md)；
 > 决策与回滚见 [docs/adr-002-aliyun-wan3-official-api.md](docs/adr-002-aliyun-wan3-official-api.md)。
+>
+> **新分支完整使用手册：[docs/usage-aliyun-wan3.md](docs/usage-aliyun-wan3.md)**（桌面/运维/CLI/排错/回滚）。
 
 ## 桌面软件（最终形态，v0.9 → v1.0）
 
@@ -143,6 +145,7 @@ python3 scripts/archive_to_cos.py --root out
 | 文件 | 说明 |
 | --- | --- |
 | [batch/README.md](batch/README.md) | **生产流程、参数取舍、素材怎么给、成本工期** |
+| [docs/usage-aliyun-wan3.md](docs/usage-aliyun-wan3.md) | **分支使用手册：配置/桌面/CLI/存储/排错/回滚** |
 | [docs/wan-3.0-reference-to-video.md](docs/wan-3.0-reference-to-video.md) | **官方接口规格：字段表、约束、状态机、计费、存储** |
 | [docs/adr-002-aliyun-wan3-official-api.md](docs/adr-002-aliyun-wan3-official-api.md) | 切换决策、存储/Key 风险、回滚 |
 | [docs/cos-setup.md](docs/cos-setup.md) | **腾讯云 COS 接入手册：建桶 / CAM 策略 / 报错表 / 费用** |
