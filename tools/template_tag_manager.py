@@ -247,6 +247,15 @@ class TagManager(QMainWindow):
         self.preview_status = QLabel("选择一条视频开始预览")
         controls.addWidget(self.preview_status, 1)
         right_layout.addLayout(controls)
+        nav = QHBoxLayout()
+        self.prev_btn = QPushButton("上一个视频")
+        self.next_btn = QPushButton("下一个视频")
+        self.prev_btn.clicked.connect(self.select_previous_video)
+        self.next_btn.clicked.connect(self.select_next_video)
+        nav.addWidget(self.prev_btn)
+        nav.addWidget(self.next_btn)
+        nav.addStretch(1)
+        right_layout.addLayout(nav)
 
         tag_bar = QHBoxLayout()
         tag_bar.addWidget(QLabel("标签（当前选中视频）"))
@@ -273,7 +282,8 @@ class TagManager(QMainWindow):
 
     def _set_enabled(self, enabled: bool):
         for control in (self.save_btn, self.export_btn, self.remove_btn, self.select_all_btn,
-                        self.clear_sel_btn, self.batch_mode_btn, self.play_btn, self.stop_btn):
+                        self.clear_sel_btn, self.batch_mode_btn, self.play_btn, self.stop_btn,
+                        self.prev_btn, self.next_btn):
             control.setEnabled(enabled)
         # 标签库独立于文件夹，新建/删除标签始终可点。
         self.add_tag_btn.setEnabled(True)
@@ -656,6 +666,28 @@ class TagManager(QMainWindow):
         item = self.table.item(row, 0) if row >= 0 else None
         path = item.data(Qt.ItemDataRole.UserRole) if item else None
         return next((v for v in self.project["videos"] if v.get("relative_path") == path), None)
+
+    def select_previous_video(self):
+        if not self.project or not self.table.rowCount():
+            return
+        current = self.table.currentRow()
+        previous_row = self.table.rowCount() - 1 if current <= 0 else current - 1
+        self.table.selectRow(previous_row)
+        item = self.table.item(previous_row, 0)
+        if item:
+            self.table.scrollToItem(item)
+        self.status.setText(f"已切换到第 {previous_row + 1} 条视频。")
+
+    def select_next_video(self):
+        if not self.project or not self.table.rowCount():
+            return
+        current = self.table.currentRow()
+        next_row = 0 if current < 0 or current + 1 >= self.table.rowCount() else current + 1
+        self.table.selectRow(next_row)
+        item = self.table.item(next_row, 0)
+        if item:
+            self.table.scrollToItem(item)
+        self.status.setText(f"已切换到第 {next_row + 1} 条视频。")
 
     def _selection_changed(self):
         self._update_batch_button()
