@@ -11,10 +11,10 @@ from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QProgressDialog, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
-    QInputDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout,
+    QHeaderView, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPushButton, QProgressDialog, QSplitter, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -135,6 +135,7 @@ class TagManager(QMainWindow):
         self.project: dict | None = None
         self.xlsx_path: Path | None = None
         self.checks: dict[str, QCheckBox] = {}
+        self.batch_mode = False
         self.tag_library = load_tag_library()
         state = load_state()
         self.recent = state.get("recent") if isinstance(state.get("recent"), list) else []
@@ -191,6 +192,9 @@ class TagManager(QMainWindow):
         self.recent_menu = QMenu(self.recent_btn)
         self.recent_btn.setMenu(self.recent_menu)
         list_bar.addWidget(self.recent_btn)
+        self.batch_mode_btn = QPushButton("进入批量打标")
+        self.batch_mode_btn.clicked.connect(self.toggle_batch_mode)
+        list_bar.addWidget(self.batch_mode_btn)
         self.select_all_btn = QPushButton("全选视频")
         self.clear_sel_btn = QPushButton("清空选择")
         self.batch_tag_btn = QPushButton("批量打标签…")
@@ -203,18 +207,22 @@ class TagManager(QMainWindow):
         outer.addLayout(list_bar)
 
         split = QSplitter(Qt.Orientation.Horizontal)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["模板ID", "文件名", "时长", "大小", "标签", "状态"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["模板ID", "文件名", "时长", "大小", "标签", "状态", "选择"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(0, 74)
         self.table.setColumnWidth(1, 260)
         self.table.setColumnWidth(2, 76)
         self.table.setColumnWidth(3, 88)
         self.table.setColumnWidth(4, 250)
+        self.table.setColumnWidth(6, 52)
+        self.table.setColumnHidden(6, True)
         self.table.itemSelectionChanged.connect(self._selection_changed)
+        self.table.itemChanged.connect(self._table_item_changed)
         split.addWidget(self.table)
 
         right = QWidget()
@@ -265,13 +273,13 @@ class TagManager(QMainWindow):
 
     def _set_enabled(self, enabled: bool):
         for control in (self.save_btn, self.export_btn, self.remove_btn, self.select_all_btn,
-                        self.clear_sel_btn, self.play_btn, self.stop_btn):
+                        self.clear_sel_btn, self.batch_mode_btn, self.play_btn, self.stop_btn):
             control.setEnabled(enabled)
         # 标签库独立于文件夹，新建/删除标签始终可点。
         self.add_tag_btn.setEnabled(True)
         self.quick_tag_btn.setEnabled(True)
         self.remove_tag_btn.setEnabled(True)
-        self.batch_tag_btn.setEnabled(enabled and bool(self._selected_paths()))
+        self._update_batch_button()
 
     def choose_folder(self):
         start = self.project.get("source_root", "") if self.project else str(Path.home())
@@ -476,40 +484,76 @@ class TagManager(QMainWindow):
         return "已打标" if row_data.get("tags") else "未打标"
 
     def _refresh(self):
-        self.table.setRowCount(0)
-        if not self.project:
-            return
-        for row_data in self.project.get("videos", []):
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            values = [row_data.get("id", ""), row_data.get("name", ""),
-                      f"{row_data['duration']:.1f}s" if row_data.get("duration") is not None else "未知",
-                      f"{row_data.get('size_mb', 0):.1f} MB", "；".join(row_data.get("tags", [])),
-                      self._status_text(row_data)]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if col == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, row_data.get("relative_path"))
-                self.table.setItem(row, col, item)
+        checked = set(self._checked_paths())
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(0)
+            if not self.project:
+                return
+            for row_data in self.project.get("videos", []):
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                relative = row_data.get("relative_path")
+                values = [row_data.get("id", ""), row_data.get("name", ""),
+                          f"{row_data['duration']:.1f}s" if row_data.get("duration") is not None else "未知",
+                          f"{row_data.get('size_mb', 0):.1f} MB", "；".join(row_data.get("tags", [])),
+                          self._status_text(row_data)]
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if col == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, relative)
+                    self.table.setItem(row, col, item)
+                check = QTableWidgetItem("")
+                check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                check.setCheckState(Qt.CheckState.Checked if relative in checked else Qt.CheckState.Unchecked)
+                self.table.setItem(row, 6, check)
+            self.table.setColumnHidden(6, not self.batch_mode)
+        finally:
+            self.table.blockSignals(False)
         self._refresh_tag_checkboxes()
+        self._update_batch_button()
 
     def _select_first(self):
         if self.table.rowCount() and not self.table.selectionModel().selectedRows():
             self.table.selectRow(0)
 
     def table_select_all(self):
-        if self.table.rowCount():
+        if not self.table.rowCount():
+            return
+        if self.batch_mode:
+            self.table.blockSignals(True)
+            try:
+                for row in range(self.table.rowCount()):
+                    item = self.table.item(row, 6)
+                    if item:
+                        item.setCheckState(Qt.CheckState.Checked)
+            finally:
+                self.table.blockSignals(False)
+            self._update_batch_button()
+        else:
             self.table.selectAll()
 
     def table_clear_selection(self):
-        self.table.clearSelection()
+        if self.batch_mode:
+            self.table.blockSignals(True)
+            try:
+                for row in range(self.table.rowCount()):
+                    item = self.table.item(row, 6)
+                    if item:
+                        item.setCheckState(Qt.CheckState.Unchecked)
+            finally:
+                self.table.blockSignals(False)
+            self._update_batch_button()
+        else:
+            self.table.clearSelection()
 
     def batch_tag_selected(self):
         if not self.project:
             return
-        paths = self._selected_paths()
+        paths = self._checked_paths() if self.batch_mode else self._selected_paths()
         if not paths:
-            QMessageBox.information(self, "未选择视频", "先在视频列表中选中一条或多条视频。")
+            hint = "先在“选择”列勾选一条或多条视频。" if self.batch_mode else "先在视频列表中选中一条或多条视频。"
+            QMessageBox.information(self, "未选择视频", hint)
             return
         if not self.tag_library:
             QMessageBox.information(self, "标签库为空", "请先新建标签。")
@@ -554,6 +598,49 @@ class TagManager(QMainWindow):
         action = {"add": "添加", "remove": "移除", "replace": "替换"}.get(mode, "更新")
         self.status.setText(f"已对 {len(changed)} 条视频{action}标签。")
 
+    def _checked_paths(self) -> list[str]:
+        paths = []
+        for row in range(self.table.rowCount()):
+            check = self.table.item(row, 6)
+            if check and check.checkState() == Qt.CheckState.Checked:
+                item = self.table.item(row, 0)
+                if item:
+                    paths.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        return paths
+
+    def _table_item_changed(self, item):
+        if item and item.column() == 6:
+            self._update_batch_button()
+
+    def _update_batch_button(self):
+        if not hasattr(self, "batch_tag_btn"):
+            return
+        if not self.project:
+            self.batch_tag_btn.setEnabled(False)
+        elif self.batch_mode:
+            self.batch_tag_btn.setEnabled(bool(self._checked_paths()))
+        else:
+            self.batch_tag_btn.setEnabled(bool(self._selected_paths()))
+
+    def toggle_batch_mode(self):
+        self.batch_mode = not self.batch_mode
+        self.table.setColumnHidden(6, not self.batch_mode)
+        self.batch_mode_btn.setText("退出批量模式" if self.batch_mode else "进入批量打标")
+        if not self.batch_mode:
+            self.table.blockSignals(True)
+            try:
+                for row in range(self.table.rowCount()):
+                    item = self.table.item(row, 6)
+                    if item:
+                        item.setCheckState(Qt.CheckState.Unchecked)
+            finally:
+                self.table.blockSignals(False)
+        self._update_batch_button()
+        if self.batch_mode:
+            self.status.setText("批量打标模式：勾选“选择”列中的视频，再点“批量打标签…”。")
+        else:
+            self.status.setText("已退出批量打标模式。")
+
     def _selected_paths(self) -> list[str]:
         paths = []
         for index in self.table.selectionModel().selectedRows():
@@ -571,8 +658,7 @@ class TagManager(QMainWindow):
         return next((v for v in self.project["videos"] if v.get("relative_path") == path), None)
 
     def _selection_changed(self):
-        if hasattr(self, "batch_tag_btn"):
-            self.batch_tag_btn.setEnabled(bool(self._selected_paths()))
+        self._update_batch_button()
         video = self._current_video()
         if not video or video.get("missing"):
             self.player.stop()
