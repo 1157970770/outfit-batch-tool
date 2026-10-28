@@ -19,8 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools.template_catalog import (  # noqa: E402
-    CatalogError, DEFAULT_TAGS, add_tag, new_project, normalize_tags,
-    scan_folder, save_xlsx, load_xlsx, set_video_tags,
+    CatalogError, DEFAULT_TAGS, add_library_tag, add_tag, load_tag_library,
+    new_project, normalize_tags, save_tag_library, scan_folder, save_xlsx,
+    load_xlsx, set_video_tags,
 )
 
 
@@ -32,8 +33,10 @@ class TagManager(QMainWindow):
         self.project: dict | None = None
         self.xlsx_path: Path | None = None
         self.checks: dict[str, QCheckBox] = {}
+        self.tag_library = load_tag_library()
         self._build_ui()
         self._set_enabled(False)
+        self.status.setText(f"先选择本机视频文件夹，或打开已有标签 Excel。当前标签库 {len(self.tag_library)} 个标签，可直接新建。")
 
     def _build_ui(self):
         central = QWidget()
@@ -60,6 +63,11 @@ class TagManager(QMainWindow):
         self.status.setWordWrap(True)
         self.status.setStyleSheet("color:#53627a;padding:6px 2px;")
         outer.addWidget(self.status)
+        self.library_label = QLabel()
+        self.library_label.setWordWrap(True)
+        self.library_label.setStyleSheet("color:#687386;font-size:11px;padding:0 2px 4px 2px;")
+        outer.addWidget(self.library_label)
+        self._update_library_label()
 
         split = QSplitter(Qt.Orientation.Horizontal)
         self.table = QTableWidget(0, 6)
@@ -122,11 +130,12 @@ class TagManager(QMainWindow):
         self.setCentralWidget(central)
 
     def _set_enabled(self, enabled: bool):
-        for control in (self.save_btn, self.export_btn, self.remove_btn, self.remove_tag_btn, self.play_btn, self.stop_btn):
+        for control in (self.save_btn, self.export_btn, self.remove_btn, self.play_btn, self.stop_btn):
             control.setEnabled(enabled)
-        # 新建标签始终可点；未加载文件夹时给出明确提示。
+        # 标签库独立于文件夹，新建/删除标签始终可点。
         self.add_tag_btn.setEnabled(True)
         self.quick_tag_btn.setEnabled(True)
+        self.remove_tag_btn.setEnabled(True)
 
     def choose_folder(self):
         start = self.project.get("source_root", "") if self.project else str(Path.home())
@@ -134,7 +143,12 @@ class TagManager(QMainWindow):
         if not selected:
             return
         try:
-            self.project = self._scan_folder(selected, self.project)
+            if self.project:
+                self.project = self._merge_library_into(self.project)
+                self.project = self._scan_folder(selected, self.project)
+            else:
+                self.project = self._scan_folder(selected, None)
+                self.project = self._merge_library_into(self.project)
             self.xlsx_path = None
             self._confirm_changed_files()
             self._refresh()
@@ -155,9 +169,9 @@ class TagManager(QMainWindow):
                 selected = QFileDialog.getExistingDirectory(self, "请选择原视频文件夹", str(Path.home()))
                 if not selected:
                     return
-                project = self._scan_folder(selected, project)
-            else:
-                project = self._scan_folder(root, project)
+                root = Path(selected)
+            project = self._merge_library_into(project)
+            project = self._scan_folder(root, project)
             self.project = project
             self.xlsx_path = Path(path)
             self._confirm_changed_files()
@@ -167,6 +181,29 @@ class TagManager(QMainWindow):
             self._set_enabled(True)
         except Exception as exc:
             QMessageBox.critical(self, "无法打开标签清单", str(exc))
+
+    def _update_library_label(self):
+        text = "、".join(self.tag_library)
+        self.library_label.setText(f"当前标签库（{len(self.tag_library)}）：{text}")
+
+    def _merge_library_into(self, project: dict) -> dict:
+        """把全局标签库与当前文件夹标签合并，跨文件夹保留。"""
+        tags = list(project.get("tags") or [])
+        known = {tag.casefold() for tag in tags}
+        for tag in tags:
+            if tag.casefold() not in {item.casefold() for item in self.tag_library}:
+                self.tag_library.append(tag)
+        for tag in self.tag_library:
+            if tag.casefold() not in known:
+                tags.append(tag)
+                known.add(tag.casefold())
+        project["tags"] = tags
+        try:
+            save_tag_library(self.tag_library)
+        except OSError:
+            pass
+        self._update_library_label()
+        return project
 
     def _scan_folder(self, root, project=None):
         dialog = QProgressDialog("正在扫描本机视频…", "", 0, 0, self)
@@ -323,32 +360,47 @@ class TagManager(QMainWindow):
         self._refresh_tag_checkboxes()
 
     def add_tag_value(self):
-        if not self.project:
-            QMessageBox.information(self, "先选择视频文件夹", "请先点击“选择视频文件夹”，扫描视频后再新建标签。")
-            return
         value, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
-        if not ok:
+        if not ok or not value.strip():
             return
         try:
-            add_tag(self.project, value)
-            self._refresh()
-            self.status.setText(f"已创建标签：{value.strip()}。选择视频后勾选即可分配。")
-        except Exception as exc:
+            add_library_tag(self.tag_library, value)
+            save_tag_library(self.tag_library)
+            self._update_library_label()
+            if self.project:
+                add_tag(self.project, value)
+                self._refresh()
+                self.status.setText(f"已创建标签：{value.strip()}。它会保留在本机标签库，并可用于其他文件夹。")
+            else:
+                self.status.setText(f"已创建标签：{value.strip()}。当前标签库 {len(self.tag_library)} 个；选择文件夹后即可使用。")
+        except CatalogError as exc:
             QMessageBox.warning(self, "标签无效", str(exc))
+        except OSError as exc:
+            QMessageBox.warning(self, "标签库保存失败", str(exc))
 
     def remove_tag_value(self):
-        if not self.project or not self.project.get("tags"):
+        options = list(self.project.get("tags") or []) if self.project else list(self.tag_library)
+        if not options:
             return
-        value, ok = QInputDialog.getItem(self, "删除标签", "选择标签：", self.project["tags"], 0, False)
+        value, ok = QInputDialog.getItem(self, "删除标签", "选择标签：", options, 0, False)
         if not ok or not value:
             return
-        used = sum(value in row.get("tags", []) for row in self.project.get("videos", []))
-        if used and QMessageBox.question(self, "确认删除", f"标签已用于 {used} 条视频。删除后会从这些视频移除，继续？") != QMessageBox.StandardButton.Yes:
-            return
-        self.project["tags"] = [tag for tag in self.project["tags"] if tag != value]
-        for row in self.project.get("videos", []):
-            row["tags"] = [tag for tag in row.get("tags", []) if tag != value]
-        self._refresh()
+        if self.project:
+            used = sum(value in row.get("tags", []) for row in self.project.get("videos", []))
+            if used and QMessageBox.question(self, "确认删除", f"标签已用于 {used} 条视频。删除后会从这些视频移除，继续？") != QMessageBox.StandardButton.Yes:
+                return
+            self.project["tags"] = [tag for tag in self.project["tags"] if tag != value]
+            for row in self.project.get("videos", []):
+                row["tags"] = [tag for tag in row.get("tags", []) if tag != value]
+        self.tag_library = [tag for tag in self.tag_library if tag != value]
+        try:
+            save_tag_library(self.tag_library)
+        except OSError as exc:
+            QMessageBox.warning(self, "标签库保存失败", str(exc))
+        self._update_library_label()
+        if self.project:
+            self._refresh()
+        self.status.setText(f"已从标签库删除：{value}")
 
     def remove_selected(self):
         if not self.project:

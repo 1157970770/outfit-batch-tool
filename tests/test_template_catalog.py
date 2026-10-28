@@ -12,13 +12,21 @@ from _tmpdir import tempdir  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from tools.template_catalog import (  # noqa: E402
-    DEFAULT_TAGS, add_tag, load_xlsx, new_project, save_xlsx, scan_folder,
-    set_video_tags, validate_project,
+    DEFAULT_TAGS, add_library_tag, add_tag, load_tag_library, load_xlsx,
+    new_project, save_tag_library, save_xlsx, scan_folder, set_video_tags,
+    validate_project,
 )
 
 
 def main() -> int:
     tmp = tempdir("tagcatalog-")
+    library = tmp / "global-tags.json"
+    tags = load_tag_library(library)
+    assert tags == DEFAULT_TAGS
+    add_library_tag(tags, "跨文件夹标签")
+    save_tag_library(tags, library)
+    assert load_tag_library(library)[-1] == "跨文件夹标签"
+
     media = tmp / "local-videos"
     media.mkdir()
     (media / "autumn-coat.mp4").write_bytes(b"local-test-video-a")

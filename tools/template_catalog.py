@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -57,6 +59,56 @@ PROJECT_SHEET = "项目"
 
 class CatalogError(ValueError):
     pass
+
+
+def library_path() -> Path:
+    """全局标签库：跨文件夹、跨次启动保留。"""
+    override = (os.getenv("OUTFIT_TAG_LIBRARY") or "").strip()
+    if override:
+        return Path(override)
+    base = (os.getenv("APPDATA") or os.getenv("LOCALAPPDATA") or "").strip()
+    if base:
+        return Path(base) / "OutfitVideoTagger" / "tags.json"
+    return Path.home() / ".outfit-video-tagger" / "tags.json"
+
+
+def load_tag_library(path: str | Path | None = None) -> list[str]:
+    """读取标签库；文件不存在或损坏时回退到默认标签。"""
+    target = Path(path) if path else library_path()
+    tags = list(DEFAULT_TAGS)
+    if target.is_file():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8-sig"))
+            values = data.get("tags") if isinstance(data, dict) else data
+            if isinstance(values, list):
+                for value in values:
+                    try:
+                        name = validate_tag_name(value)
+                    except CatalogError:
+                        continue
+                    if name.casefold() not in {tag.casefold() for tag in tags}:
+                        tags.append(name)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return tags
+
+
+def save_tag_library(tags: list[str], path: str | Path | None = None) -> Path:
+    target = Path(path) if path else library_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "tags": list(tags)}
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, target)
+    return target
+
+
+def add_library_tag(tags: list[str], value: str) -> str:
+    name = validate_tag_name(value)
+    if name.casefold() in {tag.casefold() for tag in tags}:
+        raise CatalogError("这个标签已经存在")
+    tags.append(name)
+    return name
 
 
 def new_project(root: str | Path, progress=None) -> dict:
