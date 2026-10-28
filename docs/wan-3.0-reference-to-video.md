@@ -198,9 +198,10 @@ Authorization: Bearer sk-xxx
 - 服装图：`Storage.put_path()` 上传到 `{COS_PREFIX}/output/source/<日期>/<指纹>.png`，`sign_url(7 天)`；无 COS 时转 Base64；
 - 生成的成片：`output.video_url` → 下载 → 校验 → 归档 `{COS_PREFIX}/output/<日期>/<批次>/`。
 
-> 官方错误码文档明确说：服务端用 `User-Agent: DashScopeUserBot` 拉公网素材，
-> 第三方存储可能被安全策略拦截或跨云超时，推荐同地域阿里云 OSS。
-> 所以上线前必须先做 1 条真实拉取验证；失败则把输入素材迁到 OSS（输出归档可继续 COS）。
+> 官方错误码文档说服务端用 `User-Agent: DashScopeUserBot` 拉公网素材，第三方存储理论上可能被拦。
+> **本项目已实测（2026-10-28）**：模板 080（COS 公有 URL）+ 服装图（COS 7 天签名 URL）均被官方成功拉取，
+> 任务 `SUCCEEDED`，成品归档 COS。**腾讯云 COS 不影响 Wan3 接收参考视频，不需要迁 OSS。**
+> 仍保留 `media_fetch` 错误处理：个别模板若不可达，先查 URL/权限/签名，再单独处理。
 
 ---
 

@@ -225,7 +225,7 @@ def classify_error(code: str = "", message: str = "", http_status: int = 0,
     if code in _THROTTLE_CODES or http_status == 429 or "rate limit" in lowered or "too many requests" in lowered:
         return make("throttle", f"触发限流：{message or code}。请降低并发/拉长轮询间隔后重试", True)
     if code in _MEDIA_CODES or "failed to download multimodal" in lowered or "download the media resource timed out" in lowered:
-        return make("media_fetch", f"官方拉不到素材：{message or code}。请检查 URL 公网可达，或改用阿里云 OSS/Base64")
+        return make("media_fetch", f"官方拉不到素材：{message or code}。请检查该 URL 公网可达/权限；图片可改 Base64，个别模板再考虑 OSS")
     if code in _MODERATION_CODES or "data inspection" in lowered or "moderation" in lowered:
         return make("moderation", f"素材/提示词未通过内容审核：{message or code}")
     if code in _INVALID_CODES or http_status == 400 or "model not exist" in lowered:

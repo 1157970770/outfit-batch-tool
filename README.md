@@ -53,8 +53,9 @@
 | 单元/集成测试 | ✅ | `test_wan_api / test_core / test_storage / test_ui / test_remote_config` |
 | 授权服务 `outfit-license` | ✅ 在线 | `GET /health` → `200 {"ok":true,...}` |
 | 模板清单 | ✅ 已发布，**108 条**（目标 500） | `https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/manifest.json` |
-| **真实出片** | ⬜ **未做** | 需 `DASHSCOPE_API_KEY`，先跑 1 条验证官方拉取与效果 |
-| 官方拉取 COS 素材 | ⬜ **待验证** | 失败则把输入素材迁同地域 OSS（ADR-002 §2.3） |
+| **真实出片** | ✅ **1 条已通** | 2026-10-28：模板 080，480P/5s，`task_id=e8b9cec7...`，成品已归档 COS |
+| 官方拉取 COS 素材 | ✅ **已通过** | 模板（COS 公有 URL）+ 服装图（COS 签名 URL）均被官方成功拉取，**不需要迁 OSS** |
+| 桌面端实机 + 服务端 deploy | ⬜ 待做 | 需在正常 Windows 桌面双击官方版并跑 3 条；`deploy` 后才有 `wan` 配置 |
 
 > **现在只差**：填 `server/config.json` 的 `wan.api_key` → 打样 1 条 → A/B edit/reference → 补模板到 500。
 

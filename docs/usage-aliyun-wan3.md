@@ -2,7 +2,8 @@
 
 > **分支**：`feature/aliyun-wan3-official`
 > **适用对象**：桌面操作员 / 运维管理员 / 命令行开发者
-> **当前状态**：代码与离线验证完成；**真实 1 条 + 官方拉取 COS 素材的验证还没做**。
+> **当前状态**：真实 1 条已完成（2026-10-28，480P/5s，模板 080，COS 源图/模板拉取成功，成品已归档）；
+> 剩下的是**桌面端实机 + 服务端 deploy**。
 > **相关文档**：[README.md](../README.md)、[官方接口规格](wan-3.0-reference-to-video.md)、[ADR-002](adr-002-aliyun-wan3-official-api.md)
 > **双版本隔离**：[version-isolation.md](version-isolation.md)（旧 RH 版原样保留，新版独立 exe/缓存/安装包）
 
@@ -364,16 +365,17 @@ $env:WAN_PRICE_PER_SECOND='{"720P":0.5,"1080P":0.8}'
 
 **只有服装图上传这一环变了**：RunningHub 的 `/media/upload/binary` 不存在了；现在传 COS 可写前缀，签 7 天。模板视频和成品归档都没改结构。
 
-### 6.1 必须做的 Day-0 拉取验证
+### 6.1 Day-0 拉取验证（已通过）
 
-官方文档明确说服务端用 `User-Agent: DashScopeUserBot` 拉公网素材，第三方存储可能被安全策略拦截。所以：
+官方文档说服务端用 `User-Agent: DashScopeUserBot` 拉公网素材，第三方存储理论上可能被拦。**本项目已实测**：
 
-1. 先跑 1 条真实任务（模板用现有 COS 公有 URL，服装图用 COS 签名 URL）；
-2. 成功 → 保留 COS；
-3. 失败（`GatewayTimeout.InputDownload` / `Failed to download multimodal content` / 403）→ 走 Phase 2：
-   - 模板迁同地域阿里云 OSS 公有读，清单改 OSS URL；客户端不新增 OSS 凭证；
-   - 服装图改 Base64（≤20MB）或官方临时上传 `oss://` + `X-DashScope-OssResourceResolve: enable`；
-   - 成品归档仍可留在腾讯云 COS。
+- 2026-10-28，模板 080（COS 公有 URL）+ 服装图（COS 7 天签名 URL）均被官方成功拉取；
+- 任务 `SUCCEEDED`，成品已归档 COS；
+- **腾讯云 COS 不影响 Wan3 接收参考视频，不需要迁 OSS。**
+
+保留的兜底：如果以后个别模板出现 `GatewayTimeout.InputDownload` / `Failed to download multimodal content` / 403，
+先查该 URL 的公网可达性/权限/签名；必要时单独把该模板放 OSS，或服装图改 Base64（≤20MB）。
+不做全量 COS → OSS 迁移。
 
 ### 6.2 生命周期
 
@@ -403,7 +405,7 @@ $env:WAN_PRICE_PER_SECOND='{"720P":0.5,"1080P":0.8}'
 - [ ] `wan.default_mode` 与 `default_duration`/`default_ratio` 匹配（edit=-1/adaptive，reference=7/9:16）；
 - [ ] 模板清单可打开，模板 URL 公网可下载；
 - [ ] COS 子账号能写 `prod/output/*`，`cos_check.py` 全绿；
-- [ ] 1 条真实任务成功（重点看官方能不能拉 COS 素材）；
+- [x] 1 条真实任务成功（2026-10-28，480P/5s，模板 080，COS 素材拉取成功）；
 - [ ] 记录 `request_id`、`usage.duration`、实际效果；
 - [ ] edit vs reference A/B，确定 `default_mode`；
 - [ ] 10 条小批，观察 429/审核/失败率；
@@ -451,7 +453,7 @@ python3 demo.py --count 100
 | `触发限流` / 429 / `Request rate increased too quickly` | 提交或查询太快 | 降并发（3 起）、拉长 `poll_interval`、退避 |
 | 400 `InvalidParameter` | `duration` 不是整数、`ratio` 不在枚举、素材超限 | 按报错字段改；`duration` 用 `7` 或 `-1` |
 | `DataInspectionFailed` | 图片/视频/提示词未过审核 | 换素材/提示词；确认素材授权 |
-| `官方拉不到素材` / `GatewayTimeout.InputDownload` / `Failed to download multimodal content` | 官方 `DashScopeUserBot` 拉不到 COS | 先试服装图 Base64；模板失败则迁同地域 OSS |
+| `官方拉不到素材` / `GatewayTimeout.InputDownload` / `Failed to download multimodal content` | 个别 URL 不可达/权限/签名问题（COS 整体已验证可用） | 先查该 URL 公网可达/权限/签名；服装图可改 Base64；个别模板再单独迁 OSS |
 | `任务已过期（task_id 超过 24h 查不到）` | task_id 过期/UNKNOWN | 显式重跑（会重新计费），不要重复轮询 |
 | 下载 403/404 / 结果链接失效 | 结果 URL 过期 | 重跑；成功即下载 |
 | `本地视频 ... 需要先上传成公网 URL` | 没配 `COS_*`，官方视频不支持 Base64 | 配 COS 或改用公网 URL |

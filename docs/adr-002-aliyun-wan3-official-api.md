@@ -1,6 +1,6 @@
 # ADR-002：生成链路切到阿里云百炼官方 Wan 3.0
 
-**状态**：已接受（待 1 条真实拉取验证）　**日期**：2026-10-27
+**状态**：已接受（2026-10-28 真实拉取验证通过：COS 模板 + COS 签名服装图均被官方成功拉取）　**日期**：2026-10-27
 **相关**：[wan-3.0-reference-to-video.md](wan-3.0-reference-to-video.md)、[adr-001-cos-client-credential.md](adr-001-cos-client-credential.md)、[cos-setup.md](cos-setup.md)
 
 ---
@@ -53,12 +53,14 @@
 - 输出端 24h 逻辑没变，迁了也不减少核心改造；
 - `app/storage.py` 已抽象，后续加 `OssStorage` 不影响业务层。
 
-**条件分支（Phase 2）**：官方错误码文档明确说服务端用 `DashScopeUserBot` 拉素材，
-第三方存储可能被拦。上线前先做 1 条真实拉取验证：
-- 通过 → 保留 COS；
-- 失败（`GatewayTimeout.InputDownload` / `Failed to download multimodal content` / 403）
-  → 模板迁同地域 OSS 公有读（管理员上传，客户端不新增凭证），服装图用 Base64 或官方临时上传；
-  输出归档继续 COS。
+**Day-0 验证结果（2026-10-28）**：官方服务端用 `DashScopeUserBot` 拉素材的担心**已排除**——
+实测模板 080（COS 公有 URL）+ 服装图（COS 7 天签名 URL）均被官方成功拉取，任务 `SUCCEEDED`，
+成品已归档 COS。**腾讯云 COS 不影响 Wan3 接收参考视频，不需要迁 OSS。**
+
+**Phase 2 仅保留为极端兜底**：如果后续个别模板出现
+`GatewayTimeout.InputDownload` / `Failed to download multimodal content` / 403，
+先查该 URL 的公网可达性/权限/签名，再考虑单独把该模板放 OSS 或临时改用 Base64（仅图片）；
+不做全量 COS → OSS 迁移。
 
 ### 2.4 计费口径改为“秒数 + 可选单价”
 
@@ -116,7 +118,7 @@ RunningHub 代码保留到下一版本；旧客户端只认 `rh_api_key`，所�
 - 服装图要多一次 COS 上传（1 张/批，成本可忽略）；
 - 计费口径从“金额”变“秒数”，报表要改；
 - 官方限流/审核/地域约束要重新摸；
-- 腾讯 COS → 阿里云拉取存在跨云风险，必须做 Day-0 验证。
+- 跨云拉取已实测通过（模板 + 签名图），但长期仍要关注官方 `DashScopeUserBot` 的可达性告警。
 
 ---
 
@@ -124,7 +126,7 @@ RunningHub 代码保留到下一版本；旧客户端只认 `rh_api_key`，所�
 
 | 条件 | 动作 |
 | --- | --- |
-| Day-0 拉取验证失败 | 启动 Phase 2：模板迁 OSS |
+| 个别模板出现 `media_fetch` 错误 | 先查 URL/权限/签名；该模板单独迁 OSS 或换素材，不做全量迁移 |
 | 官方单价明显高于 RunningHub | 重新算成本，考虑 `wan3.0-video-prime` 或回滚 |
 | 审核拒绝率 >5% | 评估素材合规/换模型/人工复核 |
 | 429 频繁 | 降并发/拉长轮询/申请提额 |

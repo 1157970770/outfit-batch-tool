@@ -121,7 +121,7 @@
 - COS 归档失败**不算任务失败**，只记 `archive_error`。
 - 对象名带内容指纹 → 重复上传命中同一 key，不会越存越多。
 - 凭证来源：环境变量 → `~/.cos/credentials.json` → `~/.tccli/<profile>.credential`（支持 STS Token）。
-- 官方拉取器是 `DashScopeUserBot`；腾讯 COS 是否放行必须 Day-0 验证（ADR-002）。
+- 官方拉取器是 `DashScopeUserBot`；**2026-10-28 实测模板 + COS 签名服装图均拉取成功，COS 不影响 Wan3 接收参考视频**，不需要迁 OSS（ADR-002）。
 
 ---
 
@@ -238,7 +238,7 @@ scripts\build.bat              # 构建 + 自检 + 生成 dist\换装批量生�
 
 ## 12. 待办（按优先级）
 
-1. **配百炼 Key 跑 1 条真实** → 验官方拉取/效果/计费秒数（唯一阻塞项）
+1. ~~配百炼 Key 跑 1 条真实~~ → ✅ 2026-10-28 已跑通（480P/5s，模板 080，COS 归档）；下一步是桌面端实机 + deploy
 2. 500 模板上 CDN → `tools/build_manifest.py` 出 manifest
 3. ~~部署授权服务~~ ✅ **已完成 2026-10-24**：腾讯云函数 `outfit-license`（ap-guangzhou，Python3.9，128MB/5s）+ 函数 URL
    `https://1463907213-3ifuebn6ih.ap-guangzhou.tencentscf.com`。
