@@ -11,8 +11,8 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QMainWindow, QMessageBox, QPushButton, QProgressDialog, QSplitter,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressDialog,
+    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
