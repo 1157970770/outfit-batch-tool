@@ -4,24 +4,26 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressDialog,
-    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QProgressDialog, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QInputDialog,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools.template_catalog import (  # noqa: E402
-    CatalogError, DEFAULT_TAGS, add_library_tag, add_tag, load_tag_library,
-    new_project, normalize_tags, save_tag_library, scan_folder, save_xlsx,
-    load_xlsx, set_video_tags,
+    CatalogError, DEFAULT_TAGS, add_library_tag, add_tag, load_state,
+    load_tag_library, new_project, normalize_tags, save_state, save_tag_library,
+    scan_folder, save_xlsx, load_xlsx, set_video_tags,
 )
 
 
@@ -134,9 +136,17 @@ class TagManager(QMainWindow):
         self.xlsx_path: Path | None = None
         self.checks: dict[str, QCheckBox] = {}
         self.tag_library = load_tag_library()
+        state = load_state()
+        self.recent = state.get("recent") if isinstance(state.get("recent"), list) else []
         self._build_ui()
         self._set_enabled(False)
+        self._refresh_recent_menu()
         self.status.setText(f"先选择本机视频文件夹，或打开已有标签 Excel。当前标签库 {len(self.tag_library)} 个标签，可直接新建。")
+        self._restore_last_session()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(20000)
+        self.autosave_timer.timeout.connect(self.save_working_state)
+        self.autosave_timer.start()
 
     def _build_ui(self):
         central = QWidget()
@@ -177,6 +187,10 @@ class TagManager(QMainWindow):
         list_bar = QHBoxLayout()
         list_bar.addWidget(QLabel("视频列表（Ctrl/Shift 可多选）"))
         list_bar.addStretch(1)
+        self.recent_btn = QPushButton("最近文件夹…")
+        self.recent_menu = QMenu(self.recent_btn)
+        self.recent_btn.setMenu(self.recent_menu)
+        list_bar.addWidget(self.recent_btn)
         self.select_all_btn = QPushButton("全选视频")
         self.clear_sel_btn = QPushButton("清空选择")
         self.batch_tag_btn = QPushButton("批量打标签…")
@@ -277,6 +291,7 @@ class TagManager(QMainWindow):
             self._select_first()
             self.status.setText(f"扫描完成：{len([v for v in self.project['videos'] if not v.get('missing')])} 个视频。请逐条添加标签，然后保存 Excel。")
             self._set_enabled(True)
+            self.save_working_state()
         except Exception as exc:
             QMessageBox.critical(self, "无法读取视频文件夹", str(exc))
 
@@ -301,12 +316,100 @@ class TagManager(QMainWindow):
             self._select_first()
             self.status.setText(f"已打开：{path}。修改标签后保存，Excel 清单可单独留存或交接。")
             self._set_enabled(True)
+            self.save_working_state()
         except Exception as exc:
             QMessageBox.critical(self, "无法打开标签清单", str(exc))
 
     def _update_library_label(self):
         text = "、".join(self.tag_library)
         self.library_label.setText(f"当前标签库（{len(self.tag_library)}）：{text}")
+
+    @staticmethod
+    def _same_root(left, right) -> bool:
+        try:
+            return Path(str(left)).resolve() == Path(str(right)).resolve()
+        except OSError:
+            return str(left) == str(right)
+
+    def _refresh_recent_menu(self):
+        self.recent_menu.clear()
+        if not self.recent:
+            action = self.recent_menu.addAction("暂无记录")
+            action.setEnabled(False)
+            return
+        for entry in self.recent[:8]:
+            root = str(entry.get("source_root") or "")
+            label = f"{Path(root).name or root}  —  {root}"
+            action = self.recent_menu.addAction(label)
+            action.triggered.connect(lambda checked=False, item=entry: self._open_recent(item))
+
+    def _open_recent(self, entry: dict):
+        project = entry.get("project")
+        if not isinstance(project, dict):
+            return
+        if not self._restore_project(project, entry.get("xlsx_path", ""), startup=False):
+            QMessageBox.warning(self, "无法打开最近文件夹", f"文件夹不存在或无法读取：\n{project.get('source_root', '')}")
+
+    def _restore_project(self, project: dict, xlsx_path: str = "", startup: bool = False) -> bool:
+        root = Path(str(project.get("source_root") or ""))
+        if not root.is_dir():
+            self.status.setText("上次工作的视频文件夹不存在；请从“最近文件夹…”选择，或重新选择文件夹。")
+            return False
+        try:
+            project = self._merge_library_into(dict(project))
+            project = self._scan_folder(root, project)
+        except Exception as exc:
+            self.status.setText(f"恢复工作失败：{exc}")
+            return False
+        self.project = project
+        self.xlsx_path = Path(xlsx_path) if xlsx_path and Path(xlsx_path).is_file() else None
+        changed = [row for row in project.get("videos", []) if row.get("changed")]
+        if not startup:
+            self._confirm_changed_files()
+        self._refresh()
+        self._select_first()
+        self._set_enabled(True)
+        if startup:
+            self.status.setText(f"已恢复上次工作：{root}" + (f"（{len(changed)} 个视频内容有变化，请检查）" if changed else ""))
+        else:
+            self.status.setText(f"已打开最近文件夹：{root}")
+        self.save_working_state()
+        return True
+
+    def _restore_last_session(self) -> bool:
+        state = load_state()
+        self.recent = state.get("recent") if isinstance(state.get("recent"), list) else self.recent
+        self._refresh_recent_menu()
+        project = state.get("last_project")
+        if not isinstance(project, dict):
+            return False
+        return self._restore_project(project, str(state.get("last_xlsx") or ""), startup=True)
+
+    def save_working_state(self):
+        state = load_state()
+        state["version"] = 1
+        state["recent"] = self.recent
+        if self.project:
+            root = str(self.project.get("source_root") or "")
+            entry = {"source_root": root, "xlsx_path": str(self.xlsx_path) if self.xlsx_path else "",
+                     "project": self.project, "updated_at": time.time()}
+            self.recent = [entry] + [item for item in self.recent
+                                     if not self._same_root(item.get("source_root"), root)]
+            self.recent = self.recent[:8]
+            state["recent"] = self.recent
+            state["last_project"] = self.project
+            state["last_xlsx"] = entry["xlsx_path"]
+        try:
+            save_state(state)
+        except OSError as exc:
+            if not getattr(self, "_state_warning_shown", False):
+                self._state_warning_shown = True
+                QMessageBox.warning(self, "工作状态保存失败", f"无法保存自动缓存：{exc}")
+        self._refresh_recent_menu()
+
+    def closeEvent(self, event):
+        self.save_working_state()
+        super().closeEvent(event)
 
     def _merge_library_into(self, project: dict) -> dict:
         """把全局标签库与当前文件夹标签合并，跨文件夹保留。"""
@@ -447,6 +550,7 @@ class TagManager(QMainWindow):
                 self.table.setItem(row, 4, QTableWidgetItem("；".join(video.get("tags", []))))
                 self.table.setItem(row, 5, QTableWidgetItem(self._status_text(video)))
         self._refresh_tag_checkboxes()
+        self.save_working_state()
         action = {"add": "添加", "remove": "移除", "replace": "替换"}.get(mode, "更新")
         self.status.setText(f"已对 {len(changed)} 条视频{action}标签。")
 
@@ -538,6 +642,7 @@ class TagManager(QMainWindow):
                 self.table.setItem(row, 4, QTableWidgetItem("；".join(video.get("tags", []))))
                 self.table.setItem(row, 5, QTableWidgetItem(self._status_text(video)))
         self._refresh_tag_checkboxes()
+        self.save_working_state()
 
     def add_tag_value(self):
         value, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
@@ -550,6 +655,7 @@ class TagManager(QMainWindow):
             if self.project:
                 add_tag(self.project, value)
                 self._refresh()
+                self.save_working_state()
                 self.status.setText(f"已创建标签：{value.strip()}。它会保留在本机标签库，并可用于其他文件夹。")
             else:
                 self.status.setText(f"已创建标签：{value.strip()}。当前标签库 {len(self.tag_library)} 个；选择文件夹后即可使用。")
@@ -583,6 +689,7 @@ class TagManager(QMainWindow):
         self._update_library_label()
         if self.project:
             self._refresh()
+            self.save_working_state()
         self.status.setText(f"已从标签库删除 {len(removed)} 个标签。")
 
     def remove_tag_value(self):
@@ -599,6 +706,7 @@ class TagManager(QMainWindow):
             return
         self.project["videos"] = [row for row in self.project["videos"] if row.get("relative_path") not in paths]
         self._refresh()
+        self.save_working_state()
         self.status.setText(f"已从清单移除 {len(paths)} 条；本机视频文件不会被删除。")
 
     def save_current(self):
@@ -622,6 +730,7 @@ class TagManager(QMainWindow):
     def _save_to(self, path: Path):
         try:
             save_xlsx(self.project, path)
+            self.save_working_state()
             self.status.setText(f"已保存标签清单：{path}。这份 Excel 可独立保存、查看或交接。")
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))

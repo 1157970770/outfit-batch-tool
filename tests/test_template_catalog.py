@@ -12,9 +12,9 @@ from _tmpdir import tempdir  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from tools.template_catalog import (  # noqa: E402
-    DEFAULT_TAGS, add_library_tag, add_tag, load_tag_library, load_xlsx,
-    new_project, save_tag_library, save_xlsx, scan_folder, set_video_tags,
-    validate_project,
+    DEFAULT_TAGS, add_library_tag, add_tag, load_state, load_tag_library,
+    load_xlsx, new_project, save_state, save_tag_library, save_xlsx, scan_folder,
+    set_video_tags, validate_project,
 )
 
 
@@ -26,6 +26,9 @@ def main() -> int:
     add_library_tag(tags, "跨文件夹标签")
     save_tag_library(tags, library)
     assert load_tag_library(library)[-1] == "跨文件夹标签"
+    state_file = tmp / "state.json"
+    save_state({"version": 1, "recent": [{"source_root": str(tmp / "videos")}]}, state_file)
+    assert load_state(state_file)["recent"][0]["source_root"].endswith("videos")
 
     media = tmp / "local-videos"
     media.mkdir()

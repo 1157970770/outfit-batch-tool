@@ -93,6 +93,31 @@ def load_tag_library(path: str | Path | None = None) -> list[str]:
     return tags
 
 
+def state_path() -> Path:
+    """工作状态：上次项目、最近文件夹，供退出后继续。"""
+    return library_path().with_name("state.json")
+
+
+def load_state(path: str | Path | None = None) -> dict:
+    target = Path(path) if path else state_path()
+    if not target.is_file():
+        return {}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(state: dict, path: str | Path | None = None) -> Path:
+    target = Path(path) if path else state_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, target)
+    return target
+
+
 def save_tag_library(tags: list[str], path: str | Path | None = None) -> Path:
     target = Path(path) if path else library_path()
     target.parent.mkdir(parents=True, exist_ok=True)
