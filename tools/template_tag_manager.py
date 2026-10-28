@@ -12,7 +12,7 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout,
+    QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QPushButton, QProgressDialog, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
@@ -135,7 +135,6 @@ class TagManager(QMainWindow):
         self.resize(1220, 790)
         self.project: dict | None = None
         self.xlsx_path: Path | None = None
-        self.checks: dict[str, QCheckBox] = {}
         self.batch_mode = False
         self.tag_library = load_tag_library()
         state = load_state()
@@ -266,6 +265,10 @@ class TagManager(QMainWindow):
         self.prev_shortcut.activated.connect(self.select_previous_video)
         self.next_shortcut = QShortcut(QKeySequence("D"), self)
         self.next_shortcut.activated.connect(self.select_next_video)
+        self.prev_tag_shortcut = QShortcut(QKeySequence("W"), self)
+        self.prev_tag_shortcut.activated.connect(lambda: self._move_tag(-1))
+        self.next_tag_shortcut = QShortcut(QKeySequence("S"), self)
+        self.next_tag_shortcut.activated.connect(lambda: self._move_tag(1))
 
         tag_bar = QHBoxLayout()
         tag_bar.addWidget(QLabel("标签（当前选中视频）"))
@@ -279,8 +282,10 @@ class TagManager(QMainWindow):
         right_layout.addLayout(tag_bar)
         self.tag_list = QListWidget()
         self.tag_list.setMaximumHeight(220)
+        self.tag_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.tag_list.itemChanged.connect(self._tag_item_changed)
         right_layout.addWidget(self.tag_list)
-        self.tags_note = QLabel("勾选/取消标签会应用到当前选中的视频；多选视频时应用到所有选中行。")
+        self.tags_note = QLabel("W/S 在标签间移动，空格键勾选/取消；勾选会应用到当前选中的视频。")
         self.tags_note.setWordWrap(True)
         self.tags_note.setStyleSheet("color:#687386;font-size:11px;")
         right_layout.addWidget(self.tags_note)
@@ -746,26 +751,50 @@ class TagManager(QMainWindow):
         elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.preview_status.setText("循环播放中")
 
+    def _move_tag(self, delta: int):
+        if not self.project or not self.tag_list.count():
+            return
+        row = self.tag_list.currentRow()
+        next_row = 0 if row < 0 else (row + delta) % self.tag_list.count()
+        self.tag_list.setCurrentRow(next_row)
+        self.tag_list.setFocus()
+
+    def _tag_item_changed(self, item: QListWidgetItem):
+        if not self.project or item is None:
+            return
+        if not self._toggle_tag(item.text(), item.checkState() == Qt.CheckState.Checked, refresh_list=False):
+            self._refresh_tag_checkboxes()
+
     def _refresh_tag_checkboxes(self):
-        self.tag_list.clear()
-        self.checks.clear()
+        current_tag = self.tag_list.currentItem().text() if self.tag_list.currentItem() else ""
         current = self._current_video()
         selected_tags = set(current.get("tags", [])) if current else set()
-        for tag in self.project.get("tags", []) if self.project else []:
-            item = QListWidgetItem(self.tag_list)
-            checkbox = QCheckBox(tag)
-            checkbox.setChecked(tag in selected_tags)
-            checkbox.toggled.connect(lambda checked, value=tag: self._toggle_tag(value, checked))
-            self.tag_list.setItemWidget(item, checkbox)
-            item.setSizeHint(checkbox.sizeHint())
-            self.checks[tag] = checkbox
+        self.tag_list.blockSignals(True)
+        try:
+            self.tag_list.clear()
+            for tag in self.project.get("tags", []) if self.project else []:
+                item = QListWidgetItem(tag)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+                item.setCheckState(Qt.CheckState.Checked if tag in selected_tags else Qt.CheckState.Unchecked)
+                self.tag_list.addItem(item)
+            if current_tag:
+                for row in range(self.tag_list.count()):
+                    if self.tag_list.item(row).text() == current_tag:
+                        self.tag_list.setCurrentRow(row)
+                        break
+                else:
+                    self.tag_list.setCurrentRow(0)
+            elif self.tag_list.count():
+                self.tag_list.setCurrentRow(0)
+        finally:
+            self.tag_list.blockSignals(False)
 
-    def _toggle_tag(self, tag: str, checked: bool):
+    def _toggle_tag(self, tag: str, checked: bool, refresh_list: bool = True) -> bool:
         if not self.project:
-            return
+            return False
         paths = self._selected_paths()
         if not paths:
-            return
+            return False
         changed = {}
         proposed = {}
         for relative in paths:
@@ -789,8 +818,10 @@ class TagManager(QMainWindow):
             if video:
                 self.table.setItem(row, 4, QTableWidgetItem("；".join(video.get("tags", []))))
                 self.table.setItem(row, 5, QTableWidgetItem(self._status_text(video)))
-        self._refresh_tag_checkboxes()
+        if refresh_list:
+            self._refresh_tag_checkboxes()
         self.save_working_state()
+        return True
 
     def add_tag_value(self):
         value, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
