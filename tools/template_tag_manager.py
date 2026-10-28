@@ -10,7 +10,7 @@ from PySide6.QtCore import QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QProgressDialog,
     QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
 )
@@ -23,6 +23,57 @@ from tools.template_catalog import (  # noqa: E402
     new_project, normalize_tags, save_tag_library, scan_folder, save_xlsx,
     load_xlsx, set_video_tags,
 )
+
+
+class TagLibraryDialog(QDialog):
+    """查看、删除全局标签库中的标签。"""
+
+    def __init__(self, tags: list[str], usage: dict[str, int], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("标签库管理")
+        self.resize(430, 430)
+        self.tags = list(tags)
+        self.usage = dict(usage)
+        layout = QVBoxLayout(self)
+        hint = QLabel("删除标签会同时从当前项目移除；不会改动本机视频文件。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        for tag in self.tags:
+            count = self.usage.get(tag, 0)
+            item = QListWidgetItem(f"{tag}（当前项目 {count} 条）" if count else tag)
+            item.setData(Qt.ItemDataRole.UserRole, tag)
+            self.list.addItem(item)
+        layout.addWidget(self.list, 1)
+        buttons = QHBoxLayout()
+        self.delete_btn = QPushButton("删除选中标签")
+        self.delete_btn.clicked.connect(self.delete_selected)
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        buttons.addWidget(self.delete_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+    def delete_selected(self):
+        items = self.list.selectedItems()
+        if not items:
+            QMessageBox.information(self, "未选择标签", "先在列表中选择要删除的标签。")
+            return
+        names = [str(item.data(Qt.ItemDataRole.UserRole)) for item in items]
+        used = sum(self.usage.get(name, 0) for name in names)
+        message = f"删除 {len(names)} 个标签：{'、'.join(names)}？"
+        if used:
+            message += f"\n其中标签已用于当前项目 {used} 条视频，删除后会从这些视频移除。"
+        if QMessageBox.question(self, "确认删除标签", message) != QMessageBox.StandardButton.Yes:
+            return
+        for item in items:
+            self.list.takeItem(self.list.row(item))
+        removed = set(names)
+        self.tags = [tag for tag in self.tags if tag not in removed]
+        for tag in removed:
+            self.usage.pop(tag, None)
 
 
 class TagManager(QMainWindow):
@@ -66,7 +117,12 @@ class TagManager(QMainWindow):
         self.library_label = QLabel()
         self.library_label.setWordWrap(True)
         self.library_label.setStyleSheet("color:#687386;font-size:11px;padding:0 2px 4px 2px;")
-        outer.addWidget(self.library_label)
+        library_row = QHBoxLayout()
+        library_row.addWidget(self.library_label, 1)
+        self.manage_tags_btn = QPushButton("管理标签库…")
+        self.manage_tags_btn.clicked.connect(self.manage_tags)
+        library_row.addWidget(self.manage_tags_btn)
+        outer.addLayout(library_row)
         self._update_library_label()
 
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -378,21 +434,24 @@ class TagManager(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "标签库保存失败", str(exc))
 
-    def remove_tag_value(self):
-        options = list(self.project.get("tags") or []) if self.project else list(self.tag_library)
-        if not options:
-            return
-        value, ok = QInputDialog.getItem(self, "删除标签", "选择标签：", options, 0, False)
-        if not ok or not value:
-            return
+    def manage_tags(self):
+        usage: dict[str, int] = {}
         if self.project:
-            used = sum(value in row.get("tags", []) for row in self.project.get("videos", []))
-            if used and QMessageBox.question(self, "确认删除", f"标签已用于 {used} 条视频。删除后会从这些视频移除，继续？") != QMessageBox.StandardButton.Yes:
-                return
-            self.project["tags"] = [tag for tag in self.project["tags"] if tag != value]
             for row in self.project.get("videos", []):
-                row["tags"] = [tag for tag in row.get("tags", []) if tag != value]
-        self.tag_library = [tag for tag in self.tag_library if tag != value]
+                for tag in row.get("tags", []):
+                    usage[tag] = usage.get(tag, 0) + 1
+        dialog = TagLibraryDialog(self.tag_library, usage, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        removed = [tag for tag in self.tag_library if tag not in dialog.tags]
+        if not removed:
+            return
+        self.tag_library = list(dialog.tags)
+        if self.project:
+            keep = set(self.tag_library)
+            self.project["tags"] = [tag for tag in self.project.get("tags", []) if tag in keep]
+            for row in self.project.get("videos", []):
+                row["tags"] = [tag for tag in row.get("tags", []) if tag in keep]
         try:
             save_tag_library(self.tag_library)
         except OSError as exc:
@@ -400,7 +459,10 @@ class TagManager(QMainWindow):
         self._update_library_label()
         if self.project:
             self._refresh()
-        self.status.setText(f"已从标签库删除：{value}")
+        self.status.setText(f"已从标签库删除 {len(removed)} 个标签。")
+
+    def remove_tag_value(self):
+        self.manage_tags()
 
     def remove_selected(self):
         if not self.project:
