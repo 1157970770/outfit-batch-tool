@@ -4,5 +4,6 @@ PySide6>=6.5
 # 占位图生成、测试用图（demo.py / tests）
 Pillow>=9.0
 
-# 真实上传到腾讯云 COS 才需要；本地后端与全部测试不需要
+# 可选增强：完整 COS 能力（list/delete/分片/自检脚本）。
+# 主流程在缺包时会自动用 app/cos_rest.py 的标准库 REST 兜底。
 cos-python-sdk-v5>=1.9.30

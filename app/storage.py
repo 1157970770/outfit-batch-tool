@@ -8,7 +8,8 @@
 
 换云、换桶、换成 MinIO，只要改本文件的 `open_storage` 分派，业务代码不动。
 
-依赖：`cos-python-sdk-v5` 只有真实 COS 后端才需要；本地后端与全部单元测试零依赖。
+依赖：`cos-python-sdk-v5` 是可选增强；缺失时 `open_storage` 自动用
+`app/cos_rest.py` 的标准库 REST 兜底（上传/签名/存在性/大小），本地后端零依赖。
 """
 
 from __future__ import annotations
@@ -620,6 +621,16 @@ def open_storage(cfg: StorageConfig | None) -> Storage | None:
     if cfg.provider == "local":
         return LocalStorage(cfg)
     if cfg.provider == "cos":
+        # 客户机/打包机不一定装了 qcloud_cos；缺 SDK 时用标准库 REST 兜底，
+        # 保证“源图上传 + 成品归档 + 签名 URL”这三件主流程仍然可用。
+        try:
+            import qcloud_cos  # noqa: F401
+        except Exception:  # noqa: BLE001 - 缺包/依赖不全都走兜底
+            try:
+                from .cos_rest import CosRestStorage
+            except ImportError:
+                from cos_rest import CosRestStorage  # type: ignore
+            return CosRestStorage(cfg)
         return CosStorage(cfg)
     raise StorageError(f"不支持的存储类型：{cfg.provider}")
 

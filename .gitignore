@@ -34,6 +34,10 @@ cos.json
 # 程序运行配置（含 RH_API_KEY，绝不提交）
 配置.ini
 
+# 用户本地的定妆图（正式素材，不进仓库）
+assets/定妆图.jpg
+assets/定妆图.png
+
 # 测试临时目录
 .tmp/
 

@@ -101,7 +101,7 @@ python3 wan3_r2v.py run --tasks batch/tasks.batch.json --concurrency 3
 - **命令行**：手工给凭证（子账号，别用主账号）：
 
 ```bash
-# 0) 只有真传 COS 才需要
+# 0) 可选：完整 COS 能力/自检脚本；主流程缺包时用标准库 REST 兜底
 pip install cos-python-sdk-v5
 
 # 1) 环境变量
