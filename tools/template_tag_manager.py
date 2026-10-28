@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -251,14 +252,20 @@ class TagManager(QMainWindow):
         controls.addWidget(self.preview_status, 1)
         right_layout.addLayout(controls)
         nav = QHBoxLayout()
-        self.prev_btn = QPushButton("上一个视频")
-        self.next_btn = QPushButton("下一个视频")
+        self.prev_btn = QPushButton("上一个视频 (A)")
+        self.next_btn = QPushButton("下一个视频 (D)")
+        self.prev_btn.setToolTip("快捷键 A")
+        self.next_btn.setToolTip("快捷键 D")
         self.prev_btn.clicked.connect(self.select_previous_video)
         self.next_btn.clicked.connect(self.select_next_video)
         nav.addWidget(self.prev_btn)
         nav.addWidget(self.next_btn)
         nav.addStretch(1)
         right_layout.addLayout(nav)
+        self.prev_shortcut = QShortcut(QKeySequence("A"), self)
+        self.prev_shortcut.activated.connect(self.select_previous_video)
+        self.next_shortcut = QShortcut(QKeySequence("D"), self)
+        self.next_shortcut.activated.connect(self.select_next_video)
 
         tag_bar = QHBoxLayout()
         tag_bar.addWidget(QLabel("标签（当前选中视频）"))
