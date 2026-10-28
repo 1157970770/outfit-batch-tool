@@ -37,8 +37,9 @@ class TagLibraryDialog(QDialog):
         self.resize(430, 430)
         self.tags = list(tags)
         self.usage = dict(usage)
+        self.merge_map: dict[str, str] = {}
         layout = QVBoxLayout(self)
-        hint = QLabel("删除标签会同时从当前项目移除；不会改动本机视频文件。")
+        hint = QLabel("删除标签会同时从当前项目移除；“合并到…”可把旧标签替换成另一个标签。不会改动本机视频文件。")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.list = QListWidget()
@@ -49,11 +50,14 @@ class TagLibraryDialog(QDialog):
         buttons = QHBoxLayout()
         self.add_btn = QPushButton("＋ 新建标签")
         self.add_btn.clicked.connect(self.add_tag)
+        self.merge_btn = QPushButton("合并到…")
+        self.merge_btn.clicked.connect(self.merge_selected)
         self.delete_btn = QPushButton("删除选中标签")
         self.delete_btn.clicked.connect(self.delete_selected)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
         buttons.addWidget(self.add_btn)
+        buttons.addWidget(self.merge_btn)
         buttons.addWidget(self.delete_btn)
         buttons.addStretch(1)
         buttons.addWidget(close_btn)
@@ -76,6 +80,31 @@ class TagLibraryDialog(QDialog):
             return
         self._add_item(value.strip())
         self.list.setCurrentRow(self.list.count() - 1)
+
+    def merge_selected(self):
+        items = self.list.selectedItems()
+        if len(items) != 1:
+            QMessageBox.information(self, "选择旧标签", "先在列表中选择一个要合并掉的标签。")
+            return
+        source = str(items[0].data(Qt.ItemDataRole.UserRole))
+        targets = [tag for tag in self.tags if tag != source]
+        if not targets:
+            QMessageBox.information(self, "没有目标标签", "标签库里没有其他标签可作为目标。")
+            return
+        target, ok = QInputDialog.getItem(self, "合并标签", f"把“{source}”替换为：", targets, 0, False)
+        if not ok or not target or target == source:
+            return
+        used = self.usage.get(source, 0)
+        message = f"把“{source}”合并到“{target}”？\n标签库会删除“{source}”。"
+        if used:
+            message += f"\n当前项目有 {used} 条视频使用它，会改为“{target}”。"
+        if QMessageBox.question(self, "确认合并标签", message) != QMessageBox.StandardButton.Yes:
+            return
+        self.list.takeItem(self.list.row(items[0]))
+        self.tags = [tag for tag in self.tags if tag != source]
+        self.merge_map[source] = target
+        self.usage[target] = self.usage.get(target, 0) + used
+        self.usage.pop(source, None)
 
     def delete_selected(self):
         items = self.list.selectedItems()
@@ -868,22 +897,38 @@ class TagManager(QMainWindow):
                 for tag in row.get("tags", []):
                     usage[tag] = usage.get(tag, 0) + 1
         dialog = TagLibraryDialog(self.tag_library, usage, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        # 没有“取消”按钮：关闭窗口也要保留刚才的新建/删除/合并操作。
+        dialog.exec()
+        merge_map = dict(getattr(dialog, "merge_map", {}))
+        def resolve(tag: str) -> str:
+            seen = set()
+            while tag in merge_map and tag not in seen:
+                seen.add(tag)
+                tag = merge_map[tag]
+            return tag
         added = [tag for tag in dialog.tags if tag not in self.tag_library]
         removed = [tag for tag in self.tag_library if tag not in dialog.tags]
-        if not added and not removed:
+        if not added and not removed and not merge_map:
             return
         self.tag_library = list(dialog.tags)
         if self.project:
             keep = set(self.tag_library)
-            project_tags = [tag for tag in self.project.get("tags", []) if tag in keep]
+            project_tags = []
+            for tag in self.project.get("tags", []):
+                mapped = resolve(tag)
+                if mapped in keep and mapped not in project_tags:
+                    project_tags.append(mapped)
             for tag in added:
                 if tag not in project_tags:
                     project_tags.append(tag)
             self.project["tags"] = project_tags
             for row in self.project.get("videos", []):
-                row["tags"] = [tag for tag in row.get("tags", []) if tag in keep]
+                mapped_tags = []
+                for tag in row.get("tags", []):
+                    mapped = resolve(tag)
+                    if mapped in keep and mapped not in mapped_tags:
+                        mapped_tags.append(mapped)
+                row["tags"] = mapped_tags
         try:
             save_tag_library(self.tag_library)
         except OSError as exc:
@@ -897,6 +942,8 @@ class TagManager(QMainWindow):
             changes.append(f"新增 {len(added)} 个")
         if removed:
             changes.append(f"删除 {len(removed)} 个")
+        if merge_map:
+            changes.append(f"合并 {len(merge_map)} 个")
         self.status.setText("标签库已更新：" + "，".join(changes) + "标签。")
 
     def remove_tag_value(self):
