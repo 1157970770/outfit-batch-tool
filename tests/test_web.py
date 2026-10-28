@@ -102,7 +102,11 @@ def main() -> int:
         assert code == 200, code
         code, _, boot = call(alice, base, "/api/bootstrap")
         assert code == 200 and json.loads(boot)["service"]["templates_count"] == 1
-        prompt_id = json.loads(boot)["prompts"][0]["id"]
+        prompt_options = json.loads(boot)["prompts"]
+        assert not any(p["title"] == "服装定妆" for p in prompt_options), prompt_options
+        prompt_option = prompt_options[0]
+        prompt_id = prompt_option["id"]
+        custom_prompt = prompt_option["body"] + "\n本次微调：只展示服装，不改变人物。"
 
         image = io.BytesIO()
         Image.new("RGB", (256, 320), (230, 220, 210)).save(image, format="PNG")
@@ -112,7 +116,7 @@ def main() -> int:
         upload_id = json.loads(upload)["upload_id"]
         code, _, created = call(alice, base, "/api/jobs", "POST", {
             "upload_id": upload_id, "selection": "selected", "template_id": "001", "count": 1,
-            "prompt_id": prompt_id, "resolution": "480P", "duration": 5})
+            "prompt_id": prompt_id, "prompt": custom_prompt, "resolution": "480P", "duration": 5})
         assert code == 201, (code, created)
         job_id = json.loads(created)["job"]["id"]
 
@@ -128,6 +132,9 @@ def main() -> int:
         assert job and job["status"] == "succeeded", job
         assert job["records"][0]["status"] == "success", job
         assert "out_dir" not in (job.get("summary") or {}), job
+        with urllib.request.urlopen(f"http://127.0.0.1:{mock_port}/stats", timeout=5) as response:
+            mock_state = json.loads(response.read().decode("utf-8"))
+        assert mock_state["last_body"]["input"]["prompt"] == custom_prompt
 
         code, headers, video = call(alice, base, f"/api/jobs/{job_id}/download/001", headers={"Range": "bytes=0-9"})
         assert code == 206 and len(video) == 10, (code, len(video))

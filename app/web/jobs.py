@@ -74,9 +74,14 @@ class JobManager:
 
     def create(self, owner: str, image_path: Path, image_name: str,
                templates: list[dict], prompt_id: str, resolution: str = "480P",
-               duration: int = 5) -> dict:
+               duration: int = 5, prompt_body: str | None = None) -> dict:
         if prompt_id not in self.prompts:
-            raise ValueError("请选择有效的换装方案")
+            raise ValueError("请选择有效的提示词模板")
+        prompt = str(prompt_body if prompt_body is not None else self.prompts[prompt_id]).strip()
+        if not prompt:
+            raise ValueError("提示词不能为空")
+        if len(prompt) > 4000:
+            raise ValueError("提示词最多 4000 个字符")
         if not templates:
             raise ValueError("至少选择一个视频场景")
         if len(templates) > self.settings.max_items:
@@ -91,7 +96,7 @@ class JobManager:
             "id": job_id, "owner": owner, "status": "queued", "created_at": now,
             "started_at": None, "finished_at": None, "batch_id": batch_id,
             "image_path": str(image_path), "image_name": image_name,
-            "prompt_id": prompt_id, "prompt": self.prompts[prompt_id],
+            "prompt_id": prompt_id, "prompt": prompt,
             "templates": templates, "template_ids": [str(t["id"]) for t in templates],
             "resolution": resolution, "duration": duration, "total": len(templates),
             "done": 0, "records": [], "summary": None, "message": "已排队，开始前可取消。",
@@ -249,7 +254,7 @@ class JobManager:
             if not image_path.is_file():
                 raise ValueError("原服装图片已不存在，请重新上传后新建任务")
             return self.create(owner, image_path, source.get("image_name", "服装图"), selected,
-                               source["prompt_id"], source["resolution"], source["duration"])
+                               source["prompt_id"], source["resolution"], source["duration"], source.get("prompt"))
 
     def cancel(self, job_id: str) -> bool:
         with self.changed:

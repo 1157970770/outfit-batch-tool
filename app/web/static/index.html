@@ -66,7 +66,9 @@
             <label id="template-wrap" class="field hidden">选择视频场景<select id="template-select"></select></label>
             <video id="template-preview" class="template-preview hidden" controls preload="none" playsinline></video>
             <label id="count-wrap" class="field">生成数量<select id="count-select"><option value="1">1 条（推荐先试做）</option><option value="3">3 条</option><option value="5">5 条</option><option value="10">10 条</option></select></label>
-            <label class="field">换装方案<select id="prompt-select"></select></label>
+            <label class="field">提示词模板<select id="prompt-select"></select></label>
+            <label class="field prompt-editor-label">本次提示词（可按需要微调）<textarea id="prompt-body" rows="7" maxlength="4000" spellcheck="false"></textarea></label>
+            <div class="prompt-meta"><span>选择模板会复制正文到这里；修改只影响本次任务。</span><span id="prompt-length">0 / 4000</span></div>
             <details class="advanced"><summary>更多设置</summary><div class="advanced-grid">
               <label class="field">画质<select id="resolution"><option value="480P" selected>标准 480P</option><option value="720P">高清 720P</option></select></label>
               <label class="field">视频时长<select id="duration"><option value="5" selected>5 秒</option><option value="-1">跟随视频场景</option></select></label>

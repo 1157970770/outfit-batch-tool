@@ -31,7 +31,9 @@
     if (data.service.templates_error) { $('notice').textContent = '视频场景暂时无法加载，请联系管理员。'; $('notice').classList.remove('hidden'); }
     $('count-select').querySelectorAll('option').forEach(o => { if (Number(o.value) > data.service.max_items) o.disabled = true; });
     const promptSelect = $('prompt-select'); promptSelect.replaceChildren();
-    for (const p of state.prompts) { const o = document.createElement('option'); o.value = p.id; o.textContent = p.title; promptSelect.append(o); }
+    for (const p of state.prompts) { const o = document.createElement('option'); o.value = p.id; o.textContent = p.title; o.dataset.body = p.body || ''; promptSelect.append(o); }
+    $('prompt-body').value = promptSelect.selectedOptions[0]?.dataset.body || '';
+    updatePromptCount();
     await loadTemplates(); updateSummary(); await refreshJobs();
     clearInterval(state.timer); state.timer = setInterval(() => { if (!document.hidden) refreshJobs(); }, 3500);
   }
@@ -46,7 +48,10 @@
     $('template-wrap').classList.toggle('hidden', !selected); $('count-wrap').classList.toggle('hidden', selected);
     $('template-preview').classList.toggle('hidden', !selected); updateTemplatePreview(); updateSummary();
   }));
-  ['count-select','prompt-select','resolution','duration'].forEach(id => $(id).addEventListener('change', updateSummary));
+  ['count-select','resolution','duration'].forEach(id => $(id).addEventListener('change', updateSummary));
+  $('prompt-select').addEventListener('change', () => { $('prompt-body').value = $('prompt-select').selectedOptions[0]?.dataset.body || ''; updatePromptCount(); updateSummary(); });
+  $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
+  function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }
   $('template-select').addEventListener('change', () => { updateTemplatePreview(); updateSummary(); });
   function updateTemplatePreview() {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
@@ -58,8 +63,10 @@
   function selectedCount() { return document.querySelector('input[name="selection"]:checked').value === 'selected' ? 1 : Number($('count-select').value); }
   function updateSummary() {
     const count = selectedCount(); const prompt = state.prompts.find(p => p.id === $('prompt-select').value);
+    const selectedPreset = $('prompt-select').selectedOptions[0];
+    const edited = selectedPreset && $('prompt-body').value.trim() !== (selectedPreset.dataset.body || '').trim();
     $('summary-title').textContent = `准备生成 ${count} 条视频`;
-    $('summary-detail').textContent = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}`;
+    $('summary-detail').textContent = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${edited ? ' · 已微调提示词' : ''}`;
   }
 
   const fileInput = $('image-file');
@@ -79,6 +86,9 @@
   $('submit-btn').addEventListener('click', async () => {
     const file = fileInput.files[0]; if (!file) return showCreateError('请先上传服装图片。');
     const selection = document.querySelector('input[name="selection"]:checked').value; const count = selectedCount();
+    const promptBody = $('prompt-body').value.trim();
+    if (!promptBody) return showCreateError('提示词不能为空，请选择模板或填写内容。');
+    if (promptBody.length > 4000) return showCreateError('提示词最多 4000 个字符。');
     if (!confirm(`将提交 ${count} 条生成任务，可能产生云端费用。已提交的任务不能撤回。是否继续？`)) return;
     const btn = $('submit-btn'); btn.disabled = true; btn.textContent = '正在上传…'; showCreateError('');
     try {
@@ -86,7 +96,7 @@
       const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: dataUrl }) });
       btn.textContent = '正在提交…';
       const body = { upload_id: uploaded.upload_id, selection, count, template_id: $('template-select').value,
-        prompt_id: $('prompt-select').value, resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true };
+        prompt_id: $('prompt-select').value, prompt: promptBody, resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true };
       const result = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
       toast('任务已提交，正在排队。'); fileInput.value = ''; state.upload = null; $('image-preview').classList.add('hidden'); $('drop-copy').classList.remove('hidden'); $('image-info').textContent = '';
       switchView('history-view'); await refreshJobs(result.job.id);

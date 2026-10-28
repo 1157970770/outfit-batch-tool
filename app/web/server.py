@@ -60,7 +60,9 @@ def _load_prompts() -> dict[str, dict]:
     prompts = {"standard": {"title": "标准换装", "body": DEFAULT_PROMPT}}
     try:
         lib = PromptLibrary.load()
-        prompts.update({p.id: {"title": p.title, "body": p.body} for p in lib.prompts})
+        # 服装定妆用于图片定妆，不是视频生成提示词，网页生产页不展示。
+        prompts.update({p.id: {"title": p.title, "body": p.body} for p in lib.prompts
+                        if p.id != "p01" and p.title.strip() != "服装定妆"})
     except Exception:
         pass
     return prompts
@@ -247,7 +249,7 @@ def make_handler(app: WebApplication):
                                                "templates_error": app.settings.templates_error,
                                                "max_items": app.settings.max_items,
                                                "notice": cfg.get("NOTICE") or ""},
-                                   "prompts": [{"id": k, "title": v["title"]} for k, v in app.prompts.items()]})
+                                   "prompts": [{"id": k, "title": v["title"], "body": v["body"]} for k, v in app.prompts.items()]})
             if path == "/api/templates":
                 if not self._user():
                     return
@@ -450,7 +452,7 @@ def make_handler(app: WebApplication):
                     return self._error("批量数量较多，请确认后再提交。", 409)
                 job = app.jobs.create(user["username"], Path(meta["path"]), meta["name"], templates,
                                       prompt_id, str(data.get("resolution") or "480P"),
-                                      int(data.get("duration") or 5))
+                                      int(data.get("duration") or 5), str(data.get("prompt") or ""))
                 return self._json({"ok": True, "job": job}, 201)
             except (ValueError, TemplateError) as exc:
                 return self._error(exc)
