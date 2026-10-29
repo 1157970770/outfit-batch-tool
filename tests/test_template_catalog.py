@@ -13,9 +13,10 @@ from _tmpdir import tempdir  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from tools.template_catalog import (  # noqa: E402
-    DEFAULT_TAGS, add_library_tag, add_tag, load_state, load_tag_library,
-    load_xlsx, new_project, save_state, save_tag_library, save_xlsx, scan_folder,
-    set_video_tags, validate_project,
+    DEFAULT_TAGS, TAG_CATEGORIES, add_library_tag, add_tag, infer_tag_category,
+    load_state, load_tag_categories, load_tag_library, load_xlsx, new_project,
+    save_state, save_tag_library, save_xlsx, scan_folder, set_video_tags,
+    validate_project,
 )
 
 
@@ -34,6 +35,13 @@ def main() -> int:
     custom_library = tmp / "custom-tags.json"
     custom_library.write_text(json.dumps({"tags": ["只有这个"]}), encoding="utf-8")
     assert load_tag_library(custom_library) == ["只有这个"]
+    assert load_tag_categories(custom_library) == {"只有这个": "场景"}
+    save_tag_library(["近景", "适合春夏", "坐在椅子上", "自定义"], custom_library,
+                     {"自定义": "姿势"})
+    categories = load_tag_categories(custom_library)
+    assert categories == {"近景": "景别", "适合春夏": "适合季节",
+                          "坐在椅子上": "姿势", "自定义": "姿势"}
+    assert TAG_CATEGORIES == ["景别", "适合季节", "场景", "姿势"]
     save_tag_library([], custom_library)
     assert load_tag_library(custom_library) == []
 
@@ -47,13 +55,19 @@ def main() -> int:
     assert project["videos"][1]["id"] == "002"
     assert project["tags"] == []
     project["tags"] = list(DEFAULT_TAGS)
+    project["tag_categories"] = {tag: infer_tag_category(tag) for tag in project["tags"]}
     add_tag(project, "校园场景")
+    project["tag_categories"]["校园场景"] = "场景"
     set_video_tags(project, "autumn-coat.mp4", ["适合秋冬", "中远景", "校园场景"])
     set_video_tags(project, "bracelet-demo.mov", ["手串展示", "近景"])
     xlsx = tmp / "template-tags.xlsx"
     save_xlsx(project, xlsx)
     loaded = load_xlsx(xlsx)
     assert loaded["project_id"] == project["project_id"]
+    assert loaded["tag_categories"]["近景"] == "景别"
+    assert loaded["tag_categories"]["适合秋冬"] == "适合季节"
+    assert loaded["tag_categories"]["手串展示"] == "姿势"
+    assert loaded["tag_categories"]["校园场景"] == "场景"
     assert loaded["videos"][0]["tags"] == ["适合秋冬", "中远景", "校园场景"]
     assert loaded["videos"][1]["tags"] == ["手串展示", "近景"]
     assert not validate_project(loaded)

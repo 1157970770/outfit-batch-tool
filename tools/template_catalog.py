@@ -52,6 +52,33 @@ DEFAULT_TAGS = [
     "适合秋冬", "适合春夏", "近景", "中远景",
     "手串展示", "A场景", "B场景", "C场景",
 ]
+TAG_CATEGORIES = ["景别", "适合季节", "场景", "姿势"]
+
+
+def infer_tag_category(tag: str) -> str:
+    name = str(tag or "").strip()
+    if name in {"近景", "中景", "中远景", "远景", "特写"}:
+        return "景别"
+    if name in {"适合春夏", "适合秋冬", "适合春季", "适合夏季", "适合秋季", "适合冬季"}:
+        return "适合季节"
+    if name in {"手串展示", "只有上半身", "坐在椅子上", "裤子展示", "站立", "坐姿"}:
+        return "姿势"
+    return "场景"
+
+
+def default_tag_categories(tags: list[str]) -> dict[str, str]:
+    return {tag: infer_tag_category(tag) for tag in tags}
+
+
+def normalize_tag_categories(tags: list[str], categories: dict | None = None) -> dict[str, str]:
+    result = default_tag_categories(tags)
+    for tag in tags:
+        category = (categories or {}).get(tag)
+        if category in TAG_CATEGORIES:
+            result[tag] = category
+    return result
+
+
 VIDEO_SHEET = "视频标签清单"
 TAGS_SHEET = "标签字典"
 PROJECT_SHEET = "项目"
@@ -95,6 +122,20 @@ def load_tag_library(path: str | Path | None = None) -> list[str]:
     return tags
 
 
+def load_tag_categories(path: str | Path | None = None) -> dict[str, str]:
+    target = Path(path) if path else library_path()
+    tags = load_tag_library(target)
+    saved = {}
+    if target.is_file():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict) and isinstance(data.get("categories"), dict):
+                saved = data["categories"]
+        except (OSError, json.JSONDecodeError):
+            pass
+    return normalize_tag_categories(tags, saved)
+
+
 def state_path() -> Path:
     """工作状态：上次项目、最近文件夹，供退出后继续。"""
     return library_path().with_name("state.json")
@@ -120,10 +161,14 @@ def save_state(state: dict, path: str | Path | None = None) -> Path:
     return target
 
 
-def save_tag_library(tags: list[str], path: str | Path | None = None) -> Path:
+def save_tag_library(tags: list[str], path: str | Path | None = None,
+                     categories: dict[str, str] | None = None) -> Path:
     target = Path(path) if path else library_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "tags": list(tags)}
+    if categories is None:
+        categories = load_tag_categories(target)
+    category_map = normalize_tag_categories(list(tags), categories)
+    payload = {"version": 2, "tags": list(tags), "categories": category_map}
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, target)
@@ -147,6 +192,7 @@ def new_project(root: str | Path, progress=None) -> dict:
         "source_root": str(folder),
         "next_id": 1,
         "tags": [],
+        "tag_categories": {},
         "videos": [],
     }
     return scan_folder(folder, project, progress=progress)
@@ -165,6 +211,7 @@ def scan_folder(root: str | Path, project: dict | None = None, progress=None) ->
     result = dict(project or {})
     result.setdefault("project_id", uuid.uuid4().hex[:12])
     result.setdefault("tags", [])
+    result["tag_categories"] = normalize_tag_categories(result.get("tags", []), result.get("tag_categories", {}))
     result["source_root"] = str(folder)
     previous = {str(row.get("relative_path")): dict(row) for row in result.get("videos", [])}
     found: set[str] = set()
@@ -327,9 +374,10 @@ def save_xlsx(project: dict, destination: str | Path) -> Path:
                    row.get("duration"), row.get("size_mb"), row.get("fingerprint", ""),
                    ";".join(row.get("tags", [])), state])
     tags_ws = wb.create_sheet(TAGS_SHEET)
-    tags_ws.append(["标签值"])
+    tags_ws.append(["标签值", "分类"])
+    categories = normalize_tag_categories(project.get("tags", []), project.get("tag_categories", {}))
     for tag in project.get("tags", []):
-        tags_ws.append([tag])
+        tags_ws.append([tag, categories[tag]])
     meta = wb.create_sheet(PROJECT_SHEET)
     meta.append(["项目字段", "值"])
     meta.append(["项目ID", str(project.get("project_id") or "")])
@@ -364,9 +412,17 @@ def load_xlsx(source: str | Path) -> dict:
         wb.close()
         raise CatalogError("Excel 缺少“视频标签清单”或“标签字典”工作表")
     tags_ws = wb[TAGS_SHEET]
-    tags = [validate_tag_name(row[0]) for row in list(tags_ws.iter_rows(min_row=2, values_only=True)) if row and row[0]]
-    if not tags:
-        tags = list(DEFAULT_TAGS)
+    tags = []
+    saved_categories = {}
+    for row in tags_ws.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        tag = validate_tag_name(row[0])
+        if tag not in tags:
+            tags.append(tag)
+        if len(row) > 1 and row[1] in TAG_CATEGORIES:
+            saved_categories[tag] = row[1]
+    tag_categories = normalize_tag_categories(tags, saved_categories)
     meta_values = {}
     if PROJECT_SHEET in wb.sheetnames:
         meta = wb[PROJECT_SHEET]
@@ -411,4 +467,5 @@ def load_xlsx(source: str | Path) -> dict:
     except (TypeError, ValueError):
         next_id = 1
     return {"project_id": project_id, "source_root": source_root, "next_id": next_id,
-            "tags": tags, "videos": videos, "xlsx_path": str(path)}
+            "tags": tags, "tag_categories": tag_categories,
+            "videos": videos, "xlsx_path": str(path)}
