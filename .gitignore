@@ -2,6 +2,7 @@
 dist/
 dist-official/
 dist-official-onefile/
+release/
 build/
 build_*/
 *.spec

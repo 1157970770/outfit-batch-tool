@@ -1,5 +1,9 @@
 # 双版本隔离手册（旧 RH 版 / 新官方版）
 
+> **2026-10-30 清理**：旧 `dist/`（旧 RH 版安装包）、`dist-official/`（旧官方版文件夹/zips）、`build/` 旧构建和旧 RH worktree 已删除。
+> 现在只保留 **`release/换装批量生产器-官方版.exe`**（单文件，51.4 MB）。
+> 旧 RH 源码仍在 `feature/prompt-library` 分支，需要时可用 `build.ps1` 重新打包；旧安装包不再保留。
+
 > **目标**：旧 RunningHub 版**原样保留、优先可用**；新阿里云百炼官方版独立构建、独立安装、独立缓存，互不覆盖。
 > 适用分支：`feature/aliyun-wan3-official`（新）/ `feature/prompt-library`（旧）。
 
