@@ -49,7 +49,7 @@ $ErrorActionPreference = "Continue"
     --name $appName --distpath $distRoot --workpath $workRoot --specpath $specRoot `
     --paths $root --add-data "$root\prompts\prompt-library.json;prompts" `
     --hidden-import app.cos_rest --exclude-module numpy `
-    --runtime-tmpdir "%LOCALAPPDATA%\RHOutfitToolWan3" `
+    --runtime-tmpdir "%LOCALAPPDATA%\Temp" `
     --version-file $versionFile run_app.py *> $log
 $code = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
@@ -64,5 +64,5 @@ $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
 Write-Host ""
 Write-Host "完成：$exe（$sizeMb MB）" -ForegroundColor Green
 Write-Host "SHA256：$hash" -ForegroundColor DarkGray
-Write-Host "说明：单 exe；运行时解压到 %LOCALAPPDATA%\RHOutfitToolWan3\_MEIxxxx，正常退出自动清理。" -ForegroundColor DarkGray
+Write-Host "说明：单 exe；运行时解压到 %LOCALAPPDATA%\Temp\_MEIxxxx，正常退出自动清理。" -ForegroundColor DarkGray
 Write-Host "提醒：未签名单文件更容易被 SmartScreen/杀软拦截，正式分发建议代码签名。" -ForegroundColor Yellow
