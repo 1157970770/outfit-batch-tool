@@ -8,6 +8,7 @@
 >
 > **新分支完整使用手册：[docs/usage-aliyun-wan3.md](docs/usage-aliyun-wan3.md)**（桌面/运维/CLI/排错/回滚）。
 > **旧 RH 版与新官方版隔离：[docs/version-isolation.md](docs/version-isolation.md)**（旧版 exe/缓存/zip 不动，可共存）。
+> **项目交接手册：[docs/handover.md](docs/handover.md)**（资产与凭证位置、运维 Runbook、现状证据、待办、签字清单）。
 
 ## 桌面软件（最终形态，v0.9 → v1.0）
 
@@ -146,6 +147,7 @@ python3 scripts/archive_to_cos.py --root out
 
 | 文件 | 说明 |
 | --- | --- |
+| [docs/handover.md](docs/handover.md) | **项目交接手册：接手第一天做什么、资产/凭证、运维、现状、待办** |
 | [batch/README.md](batch/README.md) | **生产流程、参数取舍、素材怎么给、成本工期** |
 | [docs/usage-aliyun-wan3.md](docs/usage-aliyun-wan3.md) | **分支使用手册：配置/桌面/CLI/存储/排错/回滚** |
 | [docs/version-isolation.md](docs/version-isolation.md) | **旧 RH 版 / 新官方版隔离：分支、exe、缓存、构建产物** |
