@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { user: null, service: {}, prompts: [], templates: [], upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, showAll: false };
+  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, showAll: false, submitting: false };
   const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断' };
   const esc = (s) => String(s ?? '');
   async function api(path, options = {}) {
@@ -25,10 +25,13 @@
 
   async function bootstrap() {
     const data = await api('/api/bootstrap'); state.user = data.user; state.service = data.service; state.prompts = data.prompts || []; showApp();
-    $('service-status').textContent = data.service.templates_error ? '视频场景暂不可用' : `${data.service.templates_count} 个视频场景已就绪`;
+    const ready = Number(data.service.source_ready_templates || 0);
+    $('service-status').textContent = data.service.templates_error ? '视频场景暂不可用'
+      : `${data.service.templates_count} 个${data.service.tag_filter_enabled ? '已标注视频场景' : '视频场景'}已就绪${data.service.templates_count ? `（${ready} 个可生成）` : ''}`;
     $('server-summary').textContent = `${data.service.provider || 'Wan3'} · 本机服务`;
     if (data.service.notice) { $('notice').textContent = data.service.notice; $('notice').classList.remove('hidden'); }
     if (data.service.templates_error) { $('notice').textContent = '视频场景暂时无法加载，请联系管理员。'; $('notice').classList.remove('hidden'); }
+    else if (data.service.templates_count && !ready) { $('notice').textContent = `${data.service.templates_count} 个场景已标注标签，但都还没上传到云端模板库：现在可以按标签筛选和预览，生成功能要等上传完成。`; $('notice').classList.remove('hidden'); }
     $('count-select').querySelectorAll('option').forEach(o => { if (Number(o.value) > data.service.max_items) o.disabled = true; });
     const promptSelect = $('prompt-select'); promptSelect.replaceChildren();
     for (const p of state.prompts) { const o = document.createElement('option'); o.value = p.id; o.textContent = p.title; o.dataset.body = p.body || ''; promptSelect.append(o); }
@@ -38,10 +41,98 @@
     clearInterval(state.timer); state.timer = setInterval(() => { if (!document.hidden) refreshJobs(); }, 3500);
   }
   async function loadTemplates() {
-    try { const data = await api('/api/templates'); state.templates = data.items || []; const select = $('template-select'); select.replaceChildren();
-      state.templates.forEach(t => { const o = document.createElement('option'); o.value = t.id; o.textContent = `${t.name}（场景 ${t.id}）`; select.append(o); });
+    try {
+      const data = await api('/api/templates');
+      state.templates = data.items || [];
+      state.tagCategories = data.categories || [];
+      state.tagValues = data.tag_values || {};
+      renderTagFilters();
+      refreshFilteredTemplates();
     } catch (err) { $('notice').textContent = err.message; $('notice').classList.remove('hidden'); }
   }
+
+  function collectTagFilters() {
+    const filters = {};
+    document.querySelectorAll('.tag-filter-input:checked').forEach(input => {
+      const category = input.dataset.category;
+      (filters[category] ||= []).push(input.value);
+    });
+    return filters;
+  }
+
+  function matchesTagFilters(template, filters) {
+    return Object.entries(filters).every(([category, selected]) =>
+      selected.some(tag => (template.tags || []).includes(tag) && (template.tag_categories || {})[tag] === category)
+    );
+  }
+
+  function renderTagFilters() {
+    const card = $('tag-filter-card');
+    const root = $('tag-filter-groups');
+    root.replaceChildren();
+    const categories = state.tagCategories.length ? state.tagCategories : Object.keys(state.tagValues);
+    const hasAny = categories.some(category => (state.tagValues[category] || []).length);
+    card.classList.toggle('hidden', !hasAny);
+    if (!hasAny) return;
+    for (const category of categories) {
+      const tags = state.tagValues[category] || [];
+      if (!tags.length) continue;
+      const group = document.createElement('fieldset');
+      group.className = 'tag-filter-group';
+      const legend = document.createElement('legend');
+      legend.textContent = category;
+      group.append(legend);
+      const options = document.createElement('div');
+      options.className = 'tag-filter-options';
+      for (const tag of tags) {
+        const label = document.createElement('label');
+        label.className = 'tag-filter-option';
+        const input = document.createElement('input');
+        input.type = 'checkbox'; input.className = 'tag-filter-input';
+        input.dataset.category = category; input.value = tag;
+        input.addEventListener('change', refreshFilteredTemplates);
+        const text = document.createElement('span'); text.textContent = tag;
+        label.append(input, text); options.append(label);
+      }
+      group.append(options); root.append(group);
+    }
+  }
+
+  function refreshFilteredTemplates() {
+    state.tagFilters = collectTagFilters();
+    state.filteredTemplates = state.templates.filter(template => matchesTagFilters(template, state.tagFilters));
+    const select = $('template-select');
+    const previous = select.value;
+    select.replaceChildren();
+    state.filteredTemplates.forEach(template => {
+      const option = document.createElement('option');
+      option.value = template.id;
+      option.textContent = `${template.name}（${template.id}）`;
+      select.append(option);
+    });
+    if (state.filteredTemplates.some(template => String(template.id) === previous)) select.value = previous;
+    else if (select.options.length) select.selectedIndex = 0;
+    const count = state.filteredTemplates.length;
+    const readyCount = state.filteredTemplates.filter(template => template.ready).length;
+    const filterActive = Object.keys(state.tagFilters).length > 0;
+    $('tag-filter-summary').textContent = filterActive
+      ? `匹配 ${count} / ${state.templates.length} 个场景${count && !readyCount ? '（均未上传云端）' : ''}`
+      : `${state.templates.length} 个可用场景${state.templates.length && !readyCount ? '（均未上传云端）' : ''}`;
+    const cap = Math.min(Number(state.service.max_items || 20), count);
+    const countSelect = $('count-select');
+    [...countSelect.options].forEach(option => { option.disabled = Number(option.value) > cap; });
+    if (count > 0 && Number(countSelect.value) > cap) {
+      const fallback = [...countSelect.options].find(option => !option.disabled);
+      if (fallback) countSelect.value = fallback.value;
+    }
+    updateTemplatePreview();
+    updateSummary();
+  }
+
+  $('clear-tag-filter').addEventListener('click', () => {
+    document.querySelectorAll('.tag-filter-input').forEach(input => { input.checked = false; });
+    refreshFilteredTemplates();
+  });
 
   document.querySelectorAll('input[name="selection"]').forEach(r => r.addEventListener('change', () => {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
@@ -60,13 +151,20 @@
     video.src = `/api/templates/${encodeURIComponent($('template-select').value)}/preview`;
     video.classList.remove('hidden');
   }
-  function selectedCount() { return document.querySelector('input[name="selection"]:checked').value === 'selected' ? 1 : Number($('count-select').value); }
+  function selectedCount() {
+    return document.querySelector('input[name="selection"]:checked').value === 'selected'
+      ? ($('template-select').value ? 1 : 0) : Number($('count-select').value);
+  }
   function updateSummary() {
     const count = selectedCount(); const prompt = state.prompts.find(p => p.id === $('prompt-select').value);
     const selectedPreset = $('prompt-select').selectedOptions[0];
     const edited = selectedPreset && $('prompt-body').value.trim() !== (selectedPreset.dataset.body || '').trim();
-    $('summary-title').textContent = `准备生成 ${count} 条视频`;
-    $('summary-detail').textContent = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${edited ? ' · 已微调提示词' : ''}`;
+    const available = state.filteredTemplates.length;
+    const readyAvailable = state.filteredTemplates.filter(template => template.ready).length;
+    $('summary-title').textContent = available ? `准备生成 ${count} 条视频` : '当前标签筛选没有匹配的视频';
+    const setting = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${edited ? ' · 已微调提示词' : ''}`;
+    $('summary-detail').textContent = `${setting} · 筛选后 ${available} 个场景${available && !readyAvailable ? ' · 尚未上传云端，暂不能生成' : ''}`;
+    $('submit-btn').disabled = state.submitting || !available || !readyAvailable || !count || count > available;
   }
 
   const fileInput = $('image-file');
@@ -87,21 +185,24 @@
     const file = fileInput.files[0]; if (!file) return showCreateError('请先上传服装图片。');
     const selection = document.querySelector('input[name="selection"]:checked').value; const count = selectedCount();
     const promptBody = $('prompt-body').value.trim();
+    if (!state.filteredTemplates.length) return showCreateError('当前标签筛选没有匹配的视频场景，请清除或调整筛选条件。');
+    if (!count || count > state.filteredTemplates.length) return showCreateError(`当前筛选只有 ${state.filteredTemplates.length} 个视频场景，请减少生成数量。`);
     if (!promptBody) return showCreateError('提示词不能为空，请选择模板或填写内容。');
     if (promptBody.length > 4000) return showCreateError('提示词最多 4000 个字符。');
-    if (!confirm(`将提交 ${count} 条生成任务，可能产生云端费用。已提交的任务不能撤回。是否继续？`)) return;
-    const btn = $('submit-btn'); btn.disabled = true; btn.textContent = '正在上传…'; showCreateError('');
+    if (!confirm(`将提交 ${count} 条生成任务，标签筛选后有 ${state.filteredTemplates.length} 个候选视频，可能产生云端费用。已提交的任务不能撤回。是否继续？`)) return;
+    const btn = $('submit-btn'); state.submitting = true; btn.disabled = true; btn.textContent = '正在上传…'; showCreateError('');
     try {
       const dataUrl = await readFile(file);
       const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: dataUrl }) });
       btn.textContent = '正在提交…';
       const body = { upload_id: uploaded.upload_id, selection, count, template_id: $('template-select').value,
-        prompt_id: $('prompt-select').value, prompt: promptBody, resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true };
+        tag_filters: state.tagFilters, prompt_id: $('prompt-select').value, prompt: promptBody,
+        resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true };
       const result = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
       toast('任务已提交，正在排队。'); fileInput.value = ''; state.upload = null; $('image-preview').classList.add('hidden'); $('drop-copy').classList.remove('hidden'); $('image-info').textContent = '';
       switchView('history-view'); await refreshJobs(result.job.id);
     } catch (err) { showCreateError(err.message); }
-    finally { btn.disabled = false; btn.textContent = '确认提交'; }
+    finally { state.submitting = false; btn.textContent = '确认提交'; updateSummary(); }
   });
   function readFile(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('无法读取图片')); reader.readAsDataURL(file); }); }
   function showCreateError(text) { const el = $('create-error'); el.textContent = text; el.classList.toggle('hidden', !text); }

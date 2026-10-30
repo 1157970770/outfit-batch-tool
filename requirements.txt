@@ -7,3 +7,6 @@ Pillow>=9.0
 # 可选增强：完整 COS 能力（list/delete/分片/自检脚本）。
 # 主流程在缺包时会自动用 app/cos_rest.py 的标准库 REST 兜底。
 cos-python-sdk-v5>=1.9.30
+
+# 网页生产：读取「标签清单1版.xlsx」（视频标签筛选）
+openpyxl>=3.1

@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/tag-filter.css">
   <script defer src="/static/app.js"></script>
 </head>
 <body>
@@ -58,6 +59,12 @@
 
           <article class="card settings-card">
             <div class="step-title"><span class="step">2</span><div><h2>选择生成方式</h2><p>普通试做建议先生成 1 条</p></div></div>
+            <fieldset id="tag-filter-card" class="choice-group tag-filter-card hidden">
+              <legend>按标签筛选视频（可选）</legend>
+              <p class="filter-hint">同一类别内满足任一标签，不同类别之间同时满足；未列入标签清单的视频不会进入候选集。</p>
+              <div id="tag-filter-groups" class="tag-filter-groups"></div>
+              <div class="tag-filter-footer"><button id="clear-tag-filter" class="quiet" type="button">清除筛选</button><span id="tag-filter-summary" class="muted"></span></div>
+            </fieldset>
             <fieldset class="choice-group">
               <legend>视频场景</legend>
               <label class="radio-card"><input type="radio" name="selection" value="random" checked><span><b>自动推荐</b><small>系统随机挑选，适合快速试做</small></span></label>

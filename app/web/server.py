@@ -73,6 +73,7 @@ class WebApplication:
         self.settings = settings
         self.prompts = _load_prompts()
         self.catalog = TemplateCatalog(settings.templates)
+        self.catalog.tag_workbook_info = settings.tag_workbook_info or {}
         self.signer = SessionSigner(settings.web["session_secret"], settings.web.get("session_hours", 12))
         self.limiter = LoginLimiter()
         self.jobs = JobManager(settings, {key: value["body"] for key, value in self.prompts.items()})
@@ -102,11 +103,26 @@ class WebApplication:
     def reload_templates(self) -> None:
         from app.core import load_manifest
         manifest = str(self.settings.config.get("MANIFEST") or "")
-        if not manifest:
-            raise RuntimeError("服务端没有配置模板清单")
-        items = load_manifest(manifest)
-        self.catalog = TemplateCatalog(items)
-        self.settings.templates = items
+        items: list[dict] = []
+        warning = ""
+        if manifest:
+            try:
+                items = load_manifest(manifest)
+            except Exception as exc:
+                warning = f"云端模板索引不可用（{exc}），本次仅按本地生产清单筛选"
+        catalog = TemplateCatalog(items)
+        tag_info = {}
+        workbook = self.settings.tag_workbook_path
+        if workbook is not None and Path(workbook).is_file():
+            tag_info = catalog.attach_tag_workbook(workbook)
+            if warning:
+                tag_info["manifest_warning"] = warning
+        elif not items:
+            raise RuntimeError("既没有可用的标签清单，也没有云端模板索引")
+        self.catalog = catalog
+        self.catalog.tag_workbook_info = tag_info
+        self.settings.templates = catalog.items
+        self.settings.tag_workbook_info = tag_info
         self.settings.templates_error = ""
 
 
@@ -248,6 +264,11 @@ def make_handler(app: WebApplication):
                                                "templates_count": len(app.catalog.items),
                                                "templates_error": app.settings.templates_error,
                                                "max_items": app.settings.max_items,
+                                                "tag_filter_enabled": any(app.catalog.tag_values.values()),
+                                                "tagged_templates_count": len(app.catalog.items) if app.catalog.tag_workbook_info else 0,
+                                                "source_ready_templates": int((app.catalog.tag_workbook_info or {}).get("source_ready_templates", 0)),
+                                                "unlisted_files": (app.catalog.tag_workbook_info or {}).get("unlisted_files"),
+                                                "manifest_warning": (app.catalog.tag_workbook_info or {}).get("manifest_warning", ""),
                                                "notice": cfg.get("NOTICE") or ""},
                                    "prompts": [{"id": k, "title": v["title"], "body": v["body"]} for k, v in app.prompts.items()]})
             if path == "/api/templates":
@@ -255,7 +276,10 @@ def make_handler(app: WebApplication):
                     return
                 if app.settings.templates_error:
                     return self._error("视频场景暂不可用，请联系管理员。", 503)
-                return self._json({"ok": True, "items": app.catalog.public()})
+                return self._json({"ok": True, "items": app.catalog.public(),
+                                   "categories": app.catalog.tag_categories,
+                                   "tag_values": app.catalog.tag_values,
+                                   "tag_filter_enabled": any(app.catalog.tag_values.values())})
             if path.startswith("/api/templates/") and path.endswith("/preview"):
                 if not self._user():
                     return
@@ -446,7 +470,13 @@ def make_handler(app: WebApplication):
             try:
                 mode = str(data.get("selection") or "random")
                 count = int(data.get("count") or 1)
-                templates = app.catalog.choose(mode, count, str(data.get("template_id") or ""), app.settings.max_items)
+                templates = app.catalog.choose(mode, count, str(data.get("template_id") or ""),
+                                               app.settings.max_items, data.get("tag_filters"))
+                pending = [str(t.get("id")) for t in templates if not (t.get("url") or t.get("key"))]
+                if pending:
+                    raise TemplateError(
+                        f"所选视频尚未上传到云端模板库（例如 {pending[0]}），当前只支持标签筛选与预览；"
+                        "完成批量上传后即可生成。")
                 prompt_id = str(data.get("prompt_id") or next(iter(app.prompts)))
                 if count > int(app.settings.web.get("confirm_over_items", 5)) and not data.get("confirmed"):
                     return self._error("批量数量较多，请确认后再提交。", 409)
@@ -589,6 +619,8 @@ def make_handler(app: WebApplication):
             try:
                 item = app.catalog.preview(template_id)
                 url = str(item.get("url") or "")
+                if not url and not item.get("key"):
+                    return self._error("该视频尚未上传到云端，暂无预览。", 404)
                 if not url and item.get("key"):
                     store = app.template_store()
                     if store is None:

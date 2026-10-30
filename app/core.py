@@ -89,7 +89,13 @@ def load_manifest(source: str, timeout: int = 15) -> list[dict]:
         key = (item.get("key") or "").strip().lstrip("/")
         if not url and not key:
             raise EngineError(f"模板 {tid} 缺少 url（公有桶）或 key（私有桶）")
-        out.append({"id": tid, "url": url, "key": key, "duration": item.get("duration")})
+        entry = {"id": tid, "url": url, "key": key, "duration": item.get("duration")}
+        # 保留可用于"和本地标签清单对齐"的鉴别信息；仅在有值时写入，保持旧行为不变。
+        for field in ("name", "shot", "size_mb", "relative_path", "filename", "fingerprint"):
+            value = item.get(field)
+            if value not in (None, ""):
+                entry[field] = value
+        out.append(entry)
     return out
 
 
