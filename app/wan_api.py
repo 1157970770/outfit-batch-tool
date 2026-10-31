@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import threading
@@ -701,6 +702,8 @@ class DashScopeProvider:
         self.limiter = limiter
 
     def submit(self, body: dict) -> SubmitResult:
+        # 提交与查询同桶：50 条提交约 12 秒，不会把查询预算挤掉。
+        self.limiter.acquire()
         url = _join(self.cfg.base_url, SUBMIT_SUFFIX)
         data = _request_json(
             "POST", url, self.cfg.api_key, body,
@@ -752,6 +755,7 @@ class RunningHubProvider:
         self.limiter = limiter
 
     def submit(self, body: dict) -> SubmitResult:
+        self.limiter.acquire()
         url = _join(self.cfg.base_url, RH_SUBMIT_PATH)
         data = _request_json("POST", url, self.cfg.api_key, body, timeout=90)
         task_id = str(data.get("taskId") or "").strip()
@@ -788,14 +792,42 @@ class RunningHubProvider:
 
 
 # ---------------------------------------------------------------------------
-# 限流
+# 限流与在飞额度（进程级单例）
 # ---------------------------------------------------------------------------
+# 三层解耦，三者都必须**进程级**：
+#   线程数     BatchSpec.concurrency        只是工作线程，不构成 API 压力
+#   在飞任务   global_inflight() 信号量     真正同时在跑的云端任务数（submit → wait 全程）
+#   请求速率   global_limiter() 令牌桶      提交与查询共用一个桶
+# 旧实现每个 BatchRunner 各持一个限流器/信号量，两个 job 并行时速率与在飞数直接翻倍
+# （10 QPS × 2 = 1200 RPM，超出官方 300 RPM 三倍），所以必须收成单例。
+
+DEFAULT_QUERY_RPM = 250.0        # 官方 RPM 300 的 83%
+DEFAULT_MAX_INFLIGHT = 50        # 同时运行的云端任务上限（跨 job）
+SUBMIT_MAX_CONCURRENCY = 50      # 单 job 线程上限，配置写更大也不再放大
+
+
+def _env_number(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
 
 class _RateLimiter:
-    """最小间隔令牌桶；查询接口官方 RPS 20，默认只用到 10。"""
+    """最小间隔令牌桶（进程内单例）；查询与提交同桶，超出即阻塞（自然拉长轮询）。
 
-    def __init__(self, qps: float):
-        self.interval = 1.0 / max(1.0, float(qps))
+    参数二选一：rpm（每分钟请求数，新口径）或 qps（每秒，旧口径，兼容既有调用）。
+    """
+
+    def __init__(self, qps: float = 0.0, *, rpm: float | None = None):
+        if rpm:
+            self.interval = 60.0 / max(1.0, float(rpm))
+        else:
+            self.interval = 1.0 / max(1.0, float(qps or 10.0))
         self._next = 0.0
         self._lock = threading.Lock()
 
@@ -807,18 +839,71 @@ class _RateLimiter:
         if wait > 0:
             time.sleep(wait)
 
+    def penalize(self, seconds: float = 5.0) -> None:
+        """命中官方限流时把**全局**下一次允许时间推后，避免继续戳 429。"""
+        with self._lock:
+            now = time.monotonic()
+            self._next = max(self._next, now) + max(0.0, float(seconds))
+
+
+_GLOBAL_LOCK = threading.Lock()
+_GLOBAL_LIMITER: _RateLimiter | None = None
+_GLOBAL_INFLIGHT: threading.Semaphore | None = None
+_GLOBAL_RPM: float = _env_number("WAN_QUERY_RPM", DEFAULT_QUERY_RPM)
+_GLOBAL_INFLIGHT_MAX: int = int(_env_number("WAN_MAX_INFLIGHT", DEFAULT_MAX_INFLIGHT))
+
+
+def configure_globals(*, query_rpm: float | None = None,
+                      max_inflight: int | None = None) -> None:
+    """按配置初始化进程级单例；只在启动时调用一次，运行中不重建。"""
+    global _GLOBAL_RPM, _GLOBAL_INFLIGHT_MAX, _GLOBAL_LIMITER, _GLOBAL_INFLIGHT
+    with _GLOBAL_LOCK:
+        if query_rpm and float(query_rpm) > 0:
+            _GLOBAL_RPM = float(query_rpm)
+            _GLOBAL_LIMITER = _RateLimiter(rpm=_GLOBAL_RPM)
+        if max_inflight and int(max_inflight) > 0:
+            _GLOBAL_INFLIGHT_MAX = int(max_inflight)
+            _GLOBAL_INFLIGHT = threading.Semaphore(_GLOBAL_INFLIGHT_MAX)
+
+
+def global_limiter() -> _RateLimiter:
+    """全进程共用的请求速率桶（提交与查询同桶）。"""
+    global _GLOBAL_LIMITER
+    with _GLOBAL_LOCK:
+        if _GLOBAL_LIMITER is None:
+            _GLOBAL_LIMITER = _RateLimiter(rpm=_GLOBAL_RPM)
+        return _GLOBAL_LIMITER
+
+
+def global_inflight() -> threading.Semaphore:
+    """全进程共用的在飞任务额度（跨 job 分配，例如两个 job 各分 25）。"""
+    global _GLOBAL_INFLIGHT
+    with _GLOBAL_LOCK:
+        if _GLOBAL_INFLIGHT is None:
+            _GLOBAL_INFLIGHT = threading.Semaphore(_GLOBAL_INFLIGHT_MAX)
+        return _GLOBAL_INFLIGHT
+
+
+def global_limits() -> dict:
+    """当前进程级上限，供 /api/admin/status 与排障查看。"""
+    with _GLOBAL_LOCK:
+        return {"query_rpm": _GLOBAL_RPM, "max_inflight": _GLOBAL_INFLIGHT_MAX}
+
+
 
 # ---------------------------------------------------------------------------
 # 客户端
 # ---------------------------------------------------------------------------
 
 class WanClient:
-    """一次批次复用一个实例；线程安全（provider 无共享可变状态，限流器有锁）。"""
+    """一次批次复用一个实例；线程安全（provider 无共享可变状态，限流器是进程单例）。"""
 
     def __init__(self, cfg: WanConfig):
         cfg.validate()
         self.cfg = cfg
-        self.limiter = _RateLimiter(cfg.query_qps)
+        # 进程级单例：多个 job 并行时共用同一个速率桶与在飞额度，不会把 250 RPM 变成 N×。
+        self.limiter = global_limiter()
+        self.inflight = global_inflight()
         self.provider = (
             DashScopeProvider(cfg, self.limiter)
             if cfg.provider == PROVIDER_DASHSCOPE
@@ -854,6 +939,10 @@ class WanClient:
                 return self.provider.submit(wire_body)
             except WanError as exc:
                 last = exc
+                if exc.category == "throttle":
+                    # 命中官方限流：把全局下一次允许时间推后 5 秒（不打印原始报文，避免泄露鉴权信息）。
+                    self.limiter.penalize(5.0)
+                    print("[限流] 提交被官方限流，全局暂停 5 秒")
                 # 只对明确的限流重试；其他错误（含 5xx）不重试，避免重复建任务
                 if exc.category != "throttle" or index == attempts - 1:
                     raise
@@ -879,6 +968,8 @@ class WanClient:
                 result = self.get_task(task_id)
             except WanError as exc:
                 if exc.category in ("network", "server", "throttle"):
+                    if exc.category == "throttle":
+                        self.limiter.penalize(5.0)
                     network_failures += 1
                     if network_failures >= 5:
                         # 保留 task_id 交给上层记为 running，不要误判为失败

@@ -193,7 +193,9 @@ class BatchSpec:
     source_prefix: str = ""
     source_expires: int = 7 * 24 * 3600
     price_per_second: dict = field(default_factory=dict)
-    # 网页多批次共享全局提交并发上限；桌面默认 None，不改变原行为。
+    # 网页多批次共享全局在飞额度（submit → wait 全程占用）；桌面默认 None，不改变原行为。
+    inflight_semaphore: threading.Semaphore | None = None
+    # 兼容旧调用：只钳提交阶段。新代码请用 inflight_semaphore。
     submit_semaphore: threading.Semaphore | None = None
 
 
@@ -412,37 +414,24 @@ class BatchRunner:
             return rec
 
         started = time.time()
+        # 全局在飞额度：submit → wait 全程占位，保证跨 job 的「同时运行任务数」有上限。
+        # 只有线程池在开会话的话，100 个线程就会同时压 100 条云端任务。
+        gate = spec.inflight_semaphore or spec.submit_semaphore
         try:
             # 桌面链路里 image/video 通常已是 URL；这里兜底处理本地路径
             body = resolve_body(body, self._uploader, cache=self._media_cache)
             wire = self._client.wire_body(body)
-            if spec.submit_semaphore is not None:
-                with spec.submit_semaphore:
-                    if self.stop_event.is_set():
-                        rec["status"] = "skipped"
-                        return rec
-                    resp = self._client.submit(wire)
+            if gate is not None:
+                with gate:
+                    final = self._submit_and_wait(wire, rec)
             else:
-                resp = self._client.submit(wire)
-            rec["task_id"] = resp.task_id
-            rec["request_id"] = resp.request_id
-            rec["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            rec["task_expires_at"] = int(time.time()) + 24 * 3600
-            rec["status"] = "running"
-            with self.state.lock:
-                self.state.records[tid] = dict(rec)
-            self._save_state()
-            self.log(f"[{tid}] 已提交 taskId={resp.task_id} status={resp.status}")
-            self._emit("update", record=dict(rec))
-
-            final = self._client.wait_task(
-                resp.task_id, timeout=spec.poll_timeout, interval=spec.poll_interval,
-                on_status=lambda status: self.log(f"[{tid}] {status}"),
-            )
+                final = self._submit_and_wait(wire, rec)
+            if final is None:      # 提交前已被停止
+                return rec
             if final.status == STATUS_UNKNOWN:
-                raise TaskExpired(resp.task_id)
+                raise TaskExpired(final.task_id)
             if final.status == STATUS_CANCELED:
-                raise TaskCanceled(resp.task_id)
+                raise TaskCanceled(final.task_id)
             if final.status == STATUS_FAILED:
                 raise EngineError(
                     f"任务失败 [{final.code or 'UNKNOWN'}] {final.message or '无错误信息'}"
@@ -490,6 +479,32 @@ class BatchRunner:
             self.state.records[tid] = rec
         self._save_state()
         return rec
+
+    def _submit_and_wait(self, wire: dict, rec: dict):
+        """提交并等待单条任务；调用方负责在飞额度（进入前已占位）。
+
+        返回终态 TaskResult；提交前就被停止则返回 None（rec 已标 skipped）。
+        """
+        spec = self.spec
+        tid = rec["id"]
+        if self.stop_event.is_set():
+            rec["status"] = "skipped"
+            return None
+        resp = self._client.submit(wire)
+        rec["task_id"] = resp.task_id
+        rec["request_id"] = resp.request_id
+        rec["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        rec["task_expires_at"] = int(time.time()) + 24 * 3600
+        rec["status"] = "running"
+        with self.state.lock:
+            self.state.records[tid] = dict(rec)
+        self._save_state()
+        self.log(f"[{tid}] 已提交 taskId={resp.task_id} status={resp.status}")
+        self._emit("update", record=dict(rec))
+        return self._client.wait_task(
+            resp.task_id, timeout=spec.poll_timeout, interval=spec.poll_interval,
+            on_status=lambda status: self.log(f"[{tid}] {status}"),
+        )
 
     def _archive(self, rec: dict, path: Path) -> None:
         """把刚下载的成品推进对象存储。
