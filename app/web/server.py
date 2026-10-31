@@ -58,8 +58,13 @@ def _local_hosts() -> set[str]:
 
 
 def _load_prompts() -> dict[str, dict]:
-    from app.core import DEFAULT_PROMPT
-    prompts = {"standard": {"title": "标准换装", "body": DEFAULT_PROMPT}}
+    """网页可用的提示词模板：只取提示词库里沉淀好的那几份。
+
+    不再内置「标准换装」兜底项（2026-10-31 按要求下线）：它和库里的
+    「换装无字幕」内容重叠，却因为排在最前被默认选中，容易误用。
+    库读不到时返回空字典，由调用方提示「提示词库未加载」，不再塞占位文案。
+    """
+    prompts: dict[str, dict] = {}
     try:
         lib = PromptLibrary.load()
         # 服装定妆用于图片定妆，不是视频生成提示词，网页生产页不展示。
@@ -609,7 +614,9 @@ def make_handler(app: WebApplication):
                     raise TemplateError(
                         f"所选视频尚未上传到云端模板库（例如 {pending[0]}），当前只支持标签筛选与预览；"
                         "完成批量上传后即可生成。")
-                prompt_id = str(data.get("prompt_id") or next(iter(app.prompts)))
+                prompt_id = str(data.get("prompt_id") or (next(iter(app.prompts)) if app.prompts else ""))
+                if not prompt_id:
+                    return self._error("提示词库没有可用模板，请联系管理员检查 prompts/prompt-library.json。", 503)
                 if count > int(app.settings.web.get("confirm_over_items", 5)) and not data.get("confirmed"):
                     return self._error("批量数量较多，请确认后再提交。", 409)
                 job = app.jobs.create(user["username"], Path(meta["path"]), meta["name"], templates,
