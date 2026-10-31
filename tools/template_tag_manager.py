@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """本机视频打标工具：只读本地文件、管理自由标签并导出 XLSX，不联网。"""
 from __future__ import annotations
@@ -24,7 +24,8 @@ sys.path.insert(0, str(ROOT))
 from tools.template_catalog import (  # noqa: E402
     CatalogError, TAG_CATEGORIES, add_library_tag, add_tag, infer_tag_category,
     load_state, load_tag_categories, load_tag_library, new_project,
-    normalize_tag_categories, save_state, save_tag_library, scan_folder,
+    normalize_tag_categories, next_movie_number, pending_renames, rename_tagged_videos,
+    save_state, save_tag_library, scan_folder,
     save_xlsx, load_xlsx, set_video_tags,
 )
 
@@ -487,17 +488,26 @@ class TagManager(QMainWindow):
         if not selected:
             return
         try:
+            appending = bool(self.project and self.project.get("videos"))
             if self.project:
                 self.project = self._merge_library_into(self.project)
                 self.project = self._scan_folder(selected, self.project)
             else:
                 self.project = self._scan_folder(selected, None)
                 self.project = self._merge_library_into(self.project)
-            self.xlsx_path = None
+            if not appending:
+                self.xlsx_path = None
             self._confirm_changed_files()
             self._refresh()
             self._select_first()
-            self.status.setText(f"扫描完成：{len([v for v in self.project['videos'] if not v.get('missing')])} 个视频。请逐条添加标签，然后保存 Excel。")
+            total = len([v for v in self.project["videos"] if not v.get("missing")])
+            added = int(self.project.get("appended") or 0)
+            if appending and added:
+                self.status.setText(
+                    f"已把 {added} 个视频追加到现有清单末尾（共 {total} 条）。"
+                    f"打标后点保存，视频会自动按顺延编号改名。")
+            else:
+                self.status.setText(f"扫描完成：{total} 个视频。请逐条添加标签，然后保存 Excel。")
             self._set_enabled(True)
             self.save_working_state()
         except Exception as exc:
@@ -709,6 +719,10 @@ class TagManager(QMainWindow):
             return "文件已变化"
         return "已打标" if row_data.get("tags") else "未打标"
 
+    def _video_path(self, video: dict) -> Path:
+        base = Path(str(video.get("source_dir") or (self.project or {}).get("source_root") or ""))
+        return base / str(video.get("relative_path") or video.get("name") or "")
+
     def _refresh(self):
         checked = set(self._checked_paths())
         self.table.blockSignals(True)
@@ -719,7 +733,7 @@ class TagManager(QMainWindow):
             for row_data in self.project.get("videos", []):
                 row = self.table.rowCount()
                 self.table.insertRow(row)
-                relative = row_data.get("relative_path")
+                relative = str(row_data.get("id", ""))
                 values = [row_data.get("id", ""), row_data.get("name", ""),
                           f"{row_data['duration']:.1f}s" if row_data.get("duration") is not None else "未知",
                           f"{row_data.get('size_mb', 0):.1f} MB", "；".join(row_data.get("tags", [])),
@@ -827,7 +841,7 @@ class TagManager(QMainWindow):
             self.project.setdefault("tag_categories", {})[tag] = self.tag_categories.get(tag, infer_tag_category(tag))
         changed = {}
         for relative in paths:
-            video = next((v for v in self.project.get("videos", []) if v.get("relative_path") == relative), None)
+            video = next((v for v in self.project.get("videos", []) if str(v.get("id", "")) == relative), None)
             if not video:
                 continue
             current = set(video.get("tags", []))
@@ -908,7 +922,7 @@ class TagManager(QMainWindow):
         row = self.table.currentRow()
         item = self.table.item(row, 0) if row >= 0 else None
         path = item.data(Qt.ItemDataRole.UserRole) if item else None
-        return next((v for v in self.project["videos"] if v.get("relative_path") == path), None)
+        return next((v for v in self.project["videos"] if str(v.get("id", "")) == path), None)
 
     def select_previous_video(self):
         if not self.project or not self.table.rowCount():
@@ -940,7 +954,7 @@ class TagManager(QMainWindow):
             self.preview_status.setText("选择一条存在的视频开始预览")
             self._refresh_tag_checkboxes()
             return
-        full = Path(self.project["source_root"]) / video["relative_path"]
+        full = self._video_path(video)
         self.player.setSource(QUrl.fromLocalFile(str(full)))
         self.player.play()
         self.preview_status.setText(f"正在加载预览：{full.name}")
@@ -1054,7 +1068,7 @@ class TagManager(QMainWindow):
         changed = {}
         proposed = {}
         for relative in paths:
-            video = next((v for v in self.project["videos"] if v.get("relative_path") == relative), None)
+            video = next((v for v in self.project["videos"] if str(v.get("id", "")) == relative), None)
             if not video:
                 continue
             current = set(video.get("tags", []))
@@ -1064,7 +1078,7 @@ class TagManager(QMainWindow):
                 current.discard(tag)
             proposed[relative] = list(current)
         for relative, labels in proposed.items():
-            video = next(v for v in self.project["videos"] if v.get("relative_path") == relative)
+            video = next(v for v in self.project["videos"] if str(v.get("id", "")) == relative)
             set_video_tags(self.project, relative, labels)
             changed[relative] = video
         for row in range(self.table.rowCount()):
@@ -1180,7 +1194,7 @@ class TagManager(QMainWindow):
         answer = QMessageBox.question(self, "移除视频", f"从当前标签清单移除 {len(paths)} 条视频？\n不会删除本机原视频文件。")
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.project["videos"] = [row for row in self.project["videos"] if row.get("relative_path") not in paths]
+        self.project["videos"] = [row for row in self.project["videos"] if str(row.get("id", "")) not in paths]
         self._refresh()
         self.save_working_state()
         self.status.setText(f"已从清单移除 {len(paths)} 条；本机视频文件不会被删除。")
@@ -1205,11 +1219,48 @@ class TagManager(QMainWindow):
 
     def _save_to(self, path: Path):
         try:
+            note = self._rename_before_save()
             save_xlsx(self.project, path)
             self.save_working_state()
-            self.status.setText(f"已保存标签清单：{path}。这份 Excel 可独立保存、查看或交接。")
+            extra = f"（本次改名 {note}）" if note else ""
+            self.status.setText(f"已保存标签清单：{path}{extra}。这份 Excel 可独立保存、查看或交接。")
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
+
+    def _rename_before_save(self):
+        """保存前把当前文件夹里「已打标、未上传、还是原名」的视频按顺延编号改名。"""
+        if not self.project:
+            return ""
+        folder = str(self.project.get("source_root") or "")
+        if not folder:
+            return ""
+        candidates = pending_renames(self.project, folder)
+        if not candidates:
+            return ""
+        number = next_movie_number(self.project)
+        proposals = []
+        for row in candidates:
+            suffix = Path(str(row.get("name") or "")).suffix or ".mp4"
+            proposals.append((row, f"{number:04d}{suffix}"))
+            number += 1
+        listing = "\n".join(f"  {row.get('name', '')}  →  {new}" for row, new in proposals[:12])
+        more = f"\n  ……共 {len(proposals)} 个" if len(proposals) > 12 else ""
+        answer = QMessageBox.question(
+            self, "自动改名",
+            f"当前文件夹有 {len(proposals)} 个已打标、未上传的视频，将顺延编号改名：\n\n"
+            f"{listing}{more}\n\n改名会直接改动磁盘上的文件，编号接着现有最大值往后排。现在改吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return ""
+        self.player.stop()
+        self.player.setSource(QUrl())
+        done = rename_tagged_videos(self.project, folder)
+        self._refresh()
+        if not done:
+            return ""
+        return f"{len(done)} 个（{done[0]['old']} → {done[0]['new']}）"
 
 
 def main() -> int:

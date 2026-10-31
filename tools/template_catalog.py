@@ -212,10 +212,20 @@ def scan_folder(root: str | Path, project: dict | None = None, progress=None) ->
     result.setdefault("project_id", uuid.uuid4().hex[:12])
     result.setdefault("tags", [])
     result["tag_categories"] = normalize_tag_categories(result.get("tags", []), result.get("tag_categories", {}))
+    # 多文件夹：扫描新目录时把它的视频追加到现有清单末尾，旧目录的行原样保留。
+    base_root = str(result.get("source_root") or folder)
+    previous: dict[tuple[str, str], dict] = {}
+    for row in result.get("videos", []):
+        row.setdefault("source_dir", base_root)
+        previous[(str(row.get("source_dir")), str(row.get("relative_path")))] = row
     result["source_root"] = str(folder)
-    previous = {str(row.get("relative_path")): dict(row) for row in result.get("videos", [])}
+    result.setdefault("roots", [])
+    if str(folder) not in result["roots"]:
+        result["roots"].append(str(folder))
     found: set[str] = set()
     rows: list[dict] = []
+    appended = 0
+    preexisting = bool(result.get("videos"))
     next_id = _next_id(result)
     paths = sorted((p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXT),
                    key=lambda p: p.relative_to(folder).as_posix().casefold())
@@ -225,7 +235,7 @@ def scan_folder(root: str | Path, project: dict | None = None, progress=None) ->
             progress(index - 1, total_paths, path.name)
         relative = path.relative_to(folder).as_posix()
         found.add(relative)
-        old = previous.get(relative)
+        old = previous.get((str(folder), relative))
         info = _probe_video(path)
         fingerprint = _file_fingerprint(path)
         if old:
@@ -237,9 +247,13 @@ def scan_folder(root: str | Path, project: dict | None = None, progress=None) ->
                 row["previous_fingerprint"] = old_fingerprint
             row["id"] = str(row.get("id") or f"{next_id:03d}")
         else:
-            row = {"id": f"{next_id:03d}", "tags": [], "changed": False}
+            row = {"id": f"{next_id:03d}", "tags": [], "changed": False,
+                   "source_dir": str(folder), "original_name": ""}
+            if preexisting:
+                appended += 1
             next_id += 1
         row.update({
+            "source_dir": str(folder),
             "relative_path": relative,
             "name": path.name,
             "size_bytes": path.stat().st_size,
@@ -253,16 +267,26 @@ def scan_folder(root: str | Path, project: dict | None = None, progress=None) ->
         rows.append(row)
         if progress:
             progress(index, total_paths, path.name)
-    # 保留 XLSX 中但当前文件夹暂缺的行，避免误删人工标签和 ID。
-    for relative, old in previous.items():
-        if relative not in found:
+    # 本次目录里消失的文件标记为缺失；其他目录的行原样保留，避免误删人工标签和 ID。
+    for (row_dir, relative), old in previous.items():
+        if row_dir == str(folder) and relative not in found:
             old["missing"] = True
             old["changed"] = False
             rows.append(old)
-    rows.sort(key=lambda row: (not row.get("missing", False), int(row.get("id", "0")) if str(row.get("id", "")).isdigit() else 0))
+        elif row_dir != str(folder) and old not in rows:
+            rows.append(old)
+    rows.sort(key=_row_sort_key)
     result["videos"] = rows
     result["next_id"] = max(next_id, _next_id(result))
+    result["appended"] = appended
     return result
+
+
+def _row_sort_key(row: dict) -> tuple:
+    """按模板ID数字排序，缺失行排在后面。"""
+    key = str(row.get("id", ""))
+    return (bool(row.get("missing", False)), int(key) if key.isdigit() else 0,
+            str(row.get("source_dir", "")), str(row.get("relative_path", "")))
 
 
 def validate_tag_name(value: str) -> str:
@@ -366,13 +390,25 @@ def save_xlsx(project: dict, destination: str | Path) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = VIDEO_SHEET
-    headers = ["模板ID", "相对路径", "文件名", "时长(秒)", "大小(MB)", "文件指纹", "标签", "状态"]
+    headers = ["模板ID", "相对路径", "文件名", "时长(秒)", "大小(MB)", "文件指纹", "标签", "状态",
+               "来源目录", "原始文件名"]
     ws.append(headers)
     for row in project.get("videos", []):
-        state = "文件不存在" if row.get("missing") else "文件已变化" if row.get("changed") else "待上传"
+        if row.get("missing"):
+            state = "文件不存在"
+        elif row.get("changed"):
+            state = "文件已变化"
+        elif row.get("uploaded"):
+            state = "已上传"
+        elif not row.get("tags"):
+            state = "废弃"  # 标签列为空 = 不上传的废弃素材
+        else:
+            state = "待上传"
         ws.append([str(row.get("id", "")), str(row.get("relative_path", "")), str(row.get("name", "")),
                    row.get("duration"), row.get("size_mb"), row.get("fingerprint", ""),
-                   ";".join(row.get("tags", [])), state])
+                   ";".join(row.get("tags", [])), state,
+                   str(row.get("source_dir") or project.get("source_root") or ""),
+                   str(row.get("original_name") or "")])
     tags_ws = wb.create_sheet(TAGS_SHEET)
     tags_ws.append(["标签值", "分类"])
     categories = normalize_tag_categories(project.get("tags", []), project.get("tag_categories", {}))
@@ -458,9 +494,15 @@ def load_xlsx(source: str | Path) -> dict:
                        "name": str(get("文件名", rel.name)), "duration": get("时长(秒)"),
                        "size_mb": get("大小(MB)", 0), "fingerprint": str(get("文件指纹", "")),
                        "tags": normalize_tags(raw_tags, tags), "missing": get("状态") == "文件不存在",
-                       "changed": get("状态") == "文件已变化"})
+                       "changed": get("状态") == "文件已变化",
+                       "uploaded": get("状态") == "已上传",
+                       "source_dir": str(get("来源目录", "") or ""),
+                       "original_name": str(get("原始文件名", "") or "")})
     wb.close()
     source_root = str(meta_values.get("本机视频文件夹") or path.parent)
+    for video in videos:  # 老清单没有来源目录列：一律回落到项目文件夹
+        if not video["source_dir"]:
+            video["source_dir"] = source_root
     project_id = str(meta_values.get("项目ID") or uuid.uuid4().hex[:12])
     try:
         next_id = int(meta_values.get("下一个编号") or (max((int(v["id"]) for v in videos if v["id"].isdigit()), default=0) + 1))
@@ -468,4 +510,74 @@ def load_xlsx(source: str | Path) -> dict:
         next_id = 1
     return {"project_id": project_id, "source_root": source_root, "next_id": next_id,
             "tags": tags, "tag_categories": tag_categories,
-            "videos": videos, "xlsx_path": str(path)}
+            "videos": videos, "xlsx_path": str(path),
+            "roots": sorted({video["source_dir"] for video in videos if video["source_dir"]})}
+
+
+def next_movie_number(project: dict) -> int:
+    """清单里下一个可用的视频编号（文件名数字最大值 + 1）。"""
+    numbers = []
+    for row in project.get("videos", []):
+        for raw in (row.get("name"), row.get("relative_path"), row.get("original_name")):
+            stem = Path(str(raw or "")).stem
+            if stem.isdigit():
+                numbers.append(int(stem))
+    return max(numbers, default=0) + 1
+
+
+def pending_renames(project: dict, folder: str | Path) -> list[dict]:
+    """待改名：来源目录==folder、已打标、未上传、还叫原名。"""
+    target = _norm_dir(folder)
+    result = []
+    for row in project.get("videos", []):
+        if row.get("missing") or row.get("uploaded") or row.get("original_name"):
+            continue
+        if not row.get("tags"):
+            continue
+        if _norm_dir(row.get("source_dir") or project.get("source_root")) != target:
+            continue
+        result.append(row)
+    result.sort(key=lambda row: str(row.get("name", "")).casefold())
+    return result
+
+
+def rename_tagged_videos(project: dict, folder: str | Path, start: int | None = None) -> list[dict]:
+    """按顺延编号重命名 folder 里待上传的已打标视频，返回 [{id, old, new, row}]。"""
+    base = Path(str(folder))
+    number = int(start or next_movie_number(project))
+    done: list[dict] = []
+    for row in pending_renames(project, folder):
+        source = base / str(row.get("relative_path") or row.get("name") or "")
+        if not source.is_file():
+            continue
+        suffix = source.suffix or ".mp4"
+        while True:
+            target_name = f"{number:04d}{suffix}"
+            target = source.with_name(target_name)
+            if not target.exists():
+                break
+            number += 1
+        old_name = source.name
+        try:
+            source.rename(target)
+        except OSError as exc:
+            raise CatalogError(f"重命名失败：{old_name} → {target_name}（{exc}）") from None
+        row["original_name"] = old_name
+        row["name"] = target_name
+        row["relative_path"] = target.relative_to(base).as_posix()
+        row["size_bytes"] = target.stat().st_size
+        row["size_mb"] = round(target.stat().st_size / 1024 / 1024, 2)
+        row["fingerprint"] = _file_fingerprint(target)
+        row.pop("previous_fingerprint", None)
+        done.append({"id": row.get("id", ""), "old": old_name, "new": target_name, "row": row})
+        number += 1
+    if done:
+        project["next_movie_number"] = number
+    return done
+
+
+def _norm_dir(value) -> str:
+    try:
+        return str(Path(str(value)).resolve()).casefold()
+    except OSError:
+        return str(value).casefold()

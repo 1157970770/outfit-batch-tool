@@ -97,6 +97,11 @@ def main() -> int:
     ap.add_argument("--no-duration", action="store_true", help="跳过 ffprobe 读时长（快）")
     args = ap.parse_args()
 
+    print("[已过时] 本脚本的编号体系（目录顺序 enumerate → input/tpl/001.mp4）与标签工作簿"
+          "（模板ID=001 / 文件名=0001.mp4）对不上，跑完站点只会得到 0 条可用模板。")
+    print("         现行上传器是 tools/upload_templates_v2.py（工作簿驱动）；")
+    print("         继续运行本脚本会用自己的 108 条结果整体覆盖 manifest.json。")
+
     root = Path(args.root)
     if not root.is_dir():
         sys.exit(f"目录不存在：{root}")
