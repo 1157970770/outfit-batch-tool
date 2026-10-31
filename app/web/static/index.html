@@ -59,8 +59,9 @@
               <span id="drop-copy"><span class="upload-icon">↑</span><strong>点击选择或拖拽图片到这里</strong><small>图片只会上传到本机服务</small></span>
             </label>
             <div id="image-info" class="image-info muted"></div>
-            <!-- 模板视频是竖屏 9:16：预览放左列、按竖版比例显示，避免横版容器把画面压成中间一条 -->
-            <video id="template-preview" class="template-preview hidden" controls preload="none" playsinline></video>
+            <!-- 模板视频是竖屏 9:16：预览放左列、按竖版比例显示，避免横版容器把画面压成中间一条。
+                 选中场景即自动播放并循环；muted 是自动播放的前置条件（模板视频本身无音轨）。 -->
+            <video id="template-preview" class="template-preview hidden" controls loop muted playsinline preload="metadata"></video>
           </article>
 
           <article class="card settings-card">

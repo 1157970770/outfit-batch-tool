@@ -150,9 +150,15 @@
   function updateTemplatePreview() {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
     const video = $('template-preview');
-    if (!selected || !$('template-select').value) { video.removeAttribute('src'); video.classList.add('hidden'); return; }
+    if (!selected || !$('template-select').value) { video.pause(); video.removeAttribute('src'); video.classList.add('hidden'); return; }
     video.src = `/api/templates/${encodeURIComponent($('template-select').value)}/preview`;
     video.classList.remove('hidden');
+    // 选中场景即自动播放 + 循环：muted 是浏览器允许自动播放的前提（模板视频本身无音轨）。
+    video.loop = true;
+    video.muted = true;
+    // 被浏览器策略拦下时不报错，控制条仍在，用户手点一次即可。
+    const started = video.play();
+    if (started && typeof started.catch === 'function') started.catch(() => {});
   }
   function selectedCount() {
     return document.querySelector('input[name="selection"]:checked').value === 'selected'
