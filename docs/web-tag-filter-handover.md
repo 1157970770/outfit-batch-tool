@@ -1,8 +1,8 @@
 # 本地网页生产工具：标签筛选改造交接
 
-日期：2026-10-30（15:20 复核后更新）  
+日期：2026-10-30（16:40 换用新清单）  
 分支：`feature/web-lan`  
-状态：**标签筛选已在本地跑通；改动仍未提交。未运行真实 Wan 任务，也未调用 COS 写入。**
+状态：**功能已提交（`cfd420e`）；已适配「新标签清单.xlsx」但适配改动尚未提交；服务在 8765 上跑的是旧清单配置，需重启生效。未运行真实 Wan 任务，也未调用 COS 写入。**
 
 ## 需求与数据
 
@@ -11,6 +11,8 @@
 - 工作簿原件：`C:\Users\EDY\Desktop\标签清单1版.xlsx`，只读加载，不修改、不覆盖。
 - 视频目录：`D:\星伙素材\磊哥外拍视频（总）`（1278 个 mp4）。
 - 工作簿 1210 行视频记录，`状态` 全部为「待上传」；目录另外 68 个未列入清单的视频是用户主动剔除项，网页候选集应排除（已能自动算出并显示）。
+
+> **2026-10-30 16:40 更新（已换用新清单）**：生产清单一词现在指桌面 **`新标签清单.xlsx`**（1339 行 = 原 1210 条 + 新增 129 条，ID 1279–1411；标签字典与旧版完全一致，旧 1210 条的标签无任何丢失）。目录已增至 1344 项（1343 个 mp4 + 1 个并入记录 csv）。**没打标签的行 = 废弃素材**（用户确认），共 76 行，静默排除；未列入清单的另有 **4 个**。账目自洽：1263 可筛选 + 76 废弃 = 1339 清单行，1343 − 1339 = 4 未入清单。下文涉及「1210」的段落是当时的记录，保留原样。
 - 四类标签：景别、适合季节、场景、姿势。相同类别内 OR，不同类别之间 AND。
 
 ## ⚠️ 关键复核结论（2026-10-30）
@@ -51,17 +53,33 @@
 - 真实配置加载：1210 条候选、`source_ready_templates=0`、`unlisted_files=68`，无错误。
 - 起本地服务（临时账号，未提交任何任务）实测：`/api/login` 200、`/api/bootstrap` 返回 `templates_count=1210 / tag_filter_enabled=true / unlisted_files=68`、`/api/templates` 返回 1210 条、`/api/templates/001/preview` 返回 404「该视频尚未上传到云端，暂无预览」。
 - 原工作簿未被修改；未提交任务，未上传 COS。
+- 16:00–16:04 本机浏览器实际访问：`/`、`/static/app.js`、`/static/tag-filter.css`、`/api/me`、`/api/bootstrap`、`/api/templates` 全部 200，无 4xx/5xx，标签筛选 UI 已人工看过。
+- 15:58 跑过一次离线演练（`demo.py`，mock，不花钱）：3 条任务瞬时成功，桌面侧链路正常。
 - 环境说明：主机 Python 需 `openpyxl`（读工作簿）与 `Pillow`（仅测试造图）。本轮两者均已安装，Pillow 需从本地 wheel 安装（直接 `pip install pillow` 在本环境会被中断）。
+
+## 提交记录
+
+- `cfd420e feat(web): filter templates by tag workbook` —— 本次功能全量：`app/core.py`、`app/web/{server,settings,templates}.py`、`static/{app.js,index.html,tag-filter.css}`、`tests/test_web_tags.py`、`requirements.txt`、`docs/web-lan.md`。
+- `21c7d6a docs: add project handover guide` —— 交接文档与 README（未混入功能改动，两者保持独立提交）。
+
+## 换用新清单（2026-10-30 16:40）
+
+- 生产清单改为 `C:\Users\EDY\Desktop\新标签清单.xlsx`：`server/web.json` 新增 `"tag_workbook"` 显式指向它，代码里的桌面默认路径也同步改成新文件名（`app/web/settings.py`）。旧文件 `标签清单1版.xlsx` 未修改、未删除。
+- 新旧对比：工作表/表头/标签字典（20 条）**完全一致**；行数 1210 → 1339（新增 129 条，ID 1279–1411）；原有 1210 条的标签**零丢失**；"标签字典外标签" 0 处；状态仍全为「待上传」。
+- 新增的 129 条里 53 条已打标、**76 条未打标**。用户确认**未打标 = 废弃素材**，因此按"静默排除"处理：不进候选集、不在页面提示、不当作待办，只在 `tag_workbook_info["untagged_skipped"]` 里留个数字供排查。仅当整张表都没有可用行时才报错。重复 ID、字典外标签、缺路径仍然硬阻断。
+- 顺带修掉一个统计口径问题：未打标行原先会被算进"清单外文件"，现在 `unlisted_files` 只统计"目录里有、清单里没有"的视频（当前 **4** 个）。
+- 加载结果：`workbook_rows=1263`、`untagged_skipped=76`、`unlisted_files=4`、`source_ready_templates=0`。
+- 测试：`tests/test_web_tags.py` 增加"未打标行被跳过且不计入清单外""全部未打标时明确报错"两个用例；`test_web_tags / test_web / test_web_auth / test_template_catalog` 全通过。
+- ⚠️ **改的是启动时读取的配置，正在运行的服务（8765）不会自动生效**，需要关掉控制台重开一次 `启动网页服务.bat`。
 
 ## 剩余事项
 
-1. 用浏览器打开网页确认筛选 UI 观感（本轮只做了接口级校验，未截图核对）。
-2. 1210 条视频需要批量上传到 COS，且上传器要把**工作簿模板ID/文件名写进对象名或 manifest**，否则生成功能仍不可用（当前 `source_ready_templates=0`）。
-3. 确认后只提交本次 Web 标签筛选相关改动，不要暂存 `README.md`、`docs/handover.md`、`docs/换装批量生产器-项目交接手册.docx`。
+1. 1263 条已打标视频需要批量上传到 COS，且上传器要把**工作簿模板ID/文件名写进对象名或 manifest**，否则生成功能仍不可用（当前 `source_ready_templates=0`）。这是唯一阻塞"能出片"的事项。
+2. 108 条旧的测试清单（`input/tpl/` + `manifest.json`）按计划删除时，注意不要连带删掉仍需保留的桶内其他对象；删除前先确认 `server/config.json` 的 `manifest_url` 指向哪里。
+3. 可选清理：76 条废弃行的视频文件仍留在 `D:\星伙素材\磊哥外拍视频（总）`，程序已不引用它们；要腾空间可以自行删除（**不要由程序代删**，避免误删清单外素材）。
 
 ## 当前工作区注意
 
-未提交的本次改动：`app/core.py`、`app/web/server.py`、`app/web/settings.py`、`app/web/templates.py`、`app/web/static/app.js`、`app/web/static/index.html`、`app/web/static/tag-filter.css`、`tests/test_web_tags.py`、`requirements.txt`、`docs/web-lan.md`、`docs/web-tag-filter-handover.md`。  
-另有原先的未提交用户文件：`README.md`、`docs/handover.md`、`docs/换装批量生产器-项目交接手册.docx`；不要覆盖或提交它们。
-
-本地网页服务当前没有监听 8765 端口（本轮验证用的是 8771–8774 临时端口，已全部停止）；停止时不要误报成正在运行。所有实际 Wan API/COS 凭据只在主机本地核对，不要打印或写入报告。
+功能改动已全部提交；本文件与 `docs/web-lan.md`、`docs/handover.md` 属于状态同步更新，`app/web/{templates,settings}.py`、`app/web/static/app.js`、`app/web/server.py`、`tests/test_web_tags.py` 属于"新清单适配"改动，均**尚未提交**。  
+`README.md`、`docs/handover.md`、`docs/换装批量生产器-项目交接手册.docx` 已在 `21c7d6a` 入库。  
+网页服务当前**正在监听 8765**，但跑的是旧清单配置，重启后才会切到 `新标签清单.xlsx`。所有实际 Wan API/COS 凭据只在主机本地核对，不要打印或写入报告。

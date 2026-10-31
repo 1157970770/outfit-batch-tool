@@ -61,3 +61,9 @@ server/passwords.json
 dist-web/
 web-data/
 server/web.json
+
+# 前端改动的临时备份（回滚用，不进仓库）
+.backup-ui/
+
+# 打标工具的运行时状态
+_state/

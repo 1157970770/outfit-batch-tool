@@ -145,7 +145,33 @@ def main() -> int:
     else:
         raise AssertionError("字典外标签必须阻断")
 
-    print("OK 工作簿为生产清单、云端索引仅按文件名+大小补地址、68类排除、AND/OR 与防错配")
+    # 未打标签 = 废弃素材：静默排除、只计数，不当作待办、不阻断整表
+    videos_all = tmp / "videos_all"
+    videos_all.mkdir(exist_ok=True)
+    for name in ("0001.mp4", "0002.mp4", "0003.mp4", "0004.mp4"):
+        (videos_all / name).write_bytes(b"x")
+    untagged_wb = tmp / "含废弃行.xlsx"
+    write_workbook(untagged_wb,
+                   rows + [["004", "0004.mp4", "0004.mp4", 5, 3.0, "ffff", "", "待上传"]],
+                   video_dir=videos_all)
+    cat_u = TemplateCatalog([])
+    info_u = cat_u.attach_tag_workbook(untagged_wb)
+    assert info_u["untagged_skipped"] == 1, info_u
+    assert info_u["workbook_rows"] == 3, info_u
+    assert "004" not in {item["id"] for item in cat_u.items}, "废弃视频不能进入候选集"
+    assert info_u["unlisted_files"] == 0, info_u  # 004 在清单里，只是废弃了
+
+    # 整张表都是废弃行时给出明确报错，而不是静默给空清单
+    all_untagged = tmp / "全都废弃.xlsx"
+    write_workbook(all_untagged, [["001", "0001.mp4", "0001.mp4", 7.5, 8.59, "x", "", "待上传"]])
+    try:
+        TemplateCatalog([]).attach_tag_workbook(all_untagged)
+    except TemplateError as exc:
+        assert "没有可用行" in str(exc)
+    else:
+        raise AssertionError("全部行都是废弃素材时必须明确报错")
+
+    print("OK 工作簿为生产清单、废弃行静默排除、云端索引仅按文件名+大小补地址、AND/OR 与防错配")
     return 0
 
 
