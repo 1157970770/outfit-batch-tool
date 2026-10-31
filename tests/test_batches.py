@@ -11,6 +11,8 @@
 5. 服务重启后批次状态能正确加载，并在首次读取时对账（producing 收敛）。
 6. 删除批次：owner/admin 权限、404、运行中 409、locked 可删、只删批次 JSON
    （output/jobs 一个文件不动）、删除后 job 落回 __ungrouped__。
+7. 锁定后修改提示词：空/超长 400、非 owner 403、owner 200；第二批生产
+   的 job 带新文案；关闭后 409。
 另附：并发配置不再被钳到 3、进程级限流为单例、单价 null 时预估价走兜底。
 """
 from __future__ import annotations
@@ -342,6 +344,18 @@ def main() -> int:
         assert code in (400, 409), "缺 confirmed 不能锁定"
         print("  ✓ 锁定校验：未上云 400、重复锁定 409、锁定后换图 409、去重后 50 条")
 
+        # 锁定后仍可改提示词（#14）：生产时才读 batch["prompt"]，改完只影响之后的分批生产
+        new_prompt = prompt_text + " 画面里人物的圆领服装换成黑色高领毛衣，其余保持不变。"
+        code, _, empty = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST", {"prompt": "   "})
+        assert code == 400, (code, empty)
+        code, _, long = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST", {"prompt": "长" * 4001})
+        assert code == 400, (code, long)
+        code, _, forbidden = call(bob, base, f"/api/batches/{batch_id}/prompt", "POST", {"prompt": new_prompt})
+        assert code == 403, (code, forbidden)
+        code, _, edited = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST", {"prompt": new_prompt})
+        assert code == 200 and body(edited)["batch"]["prompt"] == new_prompt, (code, edited)
+        print("  ✓ 锁定后改提示词：空/超长 400、非 owner 403、owner 200 且详情返回新文案")
+
         # 热重载模板不应打断已锁定的批次（#13 / #14）
         code, _, reloaded = call(admin, base, "/api/admin/reload-templates", "POST", {})
         assert code == 200, (code, reloaded)
@@ -393,10 +407,17 @@ def main() -> int:
         assert batch["done"] == 20 and batch["pending"] == 30 and batch["failed"] == 0, batch
         print("  ✓ 第一批 20 条全部 done，active_job_id 由对账清空")
 
+        # 锁定后改的提示词要真的被后续生产用上：第二批的 job 应带新文案
+        code, _, edited2 = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST",
+                                {"prompt": new_prompt})
+        assert code == 200, (code, edited2)
         code, _, segundo = call(alice, base, f"/api/batches/{batch_id}/produce", "POST", {"count": 50})
         assert code == 201, (code, segundo)
         produced = body(segundo)
         assert produced["taken"] == 30, produced["taken"]     # 剩余不足 50 取全部
+        # job 的 public 字段不含 prompt（防止列表泄漏长文案），直接看内部记录
+        assert app.jobs.jobs[produced["job"]["id"]]["prompt"] == new_prompt, \
+            "第二批生产必须使用改过之后的提示词"
         job_ids.append(produced["job"]["id"])
         run2_job = wait_job(alice, base, job_ids[1])
         assert run2_job["status"] == "succeeded", run2_job
@@ -578,7 +599,9 @@ def main() -> int:
         assert code == 409, (code, denied)
         code, _, retry = call(alice, base2, f"/api/batches/{batch_id}/retry-failed", "POST", {"count": 10})
         assert code == 409, (code, retry)                     # 没有失败项
-        print("  ✓ 关闭后 409，retry-failed 无失败项也 409")
+        code, _, frozen = call(alice, base2, f"/api/batches/{batch_id}/prompt", "POST", {"prompt": "关闭后不能再改"})
+        assert code == 409, (code, frozen)                    # 批次已关闭，提示词一并冻结
+        print("  ✓ 关闭后 409（produce / retry-failed / prompt），retry-failed 无失败项也 409")
 
         # ---------------- 6. 删除批次：DELETE /api/batches/{id}
         state_dir = Path(settings2.data_dir)

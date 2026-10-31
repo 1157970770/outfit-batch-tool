@@ -48,6 +48,8 @@
     previewId: '', resizeRaf: 0,
     itemFilter: 'all', itemLimit: ITEM_PAGE, itemsSignature: '',
     busy: false, pollTimer: null, activeJob: null,
+    promptEditing: false,    // 锁定摘要里「修改提示词」的编辑态；切批次/退出时复位
+    promptDraft: '',         // 编辑中的草稿文本（与 batch.prompt 分离，避免误覆盖）
     groups: [], openGroups: new Set(), groupDetails: new Map(), groupSig: new Map(),
     historyMode: 'groups', flatWarned: false,
   };
@@ -194,32 +196,46 @@
     queueCandLayout();
   }
 
-  /* ---------- 退出当前批次计划（仅草稿态） ----------
-     只是把界面退回批次列表，服务端一个字节都不动：批次仍是 draft，冻结的设置、定妆图、提示词都在。
-     本页内存里的勾选会清空（跨页选中本来就是本地状态），下次从列表点「继续筛选」重新筛一遍接着做。
-     已锁定/已关闭的批次不给这个入口 —— 那两种状态下它既没用（清单不可改）也容易让人误以为能撤销。 */
+  /* ---------- 退出批次（界面导航，不动服务端数据） ----------
+     草稿态：步骤 1 卡片上的「退出当前批次计划」——把界面退回批次列表，批次仍是 draft，
+     冻结的设置、定妆图、提示词都在；本页内存里的勾选会清空（跨页选中本来就是本地状态），
+     下次从列表点「继续筛选」重新筛一遍接着做。
+     已锁定/已关闭：步骤 3 / 4 卡片上的「退出批次」——同样是纯界面导航，清单和进度都保留。 */
   function updateExitButton() {
-    const btn = $('batch-exit-btn');
-    if (!btn) return;
+    const draftBtn = $('batch-exit-btn');
     const state = txt(b.current && b.current.state) || 'draft';
-    const visible = b.mode === 'view' && !!b.current && !!b.current.id && state === 'draft';
-    btn.classList.toggle('hidden', !visible);
-    btn.disabled = !visible || b.busy;
+    const draftVisible = b.mode === 'view' && !!b.current && !!b.current.id && state === 'draft';
+    if (draftBtn) {
+      draftBtn.classList.toggle('hidden', !draftVisible);
+      draftBtn.disabled = !draftVisible || b.busy;
+    }
+    // 锁定/关闭态的退出按钮：与草稿同款交互，只是文案不带「计划」，也不清本地勾选
+    const viewVisible = b.mode === 'view' && !!b.current && !!b.current.id && state !== 'draft';
+    for (const id of ['batch-c-exit-btn', 'batch-d-exit-btn']) {
+      const btn = $(id);
+      if (!btn) continue;
+      btn.classList.toggle('hidden', !viewVisible);
+      btn.disabled = !viewVisible || b.busy;
+    }
   }
   function exitBatch() {
     if (b.mode !== 'view' || !b.current || b.busy) return;
+    const state = txt(b.current.state) || 'draft';
     b.mode = 'list';
     b.current = null;
     b.items = [];
     b.itemsSignature = '';
     b.activeJob = null;
+    b.promptEditing = false;                 // 编辑态不跨批次残留
     stopPoll();
     resetCandidates();
     resetItemsView();
     renderBatch();
     loadBatches(true);
     window.scrollTo(0, 0);
-    toast('已退出这个批次，草稿仍然保留；点「继续筛选」可以接着做。');
+    toast(state === 'draft'
+      ? '已退出这个批次，草稿仍然保留；点「继续筛选」可以接着做。'
+      : '已退回批次列表，批次数据不变。');
   }
 
   /* ---------- 步骤 A：建批次 ---------- */
@@ -986,14 +1002,12 @@
     const rows = [
       ['批次号', txt(batch.batch_no) || '—'],
       ['状态', BATCH_STATE_TEXT[txt(batch.state)] || txt(batch.state) || '—'],
-      ['定妆图', txt(batch.image_name) || '—'],
       // 本页建出来的批次恒为 duration=7；-1 只可能来自接口直建的老批次，文案别硬说成 7 秒。
       ['画质 / 时长', `${txt(batch.resolution) || '—'} · ${durationValue > 0 ? `输出 ${durationValue} 秒` : `输出跟随素材时长（估算按 ${OUTPUT_SECONDS} 秒上限，实际可能更低）`}`],
       ['清单条数', `${total} 条`],
       ['进度', `已结束 ${done + failed} / ${total}（成功 ${done} · 失败 ${failed}）`],
       ['锁定时间', fmtTime(batch.locked_at)],
       ['标签快照', filterText || '锁定前未选标签'],
-      ['提示词', prompt ? `${prompt.slice(0, 110)}${prompt.length > 110 ? '…' : ''}` : '—'],
     ];
     const grid = el('div', 'batch-summary-grid');
     for (const [label, value] of rows) {
@@ -1001,7 +1015,101 @@
       cell.append(el('small', null, label), el('b', null, value));
       grid.append(cell);
     }
-    root.append(grid, el('p', 'muted batch-summary-hint', '清单已锁定：条目不可增删，定妆图 / 提示词 / 画质 / 时长都用批次创建时的设置。要改请新建批次。'));
+    // 定妆图：真图 + 文件名，点图看原图；没有 upload_id 的老批次退化为纯文件名
+    const imageCell = el('div', 'batch-summary-cell batch-summary-image');
+    imageCell.append(el('small', null, '定妆图'));
+    const imageUrl = txt(batch.image_url);
+    if (imageUrl) {
+      const link = el('a', 'batch-image-link');
+      link.href = imageUrl;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.title = '点击查看原图';
+      const img = el('img', 'batch-image-thumb');
+      img.src = imageUrl;
+      img.alt = txt(batch.image_name) || '定妆图';
+      img.loading = 'lazy';
+      link.append(img);
+      imageCell.append(link, el('b', null, txt(batch.image_name) || '—'));
+    } else {
+      imageCell.append(el('b', null, txt(batch.image_name) || '—'));
+    }
+    grid.append(imageCell);
+    root.append(grid);
+
+    // 提示词：完整展示（不再截 110 字），锁定后仍可修改 —— 生产时才读取批次提示词，
+    // 改完只影响之后的分批生产，已生成的视频不变。
+    root.append(buildPromptBlock(batch, prompt));
+    root.append(el('p', 'muted batch-summary-hint',
+      '清单已锁定：条目不可增删，定妆图 / 画质 / 时长都用批次创建时的设置；提示词可在上方修改，之后的分批生产会用最新一份，已生成的视频不受影响。'));
+  }
+
+  function buildPromptBlock(batch, prompt) {
+    const block = el('div', 'batch-prompt-block');
+    const head = el('div', 'batch-prompt-head');
+    head.append(el('small', null, `提示词（完整，${prompt.length} 字）`));
+    const editable = txt(batch.state) !== 'closed' && !txt(batch.active_job_id);
+    if (b.promptEditing) {
+      const body = el('textarea', 'batch-prompt-edit');
+      body.rows = 8;
+      body.maxLength = 4000;
+      body.spellcheck = false;
+      body.value = b.promptDraft;
+      body.setAttribute('aria-label', '编辑批次提示词');
+      const count = el('span', 'muted batch-prompt-count', `${body.value.length} / 4000`);
+      body.addEventListener('input', () => {
+        b.promptDraft = body.value;   // 4 秒轮询会重渲染摘要，草稿必须实时落回状态，否则输入被冲掉
+        count.textContent = `${body.value.length} / 4000`;
+      });
+      const actions = el('div', 'batch-prompt-actions');
+      const save = el('button', 'primary', '保存提示词');
+      save.type = 'button';
+      const cancel = el('button', 'quiet', '取消');
+      cancel.type = 'button';
+      cancel.addEventListener('click', () => {
+        b.promptEditing = false;
+        b.promptDraft = '';
+        renderSummary(batch);
+      });
+      save.addEventListener('click', async () => {
+        const next = body.value.trim();
+        if (!next) { toast('提示词不能为空。'); return; }
+        if (next.length > 4000) { toast('提示词最多 4000 个字符。'); return; }
+        save.disabled = true; cancel.disabled = true;
+        try {
+          await api(`/api/batches/${encodeURIComponent(txt(batch.id))}/prompt`, {
+            method: 'POST',
+            body: JSON.stringify({ prompt: next }),
+          });
+          b.promptEditing = false;
+          b.promptDraft = '';
+          toast('提示词已更新，之后的分批生产会用新提示词。');
+          await loadBatchDetail(true);          // 拉回最新 batch.prompt 并重渲染
+        } catch (err) {
+          save.disabled = false; cancel.disabled = false;
+          toast(err.message || '保存失败，请稍后重试');
+        }
+      });
+      actions.append(save, cancel, count);
+      block.append(head, body, actions);
+    } else {
+      const edit = el('button', 'quiet batch-prompt-edit-btn', '修改提示词');
+      edit.type = 'button';
+      edit.disabled = !editable;
+      edit.title = editable ? '改完只影响之后的分批生产' : '有任务在跑或批次已关闭时不能改';
+      edit.addEventListener('click', () => {
+        b.promptDraft = txt(batch.prompt);
+        b.promptEditing = true;
+        renderSummary(batch);
+        // 聚焦编辑框，光标落末尾，改起来顺手
+        const body = document.querySelector('.batch-prompt-edit');
+        if (body) { body.focus(); body.setSelectionRange(body.value.length, body.value.length); }
+      });
+      head.append(edit);
+      const text = el('p', 'batch-prompt-text', prompt || '—');
+      block.append(head, text);
+    }
+    return block;
   }
 
   function renderProduce(batch) {
@@ -1376,6 +1484,8 @@
     if (!id) return;
     b.mode = 'view';
     b.formOpen = false;   // 打开已有批次默认收起冻结的设置表单，把高度留给候选
+    b.promptEditing = false;
+    b.promptDraft = '';
     b.current = b.batches.find((item) => txt(item.id) === id) || { id };
     b.items = [];
     resetCandidates();
@@ -1595,6 +1705,11 @@
     $('batch-create-btn').addEventListener('click', createBatch);
     $('batch-a-toggle').addEventListener('click', () => setBatchFormOpen(!b.formOpen));
     $('batch-exit-btn').addEventListener('click', exitBatch);
+    // 锁定/关闭态的「退出批次」：步骤 3 / 4 卡片头各一个，同一个处理函数
+    for (const id of ['batch-c-exit-btn', 'batch-d-exit-btn']) {
+      const btn = $(id);
+      if (btn) btn.addEventListener('click', exitBatch);
+    }
     $('batch-prompt-select').addEventListener('change', () => {
       $('batch-prompt-body').value = $('batch-prompt-select').selectedOptions[0]?.dataset.body || '';
       updateBatchPromptCount();

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""任务批次：一份锁定清单 + 冻结点提示词/画质/时长，之后分批生产。
+"""任务批次：一份锁定清单 + 冻结点画质/时长，提示词锁定后仍可单独修改，之后分批生产。
 
 核心约束（与 batch-spec.md 一致）：
   · 一次只做一件事：`draft`（挑清单）→ `locked`（可生产）→ `closed`。
@@ -598,6 +598,33 @@ class BatchManager:
             batch["state"] = "closed"
             batch["closed_at"] = time.time()
             batch["updated_at"] = batch["closed_at"]
+            self._save(batch)
+            return self.public(batch)
+
+    # ------------------------------------------------------------------ #14 修改提示词（锁定后仍可改）
+    def update_prompt(self, batch_id: str, user: dict, data: dict) -> dict:
+        """只改批次的提示词正文，其余（清单/定妆图/画质/时长）仍冻结。
+
+        为什么锁定后允许改：`_start_run` 是在**每次生产时**才读 `batch["prompt"]`
+        建任务，所以改提示词不影响已生成的视频，只影响之后的分批生产 —— 这正是
+        「跑了一批发现提示词要调，不想整批重开」的用法。
+        限制：有任务在跑时拒绝（避免同一次 _start_run 前后读到两份提示词的歧义）；
+        批次已关闭则整个批次不再变化，一并拒绝。
+        """
+        prompt = str(data.get("prompt") or "").strip()
+        if not prompt:
+            raise BatchError("提示词不能为空。")
+        if len(prompt) > 4000:
+            raise BatchError("提示词最多 4000 个字符。")
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            self._reconcile(batch)
+            if batch.get("active_job_id"):
+                raise BatchError("本批次有任务在跑，等它结束后再改提示词。", 409)
+            if batch.get("state") == "closed":
+                raise BatchError("批次已关闭，提示词不可再修改。", 409)
+            batch["prompt"] = prompt
+            batch["updated_at"] = time.time()
             self._save(batch)
             return self.public(batch)
 

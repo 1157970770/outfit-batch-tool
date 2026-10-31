@@ -200,12 +200,25 @@
           </article>
 
           <article class="card batch-panel hidden" id="batch-step-c">
-            <div class="step-title"><span class="step">3</span><div><h2>锁定清单</h2><p id="batch-c-hint">清单已锁定，条目不可再增删。</p></div></div>
+            <div class="step-title">
+              <span class="step">3</span>
+              <div><h2>锁定清单</h2><p id="batch-c-hint">清单已锁定，条目不可再增删。</p></div>
+              <div class="batch-a-actions">
+                <!-- 退出批次：只在已锁定/已关闭的批次详情出现，退回批次列表、不删数据 -->
+                <button id="batch-c-exit-btn" class="quiet batch-exit hidden" type="button" title="回到批次列表；批次数据不变，随时可以再打开">退出批次</button>
+              </div>
+            </div>
             <div id="batch-summary" class="batch-summary"></div>
           </article>
 
           <article class="card batch-panel hidden" id="batch-step-d">
-            <div class="step-title"><span class="step">4</span><div><h2>分批生产</h2><p>一次只排队一个 job，跑完再点下一批。提交后不能撤回。</p></div></div>
+            <div class="step-title">
+              <span class="step">4</span>
+              <div><h2>分批生产</h2><p>一次只排队一个 job，跑完再点下一批。提交后不能撤回。</p></div>
+              <div class="batch-a-actions">
+                <button id="batch-d-exit-btn" class="quiet batch-exit hidden" type="button" title="回到批次列表；批次数据不变，随时可以再打开">退出批次</button>
+              </div>
+            </div>
             <div id="batch-counters" class="batch-counters"></div>
             <div class="batch-progress-line"><div class="progress"><span id="batch-progress-fill"></span></div><p id="batch-progress-text" class="muted">等待开始</p></div>
             <div id="batch-produce-actions" class="batch-produce-actions"></div>

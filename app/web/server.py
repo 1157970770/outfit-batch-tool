@@ -458,6 +458,8 @@ def make_handler(app: WebApplication):
                         return self._batch_produce(parts[2], data, user)
                     if action == "close":
                         return self._batch_close(parts[2], user)
+                    if action == "prompt":
+                        return self._batch_prompt(parts[2], data, user)
                     if action == "retry-failed":
                         return self._batch_retry(parts[2], data, user)
             if path == "/api/admin/reload-templates":
@@ -682,6 +684,14 @@ def make_handler(app: WebApplication):
         def _batch_close(self, batch_id, user):
             try:
                 batch = app.batches.close(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, "batch": batch})
+
+        def _batch_prompt(self, batch_id, data, user):
+            """POST /api/batches/{id}/prompt：锁定后仍可改提示词（见 batches.update_prompt）。"""
+            try:
+                batch = app.batches.update_prompt(batch_id, user, data)
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, "batch": batch})
