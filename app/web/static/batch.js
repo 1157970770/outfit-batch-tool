@@ -21,12 +21,12 @@
   // 本地兜底单价，与后端 settings.DEFAULT_PRICE_PER_SECOND 对齐，仅在后端没给 cost_estimate 时用
   const PRICE_PER_SECOND = { '480P': 0.3, '720P': 0.6, '1080P': 1.2 };
   const BILLABLE_SECONDS = 8.45;
-  // 候选分页：每页固定 50 条。
-  // 曾经试过按「候选网格实测容量」动态切页（cols × rowsFit），1920×880 下变成 42 条，
-  // 代价是右列播放器必须跟着候选区一起压矮（播放器从 634px 掉到 374px），用户不接受。
-  // 现在恢复固定 50：候选区高度固定约一屏，放不下就在网格内部滚动，页面允许被右列撑出滚动。
+  // 候选分页：每页条数 = 实测容量（列数 × 能完整放下的行数），**保底 50**。
+  // 候选区现在与右列等高（见 batch.css），实测 1920×880 候选网格约 654px 高 · 6 列 × 14 行 = 84 条/页，
+  // 1920×990 是 6 × 16 = 96 条/页 —— 一页正好填满整块区域，不再有「分页条下面空 280px」的观感。
+  // 保底 50 是为了手机/平板（那里候选区交回页面滚动，无法量容量）和极端矮屏不至于每页只剩几条。
   // 一次把筛选结果全拉到前端（接口 limit 上限 1000），翻页纯本地切片，不再发请求。
-  const CAND_PAGE = 50;
+  const CAND_PAGE_MIN = 50;
   const CAND_FETCH_LIMIT = 500;
   const ITEM_PAGE = 60;
   const HISTORY_PAGE = 200;
@@ -42,7 +42,8 @@
     candidates: [], selected: new Set(), candTotal: 0, candReady: 0,
     estimate: null,
     candTagFilter: new Set(), onlySelected: false, candPage: 1, candPageItems: [], candPageBackup: 0,
-    // 每页条数固定 CAND_PAGE（见文件顶部常量），不再随视口容量变化
+    // 每页条数由 candCapacity() 实测写入（列数 × 行数，保底 CAND_PAGE_MIN），页面尺寸变了就重算
+    candPageSize: CAND_PAGE_MIN, candObserver: null,
     tagFilters: {}, tagPanelOpen: false, formOpen: true,
     previewId: '', resizeRaf: 0,
     itemFilter: 'all', itemLimit: ITEM_PAGE, itemsSignature: '',
@@ -188,8 +189,9 @@
         updateBatchCounts();
       }
     }
-    // 面板刚显隐完，等一帧再量高度（候选区高度跟着页头/步骤条/工具条的实际高度走）
-    queueCandHeight();
+    // 面板刚显隐完，等一帧再量高度（候选区高度跟着页头/步骤条/工具条的实际高度走），
+    // 顺带核一遍每页条数：面板从隐藏变可见时网格才第一次有真实高度
+    queueCandLayout();
   }
 
   /* ---------- 退出当前批次计划（仅草稿态） ----------
@@ -248,7 +250,7 @@
     btn.classList.toggle('hidden', !collapsible);
     btn.textContent = collapsed ? '展开设置' : '收起设置';
     btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    queueCandHeight();
+    queueCandLayout();
   }
   function fillBatchForm(batch) {
     $('batch-no').value = txt(batch.batch_no);
@@ -472,7 +474,7 @@
     btn.classList.toggle('is-on', open);
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     btn.title = hasTags ? (open ? '收起标签筛选' : '展开标签筛选') : '模板还没有标签可选';
-    queueCandHeight();
+    queueCandLayout();
   }
   function toggleTagPanel() {
     b.tagPanelOpen = !b.tagPanelOpen;
@@ -567,23 +569,71 @@
     const list = candidateMatched();
     return b.onlySelected ? list.filter((item) => b.selected.has(item.id)) : list;
   }
-  function candPageCount(total) {
-    return total > 0 ? Math.ceil(total / CAND_PAGE) : 1;
+  function candPageCount(total, size) {
+    const per = Math.max(1, num(size, b.candPageSize) || CAND_PAGE_MIN);
+    return total > 0 ? Math.ceil(total / per) : 1;
   }
 
-  /* 候选网格：本地分页，一次渲染一整页（每页固定 CAND_PAGE = 50 条）。
-     翻页不重建整份列表，只换这一页的卡片；b.selected 是跨页唯一的选中事实来源。
-     一页放不下时网格内部滚动 —— 这是为「播放器面积最大」付出的代价。 */
-  function renderCandidates() {
+  /* ---------- 每页条数：按候选网格的实测容量算 ----------
+     列数从 getComputedStyle(grid).gridTemplateColumns 解析（auto-fill 解析完就是一串 px 轨道）；
+     行数 = floor((可用高 + 行距) / (卡片高 + 行距))；卡片高优先量现存卡片，
+     一张卡都没有时造一张同结构的隐藏探针卡，量完即删 —— 不写死 39px，字号/内距改了也不会错。
+     ≤900px（手机/平板）候选网格交给页面滚动，没有「一屏内放几行」这回事，按保底条数分页。 */
+  function candColumnCount(grid, style) {
+    const raw = String(style.gridTemplateColumns || '').trim();
+    const tracks = raw ? raw.split(/\s+/) : [];
+    if (tracks.length && tracks.every((track) => /\d(px|%)?$/.test(track))) return tracks.length;
+    // 兜底：解析不出轨道就按「容器宽 / 最小列宽」估，190px 是桌面 auto-fill 的下限
+    const gap = parseFloat(style.columnGap) || 5;
+    return Math.max(1, Math.floor((grid.clientWidth + gap) / (190 + gap)));
+  }
+  function candCardHeight(grid, width) {
+    const existing = grid.querySelector('.batch-cand');
+    if (existing) {
+      const measured = existing.getBoundingClientRect().height;
+      if (measured > 0) return measured;
+    }
+    // 探针卡：结构与真卡完全一致（同一个 candidateTile），绝对定位到网格外，量完立刻删，不参与布局
+    const probe = candidateTile({ id: '__probe__', name: '探针卡片', tags: ['探针'], ready: true });
+    probe.setAttribute('aria-hidden', 'true');
+    probe.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;pointer-events:none;width:${Math.max(40, width)}px`;
+    grid.append(probe);
+    const measured = probe.getBoundingClientRect().height;
+    probe.remove();
+    return measured;
+  }
+  function candCapacity() {
     const grid = $('batch-cand-grid');
-    // 先把候选区高度量准（高度只取决于网格外的页头/工具条，与本页有几张卡无关）
+    if (!grid) return CAND_PAGE_MIN;
+    if (window.innerWidth <= 900) return CAND_PAGE_MIN;
+    const style = getComputedStyle(grid);
+    const gap = parseFloat(style.rowGap) || 0;
+    const cols = candColumnCount(grid, style);
+    const paddingY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    const avail = grid.clientHeight - paddingY;
+    // 列宽只用来给探针定宽；卡片高与宽度无关（文件名/标签都单行省略），不必精确到亚像素
+    const cardH = candCardHeight(grid, grid.clientWidth / cols);
+    if (!(avail > 0) || !(cardH > 0)) return CAND_PAGE_MIN;
+    const rows = Math.max(1, Math.floor((avail + gap) / (cardH + gap)));
+    return Math.max(CAND_PAGE_MIN, cols * rows);
+  }
+
+  /* 候选网格：本地分页，一次渲染一整页（条数 = 实测容量，保底 50 条）。
+     **顺序不能反**：先定高度 → 再算容量 → 再切片（容量是按网格实际高度算出来的）。
+     翻页不重建整份列表，只换这一页的卡片；b.selected 是跨页唯一的选中事实来源。 */
+  function renderCandidates(settling) {
+    const grid = $('batch-cand-grid');
+    // 1) 高度：候选区已被 CSS 拉伸到与右列等高，这里只把「至少到视口底部」写进 --batch-cand-h 当下限
     syncCandHeight();
+    // 2) 容量：网格实际高度 + 卡片实际高度 → 这一页放得下几条
+    const size = candCapacity();
+    b.candPageSize = size;
     const visible = candidateVisible();
-    const pageCount = candPageCount(visible.length);
-    // 筛选 / 反选 / 取消选中会让页数变少：夹住页码，别停在一页空网格上
+    const pageCount = candPageCount(visible.length, size);
+    // 筛选 / 反选 / 取消选中 / 视口变高都会让页数变少：夹住页码，别停在一页空网格上
     b.candPage = Math.min(Math.max(1, num(b.candPage, 1)), pageCount);
-    const start = (b.candPage - 1) * CAND_PAGE;
-    const slice = visible.slice(start, start + CAND_PAGE);
+    const start = (b.candPage - 1) * size;
+    const slice = visible.slice(start, start + size);
     b.candPageItems = slice;
     const fragment = document.createDocumentFragment();
     for (const item of slice) fragment.append(candidateTile(item));
@@ -592,12 +642,14 @@
       grid.append(el('div', 'empty batch-cand-empty',
         b.candidates.length ? '当前过滤条件下没有候选，清掉「只看已选」或标签定位试试。' : '还没有候选，选好标签后点「刷新候选」。'));
     }
-    renderCandPager(visible.length, pageCount, start, slice.length);
+    renderCandPager(visible.length, pageCount, start, slice.length, size);
     updateBatchCounts();
     ensurePreview();
+    // 探针量与真卡可能有亚像素差：有真卡后复核一次容量，不同就再排一次（只重排一次，不递归）
+    if (!settling && slice.length && candCapacity() !== size) renderCandidates(true);
   }
 
-  function renderCandPager(total, pageCount, start, shown) {
+  function renderCandPager(total, pageCount, start, shown, size) {
     const pager = $('batch-cand-pager');
     if (!pager) return;
     const empty = total === 0;
@@ -611,17 +663,17 @@
     allBtn.disabled = !matched.length;
     allBtn.title = readyMatched < matched.length
       ? `当前筛选共 ${matched.length} 条，其中 ${readyMatched} 条已上传云端可生产；未上传的 ${matched.length - readyMatched} 条选不了。`
-      : `选中当前筛选下的全部 ${matched.length} 条（跨 ${candPageCount(matched.length)} 页），已选数量继续累计。`;
+      : `选中当前筛选下的全部 ${matched.length} 条（跨 ${candPageCount(matched.length, size)} 页），已选数量继续累计。`;
     if (empty) return;
     $('batch-page-prev').disabled = b.candPage <= 1;
     $('batch-page-next').disabled = b.candPage >= pageCount;
     const info = $('batch-page-info');
     info.textContent = `第 ${b.candPage} / ${pageCount} 页`;
-    info.title = `本轮显示第 ${start + 1}–${start + shown} 条，共 ${total} 条`;
+    info.title = `本页显示第 ${start + 1}–${start + shown} 条（每页 ${size} 条），共 ${total} 条`;
   }
 
   function goCandPage(page) {
-    const pageCount = candPageCount(candidateVisible().length);
+    const pageCount = candPageCount(candidateVisible().length, b.candPageSize);
     const next = Math.min(Math.max(1, page), pageCount);
     if (!Number.isFinite(next) || next === b.candPage) return;
     b.candPage = next;
@@ -808,13 +860,11 @@
     return [...grid.children].find((node) => node.dataset && node.dataset.id === id) || null;
   }
 
-  /* 候选区高度：外层固定为「一屏减掉页头/步骤条/工具条」的高度，网格内部自己滚。
-     桌面用实测值（页头高度会变），其它端交回 CSS 自然高度。
-
-     这里只算候选区自己的高度，**不再去减 main 底下那截尾部占位**（那套 tail 探测是为了
-     「整页不滚动」，代价是把播放器一起压矮，已按用户要求回滚）。
-     于是整页会被右列（播放器 72vh）撑出 150~250px 的纵向滚动，这是明确取舍：
-     播放器面积优先，不要再为了消滚动把 --batch-cand-h 往下压。 */
+  /* 候选区高度：候选区现在**跟着右列（播放器）等高**，实际高度由 CSS 的 grid 行高决定。
+     这里的实测值只作为**下限**写进 --batch-cand-h，含义是「候选区至少长到视口底部（再留 12px）」，
+     防止在右列比视口还矮的极端屏上候选区缩成一条。它**不参与**决定播放器高度 ——
+     播放器只认 .batch-preview-video 的 clamp(320px,72vh,760px)，一个像素都不许动。
+     于是整页仍会被右列撑出纵向滚动，这是播放器面积的代价，不是 bug。 */
   const CAND_BOTTOM_GAP = 12;   // 候选区底边到视口底部留的空隙，与 .shell 的 12px 同口径
   const CAND_MIN_H = 240;
 
@@ -828,8 +878,7 @@
     const main = document.querySelector('.batch-cand-main');
     const layout = document.querySelector('.batch-cand-layout');
     if (!main || !layout) return;
-    // 变量写在候选区与右列的**共同父级**上，便于统一调试/取值；
-    // 注意：右列（播放器）**不再**依赖它决定高度（见 batch.css），播放器高度只由 72vh 决定。
+    // 变量写在候选区与右列的**共同父级**上，便于统一调试/取值
     const host = layout;
     if (!candPanelVisible() || window.innerWidth <= 900) {
       host.style.removeProperty('--batch-cand-h');
@@ -841,11 +890,15 @@
     host.style.setProperty('--batch-cand-h', `${height}px`);
   }
 
-  function queueCandHeight() {
+  /* 视口 / 表单开合 / 标签面板开合 / 提示行显隐 → 候选网格高度变了 → 每页条数得重算。
+     rAF 合并连续 resize；只有容量真的变了才重建这一页（页码由 renderCandidates 夹取）。 */
+  function queueCandLayout() {
     if (b.resizeRaf) cancelAnimationFrame(b.resizeRaf);
     b.resizeRaf = requestAnimationFrame(() => {
       b.resizeRaf = 0;
       syncCandHeight();
+      if (!candPanelVisible()) return;
+      if (candCapacity() !== b.candPageSize) renderCandidates();
     });
   }
   function showCandNote(text) {
@@ -853,7 +906,7 @@
     if (!node) return;
     node.textContent = txt(text);
     node.classList.toggle('hidden', !text);
-    queueCandHeight();
+    queueCandLayout();
   }
   function updateBatchCounts() {
     const chosen = b.selected.size;
@@ -1600,7 +1653,20 @@
     });
     video.addEventListener('loadeddata', () => showPreviewNote(''));
     video.addEventListener('playing', () => showPreviewNote(''));
-    window.addEventListener('resize', queueCandHeight);
+    window.addEventListener('resize', queueCandLayout);
+    watchCandGrid();
+  }
+
+  /* 候选网格的「盒子」尺寸一变就重核每页条数。
+     只靠 window.resize 不够：等高之后候选区高度是被右列带着走的 —— 提示行出现、播放器文件名换行、
+     字体回流、表单/标签面板开合都可能让网格变高变矮，而这些都不触发窗口事件。
+     不补这一层就会出现「网格高了 20px 但一页还是 13 行，底下留一条空」的滞后。
+     回调统一走 queueCandLayout（rAF 合并），且只在容量真的变了才重建，不会和 ResizeObserver 互相触发。 */
+  function watchCandGrid() {
+    const grid = $('batch-cand-grid');
+    if (!grid || typeof ResizeObserver !== 'function' || b.candObserver) return;
+    b.candObserver = new ResizeObserver(() => queueCandLayout());
+    b.candObserver.observe(grid);
   }
 
   let initialized = false;
@@ -1619,8 +1685,8 @@
   }
   function enter() {
     init();
-    // 切回大批量页时视口/页头可能变了，重新量一次候选区高度
-    queueCandHeight();
+    // 切回大批量页时视口/页头可能变了，重新量一次候选区高度与每页条数
+    queueCandLayout();
     if (b.mode === 'list') loadBatches();
     else refreshBatch(true);
   }

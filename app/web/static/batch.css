@@ -68,16 +68,25 @@
 .batch-chip.is-on{border-color:color-mix(in srgb,var(--blue) 55%,white);background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue-dark);font-weight:700}
 
 /* ---------- 候选网格（密集行） + 预览栏 ---------- */
-/* 候选区高度由 JS 实测写入 --batch-cand-h（见 batch.js syncCandHeight）。
-   底部翻页 + 锁定共用一行，避免额外挤掉候选行；网格在一页 50 条放不下时保留内部滚动。 */
-.batch-cand-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,30%);gap:14px;align-items:start}
+/* 两栏**等高**：grid 行高由较高的一栏（右列播放器）决定，候选区 align-self 拉伸后跟着变高，
+   于是分页条/锁定条之下不再留白，空出来的高度全部交给候选网格（每页条数由 batch.js 按实测容量算）。
+   --batch-cand-h（JS 实测「视口底部 - 候选区顶 - 12」）只是**下限**，保证候选区至少长到视口底部。 */
+.batch-cand-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,30%);gap:14px;align-items:stretch}
 /* 竖屏素材的有效宽度由高度决定，右列只需容纳约 400px 的画面；
    宽屏固定为 446px，把原来的横屏黑边宽度还给候选网格。 */
 @media(min-width:1720px){
   .batch-cand-layout{grid-template-columns:minmax(0,1fr) 446px}
 }
-.batch-cand-main{display:flex;flex-direction:column;min-width:0;height:var(--batch-cand-h,calc(100vh - 430px));min-height:240px}
-.batch-cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:5px;align-content:start;flex:1 1 auto;min-height:96px;overflow-y:auto;overflow-x:hidden;padding:1px 2px 1px 1px}
+/* 不给固定 height：height 会盖掉 stretch，候选区就又比右列矮了。
+   等高靠 grid 的 align-items:stretch（行高由较高的右列决定，候选区被拉到同一高度）。
+   min-height 用 --batch-cand-h 兜底（变高后通常不再生效，只防「右列比视口还矮」的极端屏）。
+   （桌面才切断固有尺寸贡献，见 @media(min-width:901px) 里的 contain:size。） */
+.batch-cand-main{display:flex;flex-direction:column;min-width:0;min-height:var(--batch-cand-h,calc(100vh - 430px))}
+/* 网格是「吃掉剩余高度」的那块：flex-basis 必须是 0，且 min-height:0 ——
+   否则网格内容（一页卡片的总高）会算进 .batch-cand-main 的固有高度，
+   把 grid 行高顶到比右列还高，等高就变成「候选区把整行撑长」，右列反而显得矮了（会自我循环、越缩越歪）。
+   basis 0px + min-height:0 之后，候选区的高度只由右列决定，网格永远只拿剩下的空间，内容多了自己滚。 */
+.batch-cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:5px;align-content:start;flex:1 1 0px;min-height:0;overflow-y:auto;overflow-x:hidden;padding:1px 2px 1px 1px}
 .batch-cand-grid:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 /* 单张卡：两行（勾选框 + 文件名 / 标签），整卡可点 = 选中 + 预览 */
 .batch-cand{display:grid;grid-template-columns:14px minmax(0,1fr);grid-template-areas:"box name" "meta meta";align-items:center;gap:0 6px;min-width:0;padding:4px 8px;border:1px solid var(--line);border-left:3px solid transparent;border-radius:8px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
@@ -125,11 +134,18 @@
 .batch-lock-bar .primary{flex:none;min-height:32px;padding:5px 20px;font-size:13px;border-radius:9px}
 .batch-lock-bar .error{flex:1 1 100%;margin:0;font-size:11px}
 @media(min-width:901px){
-  /* 右列（播放器）**不再**跟候选区等高：播放器高度只由 .batch-preview-video 的 72vh 决定。
-     1920×880 下容器约 634px，竖屏素材有效画面约 401×713 —— 这是播放器面积最大的一版。
-     代价是右列比候选区高约 150~250px，页面出现纵向滚动，这是明确的取舍。
-     不要为了消滚动把 .batch-side 绑回 var(--batch-cand-h)：那会把播放器压到 ~374px。 */
+  /* 右列（播放器）是两栏里的**高个子**，它决定整行高度，候选区再拉伸贴齐它。
+     播放器高度只由 .batch-preview-video 的 72vh 决定（1920×880 下容器约 634px，竖屏素材有效画面约 401×713），
+     一个像素都不许压 —— 所以等高只能是「候选区向上长」，不能是「播放器向下缩」。
+     代价是整页仍会被右列撑出约 300px 纵向滚动（改之前就是这样，与本次改动无关）。
+
+     contain:size 是等高的关键：让候选区对 grid 行高**不提供固有尺寸贡献**。
+     不加它的话，一页卡片的总高（约 700px）会参与定行高，把整行顶到比右列还高 ——
+     等高就成了「候选区把行撑长、播放器显得矮」，且换页/缩放时会自我循环、越缩越歪。
+     它只在桌面生效：≤900px 候选区要按内容自然撑开（手机是整页滚动）。
+     副作用是候选区内部溢出会被裁切（paint containment），但卡片本来就在网格里自己滚，看不出差别。 */
   .batch-side{position:sticky;top:84px;align-self:start;min-width:0}
+  .batch-cand-main{contain:size;position:relative}
 }
 
 /* 矮屏只收紧播放器下面的文件名；画面高度仍由 72vh 决定，竖屏与横屏都完整 contain。 */
@@ -247,8 +263,8 @@
   /* 拆开右列：播放器在上（order:-1）；翻页 + 锁定条在候选列表后面（它们本来就在 .batch-cand-main 末尾） */
   .batch-side{display:contents}
   .batch-preview{position:static;order:-1;top:auto}
-  /* 平板/手机不再固定高度，交回页面自然滚动，避免嵌套滚动条 */
-  .batch-cand-main{height:auto;min-height:0}
+  /* 平板/手机不再固定高度，交回页面自然滚动，避免嵌套滚动条（也不参与等高） */
+  .batch-cand-main{min-height:0}
   .batch-cand-grid{flex:none;overflow:visible;padding:1px;grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
   /* 窄屏一行放不下「翻页 + 已选 + 锁定」，拆成两行 */
   .batch-cand-foot{flex-wrap:wrap;gap:8px;min-height:0;margin-top:10px;padding-top:6px}
