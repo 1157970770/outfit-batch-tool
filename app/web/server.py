@@ -30,7 +30,7 @@ from app.runtime import build_storages
 from app.wan_api import configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
 from app.web.batches import BatchError, BatchManager
-from app.web.jobs import JobManager
+from app.web.jobs import JobManager, _redact
 from app.web.settings import WebSettings, load_settings
 from app.web.templates import TemplateCatalog, TemplateError
 from app.web import WEB_VERSION
@@ -493,6 +493,29 @@ def make_handler(app: WebApplication):
                     return self._admin_enable_user(username)
             return self._error("页面或接口不存在。", 404)
 
+        def do_DELETE(self):
+            """删除类接口：动作全在路径上，不接受请求体。"""
+            if not self._host_ok() or not self._origin_ok():
+                return self._error("请求来源无效，请刷新页面后重试。", 403)
+            path = urllib.parse.urlsplit(self.path).path
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                return self._error("请求长度无效。", 400)
+            if length:
+                # 不读走请求体，keep-alive 连接会串包：要么读掉，要么明确拒绝。
+                if length < 0 or length > 4096:
+                    return self._error("该接口不接受请求体。", 413)
+                self.rfile.read(length)
+            user = self._user()
+            if not user:
+                return
+            if path.startswith("/api/batches/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 3:
+                    return self._batch_delete(parts[2], user)
+            return self._error("页面或接口不存在。", 404)
+
         def _login(self, data):
             username = str(data.get("username") or "").strip()
             password = str(data.get("password") or "")
@@ -662,6 +685,14 @@ def make_handler(app: WebApplication):
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, "batch": batch})
+
+        def _batch_delete(self, batch_id, user):
+            """DELETE /api/batches/{id}：只删批次 JSON，不动 output/jobs 里的视频。"""
+            try:
+                result = app.batches.delete(batch_id, user)
+            except BatchError as exc:
+                return self._error(_redact(str(exc)), exc.status)
+            return self._json({"ok": True, **result})
 
         def _batch_list(self, query, user):
             scope = query.get("scope", ["mine"])[0]

@@ -292,3 +292,12 @@
   .history-group-head{padding:12px}
   .history-group-body{padding:0 12px 12px}
 }
+
+/* ---------- 批次卡片「删除」（列表页） ----------
+   与「继续筛选 / 打开」并排的次要动作：形状沿用 .quiet，只把文字换成 --red，
+   悬停叠一层极淡的红底。不做实心红块、不加红边框 —— 删除不该是卡片的视觉焦点。
+   聚焦态已由上面「焦点态」一节的 .batch-card-side .quiet:focus-visible 覆盖。 */
+.batch-card-del{flex:none;color:var(--red);white-space:nowrap}
+.batch-card-del:not(:disabled):hover{background:color-mix(in srgb,var(--red) 10%,var(--paper))}
+.batch-card-del:not(:disabled):active{background:color-mix(in srgb,var(--red) 16%,var(--paper))}
+.batch-card-del:disabled{opacity:.55;cursor:wait}

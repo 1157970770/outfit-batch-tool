@@ -9,6 +9,8 @@
 3. 未打标的模板不进候选；锁定里含未上云模板 → 400。
 4. 历史按批次号分组：有 batch_ref 的按批次聚合，老/试跑 job 落 __ungrouped__。
 5. 服务重启后批次状态能正确加载，并在首次读取时对账（producing 收敛）。
+6. 删除批次：owner/admin 权限、404、运行中 409、locked 可删、只删批次 JSON
+   （output/jobs 一个文件不动）、删除后 job 落回 __ungrouped__。
 另附：并发配置不再被钳到 3、进程级限流为单例、单价 null 时预估价走兜底。
 """
 from __future__ import annotations
@@ -578,7 +580,143 @@ def main() -> int:
         assert code == 409, (code, retry)                     # 没有失败项
         print("  ✓ 关闭后 409，retry-failed 无失败项也 409")
 
-        print("OK 批次创建 → 候选 → 锁定 → 分批生产 → 历史分组 → 重启恢复 全部通过")
+        # ---------------- 6. 删除批次：DELETE /api/batches/{id}
+        state_dir = Path(settings2.data_dir)
+        batches_dir = state_dir / "batches"
+        jobs_dir = state_dir / "jobs"
+        output_dir = state_dir / "output"
+
+        def snapshot_products() -> tuple:
+            """jobs/ 与 output/ 下已落盘文件的名字+大小；删批次绝不能动它们。
+
+            原子写留下的 *.tmp（jobs.py/_save、jobs.py:download 的临时文件）是瞬时文件，
+            不纳入快照，否则生产中被误判成「删了文件」。
+            """
+            rows = []
+            for folder in (jobs_dir, output_dir):
+                for path in sorted(folder.rglob("*")):
+                    if not path.is_file() or path.suffix in {".tmp", ".part", ".download"}:
+                        continue
+                    rows.append((str(path.relative_to(state_dir)).replace("\\", "/"),
+                                 path.stat().st_size))
+            return tuple(rows)
+
+        def make_batch(batch_no, **extra):
+            code, _, raw = call(alice, base2, "/api/batches", "POST", {
+                "batch_no": batch_no, "prompt_id": prompt_id, "prompt": prompt_text,
+                "resolution": "720P", "duration": 7, **extra})
+            assert code == 201, (batch_no, code, raw)
+            return body(raw)["batch"]["id"]
+
+        assert snapshot_products(), "产物快照不能为空，否则『没动文件』的断言无意义"
+
+        # 6.1 owner 删 draft → 200 + {ok,id}，文件消失、列表消失、详情与重复删 404
+        draft_id = make_batch("AW26-DEL1")
+        draft_path = batches_dir / f"{draft_id}.json"
+        assert draft_path.is_file(), draft_path
+        code, _, raw = call(alice, base2, f"/api/batches/{draft_id}", "DELETE")
+        assert code == 200, (code, raw)
+        assert body(raw) == {"ok": True, "id": draft_id}, body(raw)
+        assert not draft_path.exists(), "批次 JSON 必须被删掉"
+        assert draft_id not in {row["id"] for row in body(call(alice, base2, "/api/batches")[2])["batches"]}
+        assert draft_id not in app2.batches.batches, "内存索引也要清掉"
+        code, _, raw = call(alice, base2, f"/api/batches/{draft_id}", "DELETE")
+        assert code == 404 and body(raw)["ok"] is False, (code, raw)
+        code, _, raw = call(alice, base2, f"/api/batches/{draft_id}")
+        assert code == 404, (code, raw)                    # 删除后详情 404
+        print("  ✓ owner 删 draft：200＋{ok,id}，文件/列表条目消失，详情与重复删 404")
+
+        # 6.2 非 owner → 403（文件仍在）；admin scope=all 删他人批次 → 200
+        other_id = make_batch("AW26-DEL2")
+        other_path = batches_dir / f"{other_id}.json"
+        code, _, raw = call(bob, base2, f"/api/batches/{other_id}", "DELETE")
+        assert code == 403 and body(raw)["ok"] is False, (code, raw)
+        assert other_path.is_file(), "403 不能把文件删掉"
+        assert other_id in app2.batches.batches
+        assert other_id in {row["id"] for row in body(call(admin, base2, "/api/batches?scope=all")[2])["batches"]}
+        code, _, raw = call(admin, base2, f"/api/batches/{other_id}", "DELETE")
+        assert code == 200 and body(raw)["id"] == other_id, (code, raw)
+        assert not other_path.exists()
+        print("  ✓ 非 owner 删 403（文件仍在、批次还在）；admin scope=all 可删他人批次 200")
+
+        # 6.3 不存在的 id → 404
+        code, _, raw = call(alice, base2, "/api/batches/ffffffffffff", "DELETE")
+        assert code == 404 and body(raw)["ok"] is False, (code, raw)
+        print("  ✓ 不存在的 id 删除 404（未登录另行 401，见 server 的 _user）")
+
+        # 6.4 生产中的批次 → 409；停稳后 locked 批次 → 200，且产物文件一个没少
+        live_id = make_batch("AW26-DEL3", upload_id=upload_id)
+        live_path = batches_dir / f"{live_id}.json"
+        code, _, raw = call(alice, base2, f"/api/batches/{live_id}/lock", "POST",
+                            {"template_ids": ready_ids[:3], "confirmed": True})
+        assert code == 200, (code, raw)
+        code, _, raw = call(alice, base2, f"/api/batches/{live_id}/produce", "POST", {"count": 20})
+        assert code == 201, (code, raw)
+        running_job = body(raw)["job"]["id"]
+        assert body(raw)["taken"] == 3 and body(raw)["batch"]["active_job_id"] == running_job, body(raw)
+        assert app2.jobs.jobs[running_job]["status"] not in {
+            "succeeded", "partial", "failed", "canceled"}, "这条断言要求 job 此刻真的在跑"
+        stop_check = {name for name, _size in snapshot_products()}
+        code, _, raw = call(alice, base2, f"/api/batches/{live_id}", "DELETE")
+        assert code == 409, (code, raw)
+        assert body(raw)["error"] == "批次正在生产中，请等待生产结束或取消任务后再删除", body(raw)
+        assert live_path.is_file(), "409 不能删掉文件"
+        assert live_id in app2.batches.batches, "409 后批次必须还在"
+        # job 在跑会新增产物，所以这里只断言「没有被删掉的文件」，不比整个快照
+        assert stop_check - {name for name, _size in snapshot_products()} == set(), \
+            "409 不能删掉 jobs/output 下任何已有文件"
+        wait_job(alice, base2, running_job)
+        stopped = wait_batch(alice, base2, live_id, lambda b: b["active_job_id"] == "", label="删除前排空")
+        assert stopped["state"] == "locked", stopped        # 生产不改批次状态，仍是 locked
+        products_before = snapshot_products()               # job 已终态，此刻不再有人写产物
+        code, _, raw = call(alice, base2, f"/api/batches/{live_id}", "DELETE")
+        assert code == 200 and body(raw)["id"] == live_id, (code, raw)
+        assert not live_path.exists(), "locked 批次也要允许删除"
+        assert snapshot_products() == products_before, "删除批次绝不能动 jobs/output 下的产物"
+        print("  ✓ 生产中 409（文案与契约一致、文件仍在）；停稳后 locked 批次删 200，产物文件一个没少")
+
+        # 6.5 删掉已关闭批次 → 200；历史分组：批次分组消失、job 落回 __ungrouped__
+        closed_path = batches_dir / f"{batch_id}.json"
+        assert closed_path.is_file()
+        # 该批次名下的 job（含重启后补生产的那次，共 3 个）——删批次后它们都要落回未分组
+        moved_ids = {str(job.get("id")) for job in app2.jobs.jobs.values()
+                     if str(job.get("batch_ref") or "") == batch_id}
+        moved_records = sum(len(app2.jobs.jobs[job_id].get("records") or []) for job_id in moved_ids)
+        assert len(moved_ids) == 3 and moved_records == READY_COUNT + 1, (len(moved_ids), moved_records)
+        groups_before = {row["key"]: row for row in body(call(alice, base2, "/api/history/groups")[2])["groups"]}
+        assert batch_id in groups_before, groups_before
+        ungrouped_before = groups_before["__ungrouped__"]
+        products_before = snapshot_products()
+        code, _, raw = call(alice, base2, f"/api/batches/{batch_id}", "DELETE")
+        assert code == 200 and body(raw)["id"] == batch_id, (code, raw)
+        assert not closed_path.exists()
+        assert snapshot_products() == products_before, "删除批次不能碰 web-data/output/ 与 web-data/jobs/"
+        for job_id in sorted(moved_ids):
+            assert (jobs_dir / f"{job_id}.json").is_file(), f"job 文件不该被删：{job_id}"
+            assert app2.jobs.jobs[job_id]["batch_ref"] == batch_id, "batch_ref 必须保持原值（历史不回写）"
+        rows_after = body(call(alice, base2, "/api/history/groups")[2])["groups"]
+        keyed_after = {row["key"]: row for row in rows_after}
+        assert batch_id not in keyed_after, "删除后历史分组不能再出现该批次"
+        assert rows_after[-1]["key"] == "__ungrouped__", rows_after
+        ungrouped_after = keyed_after["__ungrouped__"]
+        assert ungrouped_after["job_count"] == ungrouped_before["job_count"] + len(moved_ids), ungrouped_after
+        assert ungrouped_after["total"] == ungrouped_before["total"] + moved_records, ungrouped_after
+        code, _, raw = call(alice, base2, "/api/history/groups/__ungrouped__?offset=0&limit=500")
+        assert code == 200, (code, raw)
+        moved = [row for row in body(raw)["items"] if row["job_id"] in moved_ids]
+        assert len(moved) == moved_records, len(moved)
+        assert all(row["download_url"] for row in moved), "落回未分组的成功记录仍要能下载"
+        code, _, raw = call(alice, base2, f"/api/history/groups/{batch_id}")
+        assert code == 404, (code, raw)                    # 旧 key 已失效，不留点不开的空分组
+        print(f"  ✓ 删除后历史分组：批次分组消失、{len(moved_ids)} 个 job/{moved_records} 条落回 __ungrouped__，"
+              "batch_ref 不回写、产物没少")
+
+        # 6.6 批次号索引一并释放：同号可重新创建
+        again_id = make_batch("AW26-001")
+        assert again_id != batch_id and again_id in app2.batches.batches
+        print("  ✓ 删除批次同时释放批次号索引，同号可重新创建")
+
+        print("OK 批次创建 → 候选 → 锁定 → 分批生产 → 历史分组 → 重启恢复 → 删除批次 全部通过")
         return 0
     finally:
         for item in (server, server2):

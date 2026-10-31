@@ -11,6 +11,9 @@
     服务重启后首次读取即自动恢复，不引事件总线。
   · 存储：web-data/batches/<id>.json，一 batch 一文件（tmp + os.replace 原子写），
     两个批次并发生产互不覆盖。
+  · 删除批次只删这一份批次 JSON：**已生成的视频属于 job**，web-data/output/ 与
+    web-data/jobs/ 下的文件一律不碰；job 的 batch_ref 保持原值不回写，历史分组按
+    「批次文件还在不在」判定归属，删掉后这些 job 自然落回 __ungrouped__。
 """
 from __future__ import annotations
 
@@ -598,6 +601,37 @@ class BatchManager:
             self._save(batch)
             return self.public(batch)
 
+    # ------------------------------------------------------------------ #12 删除
+    def delete(self, batch_id: str, user: dict) -> dict:
+        """删除批次：只删 web-data/batches/<id>.json 这一个文件。
+
+        安全口径：
+          · 权限：owner 或 admin；不存在 404、非 owner 403（与详情同一套 _authorized）。
+          · 运行中禁删：`active_job_id` 非空（job 未终态）→ 409，避免删掉正在被生产读写的批次。
+          · **不碰任何产物**：web-data/output/、web-data/jobs/ 下的文件不删不移动——
+            已生成的视频属于 job，删批次不等于删视频；job 的 batch_ref 也保持原值（历史数据不回写），
+            历史分组按「批次文件是否还在」判断归属，删掉后这些 job 自然落回 __ungrouped__。
+          · draft / locked / closed 三态都可删，只要不在跑。
+          · 全程持 JobManager.lock（self.mutex 是同一个 RLock），与其他批次/生产操作互斥。
+        """
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            self._reconcile(batch)         # 先对账：job 已终态则清空 active_job_id，才允许删
+            if batch.get("active_job_id"):
+                raise BatchError("批次正在生产中，请等待生产结束或取消任务后再删除", 409)
+            target = batch["id"]
+            try:
+                # 先删文件再摘索引：落盘失败就整体失败（500），不留「内存没了、磁盘还在」的幽灵。
+                self._path(target).unlink(missing_ok=True)
+            except OSError as exc:
+                raise BatchError(f"批次文件删除失败：{exc}", 500) from None
+            self.batches.pop(target, None)
+            key = _norm_no(batch.get("batch_no"))
+            # 只摘掉指向本批次的号码索引；批次号重复时旧批次仍占着索引，不能连带删掉。
+            if key and self.by_no.get(key) == target:
+                self.by_no.pop(key, None)
+            return {"id": target}
+
     # ------------------------------------------------------------------ #6 列表
     def list_for(self, user: dict, all_users: bool = False) -> list[dict]:
         with self.mutex:
@@ -652,14 +686,18 @@ class BatchManager:
 
     # ------------------------------------------------------------------ #11 历史分组
     def history_groups(self, user: dict, all_users: bool = False) -> list[dict]:
-        """按 batch_ref 聚合 job；没有 batch_ref 的（试跑 + 老任务）统一进 __ungrouped__。"""
+        """按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务 + 批次已删除）统一进 __ungrouped__。
+
+        归属只认「批次文件还在不在」：job.batch_ref 不回写（历史数据只读），批次一旦被删除，
+        它名下的 job 会自动落回 __ungrouped__，不会留下一个点不开的空分组。
+        """
         with self.mutex:
             groups: dict[str, dict] = {}
             for job in self.jobs.jobs.values() if self.jobs else ():
                 if not all_users and job.get("owner") != user.get("username"):
                     continue
                 ref = str(job.get("batch_ref") or "")
-                key = ref if ref else UNGROUPED_KEY
+                key = ref if ref and ref in self.batches else UNGROUPED_KEY
                 slot = groups.setdefault(key, {
                     "key": key, "job_count": 0, "total": 0, "success": 0, "failed": 0,
                     "first_at": None, "last_at": None,
@@ -706,8 +744,9 @@ class BatchManager:
                         if str(job.get("batch_ref") or "") == key]
             else:
                 batch_no = "未分组"
+                # 与 history_groups 同口径：没有 batch_ref，或 batch_ref 指向的批次已不存在。
                 mine = [job for job in (self.jobs.jobs.values() if self.jobs else ())
-                        if not job.get("batch_ref")]
+                        if not job.get("batch_ref") or str(job.get("batch_ref")) not in self.batches]
                 if user.get("role") != "admin":
                     mine = [job for job in mine if job.get("owner") == user.get("username")]
                 jobs = mine

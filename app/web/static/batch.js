@@ -1263,12 +1263,61 @@
     progress.append(fill);
     main.append(progress);
     const side = el('div', 'batch-card-side');
+    // 删除放在「继续筛选/打开」左边：次要动作靠左、主操作靠右，不抢视觉。
+    const del = el('button', 'quiet batch-card-del', '删除');
+    del.type = 'button';
+    del.setAttribute('aria-label', `删除批次 ${txt(batch.batch_no) || txt(batch.id)}`);
+    del.addEventListener('click', () => deleteBatch(batch, del));
     const open = el('button', 'quiet', state === 'draft' ? '继续筛选' : '打开');
     open.type = 'button';
     open.addEventListener('click', () => openBatch(txt(batch.id)));
-    side.append(open);
+    side.append(del, open);
     card.append(main, side);
     return card;
+  }
+  // 删除批次：只删批次记录，不碰已生成的视频。二次确认文案与「锁定清单」同一套 confirm 模式。
+  async function deleteBatch(batch, button) {
+    const id = txt(batch && batch.id);
+    if (!id) return;
+    if (button && button.disabled) return;       // 请求进行中，忽略二次点击
+    const label = txt(batch.batch_no) || id;
+    const ask = `确定删除批次「${label}」？\n\n删除后批次记录不可恢复；已生成的视频不受影响，仍可在历史任务中下载。`;
+    if (!confirm(ask)) return;
+    if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
+    try {
+      await api(`/api/batches/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      // 删掉的正好是当前打开的批次：退回列表态，避免后续轮询 404。
+      if (b.current && txt(b.current.id) === id) {
+        stopPoll();
+        b.current = null; b.items = []; b.activeJob = null; b.mode = 'list';
+      }
+      // 从 b.batches 里摘掉再渲染，列表立刻少一张卡；再拉一次接口对齐后端真实数据。
+      b.batches = b.batches.filter((item) => txt(item.id) !== id);
+      renderBatchList();
+      toast('批次已删除');
+      await loadBatches(true);                   // silent：失败提示由这里统一给，不重复弹
+    } catch (err) {
+      const status = Number(err && err.status) || 0;
+      const backend = txt(err && err.message);
+      if (status === 403) {
+        toast('只有创建者或管理员能删除');
+      } else if (status === 409) {
+        // 生产中的批次由后端给出具体原因，直接原样展示，不自己编文案。
+        toast(backend || '批次正在生产中，请等待生产结束或取消任务后再删除');
+      } else if (status === 404) {
+        toast(backend || '批次不存在，可能已被删除');
+        b.batches = b.batches.filter((item) => txt(item.id) !== id);
+        renderBatchList();
+        await loadBatches(true);
+      } else if (!status) {
+        toast('删除失败，请检查网络后重试');
+      } else {
+        toast(backend || '删除失败，请稍后重试');
+      }
+    } finally {
+      // 卡片可能已被重绘掉，按钮还在 DOM 里才需要恢复。
+      if (button && button.isConnected) { button.disabled = false; button.removeAttribute('aria-busy'); }
+    }
   }
   async function openBatch(id) {
     if (!id) return;

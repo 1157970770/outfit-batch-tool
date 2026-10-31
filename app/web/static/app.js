@@ -7,7 +7,9 @@
     const res = await fetch(path, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) } });
     const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
     if (res.status === 401 && path !== '/api/login') showLogin();
-    if (!res.ok) throw new Error(data.error || `请求失败（${res.status}）`);
+    // err.status / err.data 供调用方按状态码分支（如批次删除要区分 403/404/409）。
+    // 只是往 Error 上挂两个字段，message 口径不变，老调用方不受影响。
+    if (!res.ok) { const err = new Error(data.error || `请求失败（${res.status}）`); err.status = res.status; err.data = data; throw err; }
     return data;
   }
   function toast(text) { const el = $('toast'); el.textContent = text; el.classList.remove('hidden'); clearTimeout(el._timer); el._timer = setTimeout(() => el.classList.add('hidden'), 3200); }
