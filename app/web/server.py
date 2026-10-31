@@ -516,6 +516,12 @@ def make_handler(app: WebApplication):
                 parts = path.strip("/").split("/")
                 if len(parts) == 3:
                     return self._batch_delete(parts[2], user)
+            if path.startswith("/api/admin/users/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    if user.get("role") != "admin":
+                        return self._error("此操作需要管理员权限。", 403)
+                    return self._admin_delete_user(urllib.parse.unquote(parts[3]), user)
             return self._error("页面或接口不存在。", 404)
 
         def _login(self, data):
@@ -798,6 +804,20 @@ def make_handler(app: WebApplication):
             user["version"] = int(user.get("version", 1)) + 1
             app.persist_web()
             return self._json({"ok": True})
+
+        def _admin_delete_user(self, username, actor):
+            """DELETE /api/admin/users/{name}：彻底移除账号（区别于停用）。
+
+            用户记录删掉后，SessionSigner.verify 在 users 里查不到人，该账号的
+            所有会话立即失效，无需另建黑名单。
+            """
+            if username not in app.settings.users:
+                return self._error("账号不存在。", 404)
+            if username == actor.get("username"):
+                return self._error("不能删除当前登录的账号。", 409)
+            del app.settings.users[username]
+            app.persist_web()
+            return self._json({"ok": True, "username": username})
 
         def _job_detail(self, job_id, user):
             job = app.jobs.get(job_id)

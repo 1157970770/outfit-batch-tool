@@ -156,7 +156,20 @@ def main() -> int:
         assert code == 200
         code, _, _ = call(admin, base, "/api/admin/users/newuser/enable", "POST", {})
         assert code == 200
-        print("OK 网页上传 → mock 生成 → 进度 → 下载 → 用户隔离 → 管理员账号管理")
+        # 删除账号：非管理员 403、不存在 404、自删 409、正常删 200 且列表消失
+        code, _, _ = call(bob, base, "/api/admin/users/newuser", "DELETE")
+        assert code == 403, code
+        code, _, _ = call(admin, base, "/api/admin/users/ghost", "DELETE")
+        assert code == 404, code
+        code, _, _ = call(admin, base, "/api/admin/users/admin", "DELETE")
+        assert code == 409, code                      # 不能删除当前登录的账号
+        code, _, _ = call(admin, base, "/api/admin/users/newuser", "DELETE")
+        assert code == 200, code
+        code, _, users = call(admin, base, "/api/admin/users")
+        assert code == 200 and not any(u["username"] == "newuser" for u in json.loads(users)["users"])
+        code, _, _ = call(admin, base, "/api/admin/users/newuser", "DELETE")
+        assert code == 404, code                      # 删过的账号再删 404
+        print("OK 网页上传 → mock 生成 → 进度 → 下载 → 用户隔离 → 管理员账号管理（含删除）")
         return 0
     finally:
         if server:
