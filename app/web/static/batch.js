@@ -1,0 +1,1586 @@
+/*
+ * 大批量生产 + 历史任务分组（原生 JS，无框架）
+ * 依赖 app.js 暴露的 window.OutfitApp：{ api, toast, state, switchView, openJob, refreshFlatJobs, statusText }
+ *
+ * 口径说明：
+ * - `duration` 就是输出秒数，本页固定传 7。后端 web 层与 wan_api 已统一为
+ *   `duration_ok()`（-1 或 2–30），7 合法且是 POST /api/batches 的默认值。
+ * - 金额一律优先用后端返回的 cost_estimate.options[i].amount（candidates / produce / 批次详情都带）；
+ *   没有 cost_estimate 时才用本地常量兜底，并在提示里标明是本地估算。
+ */
+(() => {
+  'use strict';
+  const App = window.OutfitApp;
+  if (!App) return;
+  const { api, toast } = App;
+  const $ = (id) => document.getElementById(id);
+
+  const BATCH_DURATION_PARAM = 7;    // duration = 输出秒数，本页固定 7
+  const OUTPUT_SECONDS = BATCH_DURATION_PARAM;
+  const PRODUCE_STEPS = [20, 50, 100];
+  // 本地兜底单价，与后端 settings.DEFAULT_PRICE_PER_SECOND 对齐，仅在后端没给 cost_estimate 时用
+  const PRICE_PER_SECOND = { '480P': 0.3, '720P': 0.6, '1080P': 1.2 };
+  const BILLABLE_SECONDS = 8.45;
+  // 候选分页：每页固定 50 条。
+  // 曾经试过按「候选网格实测容量」动态切页（cols × rowsFit），1920×880 下变成 42 条，
+  // 代价是右列播放器必须跟着候选区一起压矮（播放器从 634px 掉到 374px），用户不接受。
+  // 现在恢复固定 50：候选区高度固定约一屏，放不下就在网格内部滚动，页面允许被右列撑出滚动。
+  // 一次把筛选结果全拉到前端（接口 limit 上限 1000），翻页纯本地切片，不再发请求。
+  const CAND_PAGE = 50;
+  const CAND_FETCH_LIMIT = 500;
+  const ITEM_PAGE = 60;
+  const HISTORY_PAGE = 200;
+  const POLL_MS = 4000;
+
+  const ITEM_STATE_TEXT = { pending: '待生产', producing: '生产中', done: '已完成', failed: '失败' };
+  const BATCH_STATE_TEXT = { draft: '草稿', locked: '已锁定', closed: '已关闭' };
+
+  const b = {
+    mode: 'list',            // list | new | view
+    batches: [], listLoaded: false,
+    current: null, items: [],
+    candidates: [], selected: new Set(), candTotal: 0, candReady: 0,
+    estimate: null,
+    candTagFilter: new Set(), onlySelected: false, candPage: 1, candPageItems: [], candPageBackup: 0,
+    // 每页条数固定 CAND_PAGE（见文件顶部常量），不再随视口容量变化
+    tagFilters: {}, tagPanelOpen: false, formOpen: true,
+    previewId: '', resizeRaf: 0,
+    itemFilter: 'all', itemLimit: ITEM_PAGE, itemsSignature: '',
+    busy: false, pollTimer: null, activeJob: null,
+    groups: [], openGroups: new Set(), groupDetails: new Map(), groupSig: new Map(),
+    historyMode: 'groups', flatWarned: false,
+  };
+
+  /* ---------- 小工具 ---------- */
+  const num = (value, fallback = 0) => { const n = Number(value); return Number.isFinite(n) ? n : fallback; };
+  const txt = (value) => (value === undefined || value === null ? '' : String(value));
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+  function fmtTime(ts) {
+    const n = Number(ts);
+    return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toLocaleString() : '—';
+  }
+  function fmtMoney(amount) {
+    if (!Number.isFinite(amount)) return '';
+    const rounded = Math.round(amount * 10) / 10;
+    return `¥${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}`;
+  }
+  // 档位与上限以 /api/bootstrap 的 service 为准（max_batch_items / max_batch_run_items / produce_choices），
+  // 这里的常量只在服务端没给时兜底。
+  function serviceLimits() {
+    const svc = App.state.service || {};
+    const choices = Array.isArray(svc.produce_choices)
+      ? svc.produce_choices.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
+      : [];
+    return {
+      choices: choices.length ? choices : PRODUCE_STEPS,
+      maxBatchItems: Math.min(1000, num(svc.max_batch_items, 500) || 500),
+      maxRunItems: num(svc.max_batch_run_items, PRODUCE_STEPS[PRODUCE_STEPS.length - 1]) || PRODUCE_STEPS[PRODUCE_STEPS.length - 1],
+    };
+  }
+  function localEstimate(count, resolution) {
+    const price = PRICE_PER_SECOND[String(resolution || '720P').toUpperCase()];
+    if (!Number.isFinite(price)) return null;
+    return count * BILLABLE_SECONDS * price;
+  }
+  // 生产按钮上的金额：优先后端 cost_estimate.options（candidates / produce 都带），
+  // 没有时（例如重开一个已锁定批次、后端还是旧版）用本地常量兜底并标明来源。
+  function produceOptions(batch) {
+    // 批次详情里的是「按当前 pending 条目」算的，比候选那次（按筛选结果）更贴近接下来这批，优先用。
+    const est = (batch && batch.cost_estimate) || b.estimate;
+    if (est && Array.isArray(est.options) && est.options.length) {
+      const unit = est.unit_price === null || est.unit_price === undefined ? null : Number(est.unit_price);
+      const options = est.options
+        .filter((option) => num(option.count) > 0)
+        .map((option) => {
+          const raw = option.amount;
+          const amount = raw === null || raw === undefined ? null : (Number.isFinite(Number(raw)) ? Number(raw) : null);
+          return { count: num(option.count), amount };
+        });
+      return {
+        source: 'server',
+        unit: Number.isFinite(unit) ? unit : null,
+        priceSource: txt(est.price_source),
+        note: txt(est.note),
+        resolution: txt(est.resolution) || txt(batch && batch.resolution),
+        options,
+      };
+    }
+    const resolution = txt(batch && batch.resolution) || '720P';
+    const price = PRICE_PER_SECOND[resolution.toUpperCase()];
+    return {
+      source: 'local',
+      unit: Number.isFinite(price) ? price : null,
+      priceSource: 'local',
+      note: '',
+      resolution,
+      options: serviceLimits().choices.map((count) => ({ count, amount: localEstimate(count, resolution) })),
+    };
+  }
+  function readFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('无法读取图片，请重新选择。'));
+      reader.readAsDataURL(file);
+    });
+  }
+  function scopeParam() {
+    const user = App.state.user;
+    return user && user.role === 'admin' && App.state.showAll ? 'all' : 'mine';
+  }
+  function openJobDetail(jobId) {
+    if (!jobId) return;
+    App.switchView('history-view');
+    App.openJob(jobId);
+  }
+
+  /* ---------- 步骤条与面板显隐 ---------- */
+  function renderStepper(active) {
+    document.querySelectorAll('.batch-step').forEach((node, index) => {
+      node.classList.toggle('is-done', active >= 0 && index < active);
+      node.classList.toggle('is-active', index === active);
+      if (index === active) node.setAttribute('aria-current', 'step');
+      else node.removeAttribute('aria-current');
+    });
+  }
+  function show(panelId, visible) { $(panelId).classList.toggle('hidden', !visible); }
+
+  function renderBatch() {
+    const batch = b.current;
+    if (b.mode === 'list' || (!batch && b.mode !== 'new')) {
+      show('batch-work', false);
+      $('batch-list').classList.remove('hidden');
+      renderStepper(-1);
+      renderBatchList();
+      updateExitButton();
+      return;
+    }
+    $('batch-list').classList.add('hidden');
+    show('batch-work', true);
+
+    const creating = b.mode === 'new';
+    const batchState = txt(batch && batch.state) || 'draft';
+    const locked = !creating && (batchState === 'locked' || batchState === 'closed');
+
+    show('batch-step-a', true);
+    show('batch-step-b', !creating && !locked);
+    show('batch-step-c', locked);
+    show('batch-step-d', locked);
+    setFormFrozen(!creating);
+    setBatchFormOpen(creating ? true : b.formOpen);
+    updateExitButton();
+    if (creating) {
+      renderStepper(0);
+    } else {
+      fillBatchForm(batch);
+      if (locked) {
+        renderStepper(3);
+        renderSummary(batch);
+        renderProduce(batch);
+        renderItems();
+      } else {
+        renderStepper(1);
+        updateBatchCounts();
+      }
+    }
+    // 面板刚显隐完，等一帧再量高度（候选区高度跟着页头/步骤条/工具条的实际高度走）
+    queueCandHeight();
+  }
+
+  /* ---------- 退出当前批次计划（仅草稿态） ----------
+     只是把界面退回批次列表，服务端一个字节都不动：批次仍是 draft，冻结的设置、定妆图、提示词都在。
+     本页内存里的勾选会清空（跨页选中本来就是本地状态），下次从列表点「继续筛选」重新筛一遍接着做。
+     已锁定/已关闭的批次不给这个入口 —— 那两种状态下它既没用（清单不可改）也容易让人误以为能撤销。 */
+  function updateExitButton() {
+    const btn = $('batch-exit-btn');
+    if (!btn) return;
+    const state = txt(b.current && b.current.state) || 'draft';
+    const visible = b.mode === 'view' && !!b.current && !!b.current.id && state === 'draft';
+    btn.classList.toggle('hidden', !visible);
+    btn.disabled = !visible || b.busy;
+  }
+  function exitBatch() {
+    if (b.mode !== 'view' || !b.current || b.busy) return;
+    b.mode = 'list';
+    b.current = null;
+    b.items = [];
+    b.itemsSignature = '';
+    b.activeJob = null;
+    stopPoll();
+    resetCandidates();
+    resetItemsView();
+    renderBatch();
+    loadBatches(true);
+    window.scrollTo(0, 0);
+    toast('已退出这个批次，草稿仍然保留；点「继续筛选」可以接着做。');
+  }
+
+  /* ---------- 步骤 A：建批次 ---------- */
+  function setFormFrozen(frozen) {
+    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution'].forEach((id) => {
+      const node = $(id);
+      if (node) node.disabled = frozen;
+    });
+    $('batch-create-btn').disabled = frozen;
+    $('batch-drop-zone').classList.toggle('is-frozen', frozen);
+    $('batch-a-hint').textContent = frozen
+      ? '批次级设置已冻结：提示词、画质、时长、定妆图建立后不可改；要改请新建批次。'
+      : '提示词、画质、时长在批次级冻结；建好后要改只能新建批次。';
+  }
+  // 已有批次：折叠冻结的建批次表单（省下一整屏）；新建批次时必须是展开的。
+  function setBatchFormOpen(open) {
+    const card = $('batch-step-a');
+    const body = $('batch-a-body');
+    const btn = $('batch-a-toggle');
+    const summary = $('batch-a-summary');
+    if (!card || !body || !btn) return;
+    const collapsible = b.mode !== 'new';
+    const collapsed = collapsible && !open;
+    b.formOpen = !collapsed;
+    card.classList.toggle('is-collapsed', collapsed);
+    body.classList.toggle('hidden', collapsed);
+    if (summary) summary.classList.toggle('hidden', !collapsed);
+    btn.classList.toggle('hidden', !collapsible);
+    btn.textContent = collapsed ? '展开设置' : '收起设置';
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    queueCandHeight();
+  }
+  function fillBatchForm(batch) {
+    $('batch-no').value = txt(batch.batch_no);
+    $('batch-title').value = txt(batch.title);
+    if (txt(batch.resolution)) $('batch-resolution').value = txt(batch.resolution);
+    const promptId = txt(batch.prompt_id);
+    if (promptId && [...$('batch-prompt-select').options].some((option) => option.value === promptId)) {
+      $('batch-prompt-select').value = promptId;
+    }
+    if (txt(batch.prompt)) $('batch-prompt-body').value = txt(batch.prompt);
+    updateBatchPromptCount();
+    const imageName = txt(batch.image_name);
+    const imageUrl = txt(batch.image_url);
+    $('batch-image-info').textContent = imageName ? `定妆图：${imageName}` : '这个批次还没有绑定定妆图。';
+    const durationValue = batch.duration === null || batch.duration === undefined ? BATCH_DURATION_PARAM : num(batch.duration, BATCH_DURATION_PARAM);
+    // 收起状态下这一行就是「这个批次是什么」的全部信息
+    $('batch-a-summary').textContent = [
+      txt(batch.batch_no) || '未命名批次',
+      txt(batch.title) || '',
+      txt(batch.resolution) || '—',
+      durationValue > 0 ? `输出 ${durationValue} 秒` : '输出跟随素材时长',
+      imageName ? `定妆图 ${imageName}` : '未绑定定妆图',
+    ].filter(Boolean).join(' · ');
+    const preview = $('batch-image-preview');
+    if (imageUrl) {
+      // 批次里存的定妆图，走 /api/uploads/{id}（后端只给 owner/admin 看）
+      preview.src = imageUrl;
+      preview.alt = imageName ? `定妆图：${imageName}` : '定妆图';
+      preview.classList.remove('hidden');
+    } else {
+      preview.classList.add('hidden');
+      preview.removeAttribute('src');
+    }
+    $('batch-drop-copy').classList.toggle('hidden', !!(imageUrl || imageName));
+  }
+  function resetBatchForm() {
+    $('batch-no').value = '';
+    $('batch-title').value = '';
+    $('batch-prompt-body').value = '';
+    $('batch-image-info').textContent = '';
+    $('batch-image-file').value = '';
+    const preview = $('batch-image-preview');
+    preview.classList.add('hidden');
+    preview.removeAttribute('src');
+    $('batch-drop-copy').classList.remove('hidden');
+    const promptSelect = $('batch-prompt-select');
+    if (promptSelect && promptSelect.options.length) {
+      promptSelect.selectedIndex = 0;
+      $('batch-prompt-body').value = promptSelect.selectedOptions[0]?.dataset.body || '';
+    }
+    updateBatchPromptCount();
+    clearBatchError();
+    setFormFrozen(false);
+  }
+  function updateBatchPromptCount() {
+    $('batch-prompt-length').textContent = `${$('batch-prompt-body').value.length} / 4000`;
+  }
+  function showBatchError(text) {
+    const node = $('batch-create-error');
+    node.textContent = text;
+    node.classList.toggle('hidden', !text);
+  }
+  function clearBatchError() { showBatchError(''); }
+
+  async function createBatch() {
+    if (b.busy) return;
+    const batchNo = $('batch-no').value.trim();
+    const title = $('batch-title').value.trim();
+    const promptBody = $('batch-prompt-body').value.trim();
+    const promptId = $('batch-prompt-select').value;
+    const resolution = $('batch-resolution').value;
+    const file = $('batch-image-file').files[0];
+    clearBatchError();
+    if (batchNo.length < 1 || batchNo.length > 40) { showBatchError('批次号必填，1–40 个字符。'); $('batch-no').focus(); return; }
+    if (!file) { showBatchError('请先上传定妆图。'); return; }
+    if (!promptId) { showBatchError('请选择提示词模板。'); return; }
+    if (!promptBody) { showBatchError('提示词不能为空，请选择模板或填写内容。'); return; }
+    if (promptBody.length > 4000) { showBatchError('提示词最多 4000 个字符。'); return; }
+
+    const btn = $('batch-create-btn');
+    b.busy = true; btn.disabled = true; btn.textContent = '正在上传定妆图…';
+    try {
+      const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: await readFile(file) }) });
+      btn.textContent = '正在创建批次…';
+      const payload = { batch_no: batchNo, title, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_id: uploaded.upload_id };
+      const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
+      if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
+      b.current = data.batch;
+      b.mode = 'view';
+      b.formOpen = false;   // 建好就收起冻结的设置，直接看候选
+      resetCandidates();
+      toast(`批次 ${txt(b.current.batch_no) || batchNo} 已建好，接着筛候选。`);
+      renderBatch();
+      await fetchCandidates();
+    } catch (err) {
+      showBatchError(err.message);
+      toast(err.message);
+    } finally {
+      b.busy = false;
+      btn.disabled = false;
+      btn.textContent = '创建批次';
+      renderBatch();
+    }
+  }
+
+  /* ---------- 定妆图上传（复用现有交互与校验口径） ---------- */
+  function bindDropZone() {
+    const input = $('batch-image-file');
+    const zone = $('batch-drop-zone');
+    input.addEventListener('change', () => previewBatchFile(input.files[0]));
+    zone.addEventListener('dragover', (event) => { event.preventDefault(); if (!zone.classList.contains('is-frozen')) zone.classList.add('drag'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+    zone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      zone.classList.remove('drag');
+      if (zone.classList.contains('is-frozen')) return;
+      const file = event.dataTransfer.files[0];
+      if (!file) return;
+      input.files = event.dataTransfer.files;
+      previewBatchFile(file);
+    });
+  }
+  function previewBatchFile(file) {
+    $('batch-image-info').textContent = '';
+    if (!file) return;
+    const okType = /\.(jpe?g|png|webp|bmp)$/i.test(file.name);
+    if (!okType || file.size > 20 * 1024 * 1024) {
+      $('batch-image-info').textContent = '请选择 JPG、PNG 或 WebP 图片，大小不超过 20MB。iPhone HEIC 请先另存为 JPG。';
+      $('batch-image-file').value = '';
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    $('batch-image-preview').src = url;
+    $('batch-image-preview').classList.remove('hidden');
+    $('batch-drop-copy').classList.add('hidden');
+    $('batch-image-info').textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB`;
+  }
+
+  /* ---------- 提示词 ---------- */
+  function fillPromptSelect() {
+    const select = $('batch-prompt-select');
+    if (!select) return;
+    const prompts = App.state.prompts || [];
+    const previous = select.value;
+    select.replaceChildren();
+    for (const prompt of prompts) {
+      const option = document.createElement('option');
+      option.value = prompt.id;
+      option.textContent = prompt.title;
+      option.dataset.body = prompt.body || '';
+      select.append(option);
+    }
+    if (previous && [...select.options].some((option) => option.value === previous)) select.value = previous;
+    if (b.mode === 'new') {
+      const first = select.selectedOptions[0];
+      $('batch-prompt-body').value = first ? (first.dataset.body || '') : '';
+    }
+    updateBatchPromptCount();
+  }
+
+  /* ---------- 步骤 B：标签筛选与候选 ---------- */
+  function renderBatchTagFilters() {
+    const root = $('batch-tag-groups');
+    if (!root) return;
+    const st = App.state;
+    const categories = (st.tagCategories && st.tagCategories.length) ? st.tagCategories : Object.keys(st.tagValues || {});
+    const tagValues = st.tagValues || {};
+    const hasAny = categories.some((category) => (tagValues[category] || []).length);
+    // 标签面板默认收起：候选区要靠这一百多像素挤进一屏，展开交给「标签筛选」按钮。
+    $('batch-tag-card').dataset.hasTags = hasAny ? '1' : '0';
+    if (!hasAny) b.tagPanelOpen = false;
+    applyTagPanel();
+    root.replaceChildren();
+    if (!hasAny) return;
+    for (const category of categories) {
+      const tags = tagValues[category] || [];
+      if (!tags.length) continue;
+      const group = el('fieldset', 'tag-filter-group');
+      group.append(el('legend', null, category));
+      const wrap = el('div', 'tag-filter-options');
+      for (const tag of tags) {
+        const label = el('label', 'tag-filter-option');
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.className = 'batch-tag-input';
+        input.dataset.category = category;
+        input.value = tag;
+        input.checked = (b.tagFilters[category] || []).includes(tag);
+        input.addEventListener('change', () => {
+          b.tagFilters = collectBatchTagFilters();
+          $('batch-tag-summary').textContent = '筛选条件已改变，点「刷新候选」重新匹配。';
+        });
+        label.append(input, el('span', null, tag));
+        wrap.append(label);
+      }
+      group.append(wrap);
+      root.append(group);
+    }
+  }
+  function collectBatchTagFilters() {
+    const filters = {};
+    document.querySelectorAll('#batch-tag-groups .batch-tag-input:checked').forEach((input) => {
+      (filters[input.dataset.category] || (filters[input.dataset.category] = [])).push(input.value);
+    });
+    return filters;
+  }
+  function syncTagInputs() {
+    document.querySelectorAll('#batch-tag-groups .batch-tag-input').forEach((input) => {
+      input.checked = (b.tagFilters[input.dataset.category] || []).includes(input.value);
+    });
+  }
+  // 标签面板开合：收起时只留工具条上的按钮，候选区就能多吃几行。
+  function applyTagPanel() {
+    const card = $('batch-tag-card');
+    const btn = $('batch-tag-toggle');
+    if (!card || !btn) return;
+    const hasTags = card.dataset.hasTags === '1';
+    const open = hasTags && b.tagPanelOpen;
+    card.classList.toggle('hidden', !open);
+    btn.disabled = !hasTags;
+    btn.classList.toggle('is-on', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.title = hasTags ? (open ? '收起标签筛选' : '展开标签筛选') : '模板还没有标签可选';
+    queueCandHeight();
+  }
+  function toggleTagPanel() {
+    b.tagPanelOpen = !b.tagPanelOpen;
+    applyTagPanel();
+  }
+  function resetCandidates() {
+    b.candidates = [];
+    b.selected = new Set();
+    b.candTagFilter.clear();
+    b.onlySelected = false;
+    b.candPage = 1;
+    b.candPageItems = [];
+    b.candPageBackup = 0;
+    b.candTotal = 0; b.candReady = 0;
+    b.estimate = null;
+    if ($('batch-only-selected')) $('batch-only-selected').checked = false;
+    clearPreview();
+    renderCandChips();
+    renderCandidates();
+    $('batch-tag-summary').textContent = '';
+    $('batch-cand-note').classList.add('hidden');
+  }
+
+  async function fetchCandidates() {
+    const batch = b.current;
+    if (!batch || !batch.id) return;
+    const btn = $('batch-candidates-btn');
+    b.tagFilters = collectBatchTagFilters();
+    btn.disabled = true; btn.textContent = '正在筛选…';
+    $('batch-tag-summary').textContent = '正在匹配候选…';
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(batch.id)}/candidates`, {
+        method: 'POST',
+        body: JSON.stringify({ tag_filters: b.tagFilters, limit: CAND_FETCH_LIMIT }),
+      });
+      const items = Array.isArray(data.items) ? data.items : [];
+      b.candidates = items.map((item) => ({
+        id: txt(item.id),
+        name: txt(item.name) || `场景 ${txt(item.id)}`,
+        tags: Array.isArray(item.tags) ? item.tags.map(txt) : [],
+        ready: item.ready !== false,
+      }));
+      // filtered_total 是「筛选命中总数」（可能大于本次返回条数），total 只是这一批的条数。
+      b.candTotal = num(data.filtered_total, num(data.total, b.candidates.length));
+      b.candReady = num(data.ready_count, b.candidates.filter((item) => item.ready).length);
+      b.estimate = data.cost_estimate || null;
+      // 默认不选中任何项：分页后「已选 480」与第一页可见的 50 张极易混淆，
+      // 用户若误以为 480 是本页数量，锁定后连点几次「生产 100」会意外产生数千元费用。
+      // 想全做就点一次「全选全部 N 条」，多一步换来不会误操作。
+      b.selected = new Set();
+      b.candTagFilter.clear();
+      b.onlySelected = false;
+      $('batch-only-selected').checked = false;
+      b.candPage = 1;              // 换了筛选条件就回到第 1 页
+      b.candPageBackup = 0;
+      const matched = b.candTotal || b.candidates.length;
+      $('batch-tag-summary').textContent = `匹配 ${matched} 个场景 · 可生产 ${b.candReady} 个`;
+      if (b.candidates.length < matched) {
+        showCandNote(`服务端只返回了前 ${b.candidates.length} 条候选（共 ${matched} 条），分页只覆盖返回的这批，请再用标签收窄范围。`);
+      } else if (!b.candReady) {
+        showCandNote('候选都还没上传到云端，现在只能预览，不能锁定生产。');
+      } else {
+        showCandNote('');
+      }
+      renderCandChips();
+      renderCandidates();
+      if (!b.candidates.length) toast('当前筛选没有匹配的场景，换一组标签试试。');
+    } catch (err) {
+      b.candidates = [];
+      b.selected = new Set();
+      renderCandChips();
+      renderCandidates();
+      $('batch-tag-summary').textContent = err.message;
+      showCandNote(err.message);
+      toast(err.message);
+    } finally {
+      btn.disabled = false; btn.textContent = '刷新候选';
+    }
+  }
+
+  /* 当前筛选命中的候选（只受标签快筛影响，不受「只看已选」影响）。
+     「全选全部 N 条」的 N 就取这里的长度 —— 是筛选后的真实条数，不是 500 这个拉取上限。 */
+  function candidateMatched() {
+    let list = b.candidates;
+    if (b.candTagFilter.size) {
+      const wanted = [...b.candTagFilter];
+      list = list.filter((item) => wanted.every((tag) => item.tags.includes(tag)));
+    }
+    return list;
+  }
+  function candidateVisible() {
+    const list = candidateMatched();
+    return b.onlySelected ? list.filter((item) => b.selected.has(item.id)) : list;
+  }
+  function candPageCount(total) {
+    return total > 0 ? Math.ceil(total / CAND_PAGE) : 1;
+  }
+
+  /* 候选网格：本地分页，一次渲染一整页（每页固定 CAND_PAGE = 50 条）。
+     翻页不重建整份列表，只换这一页的卡片；b.selected 是跨页唯一的选中事实来源。
+     一页放不下时网格内部滚动 —— 这是为「播放器面积最大」付出的代价。 */
+  function renderCandidates() {
+    const grid = $('batch-cand-grid');
+    // 先把候选区高度量准（高度只取决于网格外的页头/工具条，与本页有几张卡无关）
+    syncCandHeight();
+    const visible = candidateVisible();
+    const pageCount = candPageCount(visible.length);
+    // 筛选 / 反选 / 取消选中会让页数变少：夹住页码，别停在一页空网格上
+    b.candPage = Math.min(Math.max(1, num(b.candPage, 1)), pageCount);
+    const start = (b.candPage - 1) * CAND_PAGE;
+    const slice = visible.slice(start, start + CAND_PAGE);
+    b.candPageItems = slice;
+    const fragment = document.createDocumentFragment();
+    for (const item of slice) fragment.append(candidateTile(item));
+    grid.replaceChildren(fragment);
+    if (!visible.length) {
+      grid.append(el('div', 'empty batch-cand-empty',
+        b.candidates.length ? '当前过滤条件下没有候选，清掉「只看已选」或标签定位试试。' : '还没有候选，选好标签后点「刷新候选」。'));
+    }
+    renderCandPager(visible.length, pageCount, start, slice.length);
+    updateBatchCounts();
+    ensurePreview();
+  }
+
+  function renderCandPager(total, pageCount, start, shown) {
+    const pager = $('batch-cand-pager');
+    if (!pager) return;
+    const empty = total === 0;
+    pager.classList.toggle('hidden', empty);
+    // 「全选全部 N 条」的数字跟着筛选走，按钮文案就是点下去会覆盖的范围
+    const matched = candidateMatched();
+    const readyMatched = matched.filter((item) => item.ready).length;
+    const allBtn = $('batch-select-all');
+    const label = `全选全部 ${matched.length} 条`;
+    if (allBtn.textContent !== label) allBtn.textContent = label;
+    allBtn.disabled = !matched.length;
+    allBtn.title = readyMatched < matched.length
+      ? `当前筛选共 ${matched.length} 条，其中 ${readyMatched} 条已上传云端可生产；未上传的 ${matched.length - readyMatched} 条选不了。`
+      : `选中当前筛选下的全部 ${matched.length} 条（跨 ${candPageCount(matched.length)} 页），已选数量继续累计。`;
+    if (empty) return;
+    $('batch-page-prev').disabled = b.candPage <= 1;
+    $('batch-page-next').disabled = b.candPage >= pageCount;
+    const info = $('batch-page-info');
+    info.textContent = `第 ${b.candPage} / ${pageCount} 页`;
+    info.title = `本轮显示第 ${start + 1}–${start + shown} 条，共 ${total} 条`;
+  }
+
+  function goCandPage(page) {
+    const pageCount = candPageCount(candidateVisible().length);
+    const next = Math.min(Math.max(1, page), pageCount);
+    if (!Number.isFinite(next) || next === b.candPage) return;
+    b.candPage = next;
+    renderCandidates();
+    scrollCandTop();
+  }
+
+  /* 翻页后把视线带回候选区顶部。桌面候选网格自己滚（改 scrollTop 即可），
+     平板/手机是整页滚动，得把窗口拉回候选区。
+     桌面一页正好一屏、页面本身不该有滚动条，这时绝不能动窗口 —— 一滚就把候选区推到视口上方，
+     底下留出一大片空白（这正是之前那个 bug 的现场）。 */
+  function scrollCandTop() {
+    const grid = $('batch-cand-grid');
+    const main = document.querySelector('.batch-cand-main');
+    if (grid) grid.scrollTop = 0;
+    if (!main) return;
+    const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    if (maxScroll <= 0) return;   // 页面不可滚（桌面固定高度模式），交给网格自己
+    const rect = main.getBoundingClientRect();
+    if (rect.top >= 0 && rect.top < window.innerHeight * 0.5) return;
+    const top = rect.top + (window.scrollY || window.pageYOffset || 0) - 8;
+    window.scrollTo(0, Math.min(maxScroll, Math.max(0, Math.round(top))));
+  }
+
+  /* 密集候选行：一行勾选框 + 文件名，二行标签单行省略；整卡可点 = 选中 + 预览。
+     未上传的候选不能勾选（服务端锁定会拒），但仍然可以点开看，才知道为什么不能用。 */
+  function candidateTile(item) {
+    const selected = b.selected.has(item.id);
+    const tile = el('div', `batch-cand${selected ? ' is-selected' : ''}${item.ready ? '' : ' is-unready'}`);
+    tile.dataset.id = item.id;
+    tile.tabIndex = 0;
+    tile.setAttribute('role', 'button');
+    tile.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    tile.setAttribute('aria-label', item.ready
+      ? `选中并预览 ${item.name}`
+      : `预览 ${item.name}（未上传云端，不能选中）`);
+    tile.title = item.ready
+      ? `${item.name}（${item.id}）\n点击在右侧预览并选中；取消选择点左侧勾选框`
+      : `${item.name}（${item.id}）\n还没有上传到云端，只能预览、不能选中`;
+
+    const pick = el('label', 'batch-cand-pick');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'batch-cand-check';
+    checkbox.checked = selected;
+    checkbox.disabled = !item.ready;
+    checkbox.setAttribute('aria-label', `选择 ${item.name}`);
+    pick.append(checkbox);
+
+    const line = el('span', 'batch-cand-line');
+    const name = el('span', 'batch-cand-name', item.name);
+    name.title = item.name;
+    line.append(name);
+    if (!item.ready) line.append(el('span', 'batch-cand-badge', '未上传'));
+    const tags = item.tags.slice(0, 4).join(' / ');
+    const meta = el('div', 'batch-cand-meta', `${item.id}${tags ? ` · ${tags}` : ''}`);
+    meta.title = item.tags.length ? item.tags.join(' / ') : item.id;
+    tile.append(pick, line, meta);
+
+    const paint = () => {
+      const on = b.selected.has(item.id);
+      tile.classList.toggle('is-selected', on);
+      tile.setAttribute('aria-pressed', on ? 'true' : 'false');
+      checkbox.checked = on;
+    };
+    // 勾选框只负责选中/取消，不抢整卡的点击
+    pick.addEventListener('click', (event) => event.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) b.selected.add(item.id);
+      else b.selected.delete(item.id);
+      paint();
+      updateBatchCounts();
+      if (b.onlySelected) renderCandidates();
+    });
+
+    const activate = () => {
+      if (item.ready && !b.selected.has(item.id)) {
+        // 点卡片是「选中」，不做反选：默认全选已就绪项时，预览一圈不该把候选悄悄取消掉
+        b.selected.add(item.id);
+        paint();
+        updateBatchCounts();
+        if (b.onlySelected) { renderCandidates(); return; }
+      }
+      previewCandidate(item, tile);
+    };
+    tile.addEventListener('click', activate);
+    tile.addEventListener('keydown', (event) => {
+      if (event.target !== tile) return;
+      if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+      event.preventDefault();
+      activate();
+    });
+    return tile;
+  }
+
+  const PREVIEW_PLACEHOLDER = '进入候选后会在这里自动播放第一条，点任意候选即可切换（整页只有一个播放器）。';
+
+  function showPreviewNote(text, isError) {
+    const node = $('batch-preview-note');
+    if (!node) return;
+    // 真实的加载失败优先：别被后面姗姗来迟的「自动播放被拦」提示盖掉
+    const hasError = node.classList.contains('is-error') && !node.classList.contains('hidden');
+    if (hasError && text && !isError) return;
+    node.textContent = txt(text);
+    node.classList.toggle('is-error', !!text && !!isError);
+    node.classList.toggle('hidden', !text);
+  }
+  function clearPreview() {
+    const video = $('batch-preview-video');
+    b.previewId = '';
+    if (video) {
+      video.removeAttribute('src');
+      video.muted = false;
+      video.classList.add('is-empty');
+      if (video.load) video.load();
+    }
+    $('batch-preview-name').textContent = PREVIEW_PLACEHOLDER;
+    showPreviewNote('');
+    document.querySelectorAll('.batch-cand.is-previewing').forEach((node) => node.classList.remove('is-previewing'));
+  }
+  // 整页只有这一个 <video>：切候选只改 src，绝不按候选数量建 video 标签。
+  function previewCandidate(item, tile) {
+    const video = $('batch-preview-video');
+    if (!video || !item || !item.id) return;
+    document.querySelectorAll('.batch-cand.is-previewing').forEach((node) => node.classList.remove('is-previewing'));
+    if (tile) tile.classList.add('is-previewing');
+    $('batch-preview-name').textContent = `${item.name}（${item.id}）`;
+    if (!item.ready) {
+      // 未上传的候选云端没有文件，/preview 只会 404 —— 与其给一块黑屏，不如直接说原因
+      b.previewId = '';
+      video.removeAttribute('src');
+      video.muted = false;
+      video.classList.add('is-empty');
+      if (video.load) video.load();
+      showPreviewNote('这条候选还没上传到云端，云端没有可播放的预览；上传后重新筛选就能勾选进清单。');
+      return;
+    }
+    const src = `/api/templates/${encodeURIComponent(item.id)}/preview`;
+    const changed = video.getAttribute('src') !== src;
+    b.previewId = item.id;
+    if (changed) {
+      showPreviewNote('');
+      video.classList.remove('is-empty');
+      video.src = src;
+      if (video.load) video.load();
+    }
+    if (changed) tryPlay(video);
+  }
+  function tryPlay(video) {
+    let promise;
+    try { promise = video.play(); } catch (_) {
+      showPreviewNote('浏览器拦住了自动播放，点一下播放键即可查看。');
+      return;
+    }
+    if (!promise || typeof promise.then !== 'function') return;
+    promise.catch(() => {
+      // 多数浏览器只允许静音自动播放：先静音再试一次，仍被拦就提示手动点（原生控件一直在）
+      if (!video.muted) {
+        video.muted = true;
+        const retry = video.play();
+        if (retry && typeof retry.then === 'function') {
+          retry.catch(() => showPreviewNote('浏览器拦住了自动播放，点一下播放键即可查看。'));
+        }
+        return;
+      }
+      showPreviewNote('浏览器拦住了自动播放，点一下播放键即可查看。');
+    });
+  }
+  // 进入候选（或翻到某一页）后自动把这一页第一条可用候选送进播放器（用户已手动选过就不打扰）
+  function ensurePreview() {
+    const panel = $('batch-step-b');
+    const video = $('batch-preview-video');
+    if (!panel || !video || panel.classList.contains('hidden')) return;
+    if (b.previewId) return;
+    const all = candidateVisible();
+    const pageReady = (b.candPageItems || []).filter((item) => item.ready);
+    const first = pageReady[0] || all.find((item) => item.ready) || all[0];
+    if (!first) return;
+    previewCandidate(first, tileById(first.id));
+  }
+  function tileById(id) {
+    const grid = $('batch-cand-grid');
+    if (!grid) return null;
+    return [...grid.children].find((node) => node.dataset && node.dataset.id === id) || null;
+  }
+
+  /* 候选区高度：外层固定为「一屏减掉页头/步骤条/工具条」的高度，网格内部自己滚。
+     桌面用实测值（页头高度会变），其它端交回 CSS 自然高度。
+
+     这里只算候选区自己的高度，**不再去减 main 底下那截尾部占位**（那套 tail 探测是为了
+     「整页不滚动」，代价是把播放器一起压矮，已按用户要求回滚）。
+     于是整页会被右列（播放器 72vh）撑出 150~250px 的纵向滚动，这是明确取舍：
+     播放器面积优先，不要再为了消滚动把 --batch-cand-h 往下压。 */
+  const CAND_BOTTOM_GAP = 12;   // 候选区底边到视口底部留的空隙，与 .shell 的 12px 同口径
+  const CAND_MIN_H = 240;
+
+  function candPanelVisible() {
+    const panel = $('batch-step-b');
+    const work = $('batch-work');
+    return !!panel && !!work && !panel.classList.contains('hidden') && !work.classList.contains('hidden');
+  }
+
+  function syncCandHeight() {
+    const main = document.querySelector('.batch-cand-main');
+    const layout = document.querySelector('.batch-cand-layout');
+    if (!main || !layout) return;
+    // 变量写在候选区与右列的**共同父级**上，便于统一调试/取值；
+    // 注意：右列（播放器）**不再**依赖它决定高度（见 batch.css），播放器高度只由 72vh 决定。
+    const host = layout;
+    if (!candPanelVisible() || window.innerWidth <= 900) {
+      host.style.removeProperty('--batch-cand-h');
+      return;
+    }
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const topInDoc = main.getBoundingClientRect().top + scrollY;
+    const height = Math.max(CAND_MIN_H, Math.round(window.innerHeight - topInDoc - CAND_BOTTOM_GAP));
+    host.style.setProperty('--batch-cand-h', `${height}px`);
+  }
+
+  function queueCandHeight() {
+    if (b.resizeRaf) cancelAnimationFrame(b.resizeRaf);
+    b.resizeRaf = requestAnimationFrame(() => {
+      b.resizeRaf = 0;
+      syncCandHeight();
+    });
+  }
+  function showCandNote(text) {
+    const node = $('batch-cand-note');
+    if (!node) return;
+    node.textContent = txt(text);
+    node.classList.toggle('hidden', !text);
+    queueCandHeight();
+  }
+  function updateBatchCounts() {
+    const chosen = b.selected.size;
+    $('batch-count-label').textContent = `已选 ${chosen} / 候选 ${b.candidates.length}`;
+    // 锁定条在候选区底部，标题只说数量；完整提示跟在数量后面，窄屏可换行。
+    $('batch-lock-count').textContent = chosen ? `已选 ${chosen} 条` : '已选 0 条';
+    $('batch-lock-btn').disabled = !chosen || b.busy;
+    $('batch-lock-hint').textContent = chosen
+      ? '锁定后清单不可更改，未勾选的候选不会生产。'
+      : '至少勾选一条才能锁定。';
+  }
+  function renderCandChips() {
+    const root = $('batch-cand-chips');
+    root.replaceChildren();
+    const counts = new Map();
+    for (const item of b.candidates) for (const tag of item.tags) counts.set(tag, (counts.get(tag) || 0) + 1);
+    const tags = [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 24);
+    if (!tags.length) return;
+    root.append(el('span', 'batch-chips-label', '按标签快速定位（需同时包含）：'));
+    for (const [tag, count] of tags) {
+      const chip = el('button', `batch-chip${b.candTagFilter.has(tag) ? ' is-on' : ''}`, `${tag} ${count}`);
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed', b.candTagFilter.has(tag) ? 'true' : 'false');
+      chip.addEventListener('click', () => {
+        if (b.candTagFilter.has(tag)) b.candTagFilter.delete(tag);
+        else b.candTagFilter.add(tag);
+        b.candPage = 1;   // 筛选条件变了，回第 1 页
+        renderCandChips();
+        renderCandidates();
+      });
+      root.append(chip);
+    }
+  }
+
+  async function lockBatch() {
+    const batch = b.current;
+    if (!batch || !batch.id || b.busy) return;
+    const ids = [...b.selected];
+    if (!ids.length) { toast('至少勾选一条候选。'); return; }
+    if (!confirm(`锁定 ${ids.length} 条为待生产清单？\n\n锁定后不能再增删条目，也不能换定妆图；要改只能新建批次。`)) return;
+    const btn = $('batch-lock-btn');
+    b.busy = true; btn.disabled = true; btn.textContent = '正在锁定…';
+    $('batch-lock-error').classList.add('hidden');
+    try {
+      await api(`/api/batches/${encodeURIComponent(batch.id)}/lock`, {
+        method: 'POST',
+        body: JSON.stringify({ template_ids: ids, tag_filters: b.tagFilters, confirmed: true }),
+      });
+      toast(`已锁定 ${ids.length} 条清单，可以开始分批生产。`);
+      await refreshBatch(false);
+    } catch (err) {
+      toast(err.message);
+      const node = $('batch-lock-error');
+      node.textContent = err.message;
+      node.classList.remove('hidden');
+    } finally {
+      b.busy = false;
+      btn.textContent = '锁定清单';
+      renderBatch();
+    }
+  }
+
+  /* ---------- 步骤 C / D：锁定摘要、分批生产 ---------- */
+  function renderSummary(batch) {
+    const root = $('batch-summary');
+    root.replaceChildren();
+    const total = num(batch.total_items, b.items.length);
+    const done = num(batch.done);
+    const failed = num(batch.failed);
+    const durationValue = batch.duration === null || batch.duration === undefined
+      ? BATCH_DURATION_PARAM : num(batch.duration, BATCH_DURATION_PARAM);
+    const prompt = txt(batch.prompt);
+    const filters = batch.tag_filters && typeof batch.tag_filters === 'object' ? batch.tag_filters : null;
+    const filterText = filters
+      ? Object.entries(filters).map(([category, values]) => `${category}: ${Array.isArray(values) ? values.join('/') : txt(values)}`).join('；')
+      : '';
+    const rows = [
+      ['批次号', txt(batch.batch_no) || '—'],
+      ['状态', BATCH_STATE_TEXT[txt(batch.state)] || txt(batch.state) || '—'],
+      ['定妆图', txt(batch.image_name) || '—'],
+      // 本页建出来的批次恒为 duration=7；-1 只可能来自接口直建的老批次，文案别硬说成 7 秒。
+      ['画质 / 时长', `${txt(batch.resolution) || '—'} · ${durationValue > 0 ? `输出 ${durationValue} 秒` : `输出跟随素材时长（估算按 ${OUTPUT_SECONDS} 秒上限，实际可能更低）`}`],
+      ['清单条数', `${total} 条`],
+      ['进度', `已结束 ${done + failed} / ${total}（成功 ${done} · 失败 ${failed}）`],
+      ['锁定时间', fmtTime(batch.locked_at)],
+      ['标签快照', filterText || '锁定前未选标签'],
+      ['提示词', prompt ? `${prompt.slice(0, 110)}${prompt.length > 110 ? '…' : ''}` : '—'],
+    ];
+    const grid = el('div', 'batch-summary-grid');
+    for (const [label, value] of rows) {
+      const cell = el('div', 'batch-summary-cell');
+      cell.append(el('small', null, label), el('b', null, value));
+      grid.append(cell);
+    }
+    root.append(grid, el('p', 'muted batch-summary-hint', '清单已锁定：条目不可增删，定妆图 / 提示词 / 画质 / 时长都用批次创建时的设置。要改请新建批次。'));
+  }
+
+  function renderProduce(batch) {
+    if (!batch) return;
+    const total = num(batch.total_items, b.items.length);
+    const done = num(batch.done);
+    const failed = num(batch.failed);
+    const pending = Math.max(0, num(batch.pending, total - done - failed));
+    const activeId = txt(batch.active_job_id);
+    const closed = txt(batch.state) === 'closed';
+
+    const counters = $('batch-counters');
+    counters.replaceChildren();
+    for (const [value, label] of [[pending, '待生产'], [done, '已生产'], [failed, '失败']]) {
+      const box = el('div', 'stat');
+      box.append(el('b', null, String(value)), el('small', null, label));
+      counters.append(box);
+    }
+
+    const finished = done + failed;
+    $('batch-progress-fill').style.width = `${total ? Math.min(100, (finished / total) * 100) : 0}%`;
+    const job = b.activeJob;
+    let progressText = total ? `已完成 ${finished} / 总数 ${total} · 剩余待生产 ${pending}` : '清单为空';
+    if (activeId) {
+      const jobDone = num(job && job.done);
+      const jobTotal = num(job && job.total);
+      progressText += jobTotal ? ` · 当前批次 ${jobDone}/${jobTotal}` : ' · 当前批次正在排队';
+    } else if (pending === 0 && total) {
+      progressText += ' · 全部跑完了';
+    }
+    $('batch-progress-text').textContent = progressText;
+
+    const actions = $('batch-produce-actions');
+    actions.replaceChildren();
+    const plan = produceOptions(batch);
+    const amountByCount = new Map(plan.options.map((option) => [option.count, option.amount]));
+    // 服务端给了 options 就按它的档位渲染（配置可能把单次上限调到小于 100），否则用本地三档。
+    const limits = serviceLimits();
+    const counts = plan.source === 'server' && plan.options.length ? plan.options.map((option) => option.count) : limits.choices;
+    const maxCount = counts.length ? Math.max(...counts) : limits.maxRunItems;
+    for (const count of counts) {
+      const amount = amountByCount.has(count) ? amountByCount.get(count) : localEstimate(count, batch.resolution);
+      const btn = el('button', 'primary batch-produce-btn');
+      btn.type = 'button';
+      btn.textContent = amount === null || amount === undefined
+        ? `生产 ${count} 条（金额待确认）`
+        : `生产 ${count} 条（约 ${fmtMoney(amount)}）`;
+      btn.disabled = b.busy || !!activeId || closed || pending === 0;
+      btn.title = activeId ? '当前批次还有任务在跑，跑完再点下一批'
+        : closed ? '批次已关闭' : '点下去会立刻提交真实计费任务，不可撤回';
+      btn.addEventListener('click', () => produce(count, batch, amount));
+      actions.append(btn);
+    }
+
+    const priceHint = $('batch-price-hint');
+    const localCount = plan.options.filter((option) => option.amount === null).length;
+    if (plan.source === 'server' && plan.unit === null) {
+      priceHint.textContent = `服务端未配置这个画质的单价，金额无法预估；提交前请确认条数（单次最多 ${maxCount} 条）。`;
+    } else if (plan.source === 'server') {
+      // price_source: config = 服务端配置了该画质单价，default = 阿里云官方公开价兜底
+      const origin = plan.priceSource === 'config' ? '按服务端配置单价估算' : '按官方公开价估算';
+      priceHint.textContent = `${origin}：${plan.note || '按模板时长 + 输出 7 秒估算'}（单价 ${plan.unit} 元/秒${localCount ? '，部分档位金额待确认' : ''}），实际以云端账单为准。`;
+    } else {
+      priceHint.textContent = `服务端没有返回金额估算，下面按本地常量 ${plan.unit ?? '—'} 元/秒 × 单条 ${BILLABLE_SECONDS} 秒估算，实际以云端账单为准；单次最多 ${maxCount} 条。`;
+    }
+
+    // 失败条目给一个重试入口（接口 #9），否则 failed 条目在页面上就是死路。
+    const retryBox = $('batch-retry');
+    retryBox.replaceChildren();
+    if (failed > 0) {
+      const retryCount = Math.min(failed, 100);
+      const retry = el('button', 'quiet', `重试失败的 ${retryCount} 条`);
+      retry.type = 'button';
+      retry.disabled = b.busy || !!activeId || closed;
+      retry.title = activeId ? '当前批次还有任务在跑' : '只重跑失败条目，不改清单';
+      retry.addEventListener('click', () => retryFailed(batch, retryCount));
+      retryBox.append(retry, el('span', 'muted', '只重跑失败条目，已完成的不会重复提交。'));
+      retryBox.classList.remove('hidden');
+    } else {
+      retryBox.classList.add('hidden');
+    }
+  }
+
+  async function retryFailed(batch, count) {
+    if (b.busy || !batch || !batch.id) return;
+    if (!confirm(`重试失败的 ${count} 条？\n\n会再次产生费用，且不能撤回。`)) return;
+    b.busy = true;
+    renderProduce(batch);
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(batch.id)}/retry-failed`, {
+        method: 'POST',
+        body: JSON.stringify({ count }),
+      });
+      toast(`已重新排入 ${num(data.taken, count)} 条失败条目。`);
+      b.busy = false;
+      await refreshBatch(false);
+    } catch (err) {
+      b.busy = false;
+      toast(err.message);
+      const node = $('batch-produce-error');
+      node.textContent = err.message;
+      node.classList.remove('hidden');
+      renderProduce(batch);
+    }
+  }
+
+  async function produce(count, batch, estimate) {
+    if (b.busy || !batch || !batch.id) return;
+    const known = estimate !== null && estimate !== undefined && Number.isFinite(Number(estimate));
+    const amountText = known ? `，预估费用约 ${fmtMoney(Number(estimate))}` : '，服务端未提供金额预估';
+    if (!confirm(`将立刻提交 ${count} 条生产任务${amountText}。\n\n提交后不能撤回，费用会真实产生。是否继续？`)) return;
+    b.busy = true;
+    renderProduce(batch);
+    $('batch-produce-error').classList.add('hidden');
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(batch.id)}/produce`, {
+        method: 'POST',
+        body: JSON.stringify({ count }),
+      });
+      const taken = num(data.taken, count);
+      const blocked = Array.isArray(data.blocked) ? data.blocked.length : 0;
+      const actual = data.cost_estimate && data.cost_estimate.amount !== null && data.cost_estimate.amount !== undefined
+        ? Number(data.cost_estimate.amount) : null;
+      const message = [taken < count ? `本批只剩 ${taken} 条，已全部提交。` : `已提交 ${taken} 条，正在生产。`];
+      if (Number.isFinite(actual)) message.push(`预估 ${fmtMoney(actual)}`);
+      if (blocked) message.push(`${blocked} 条模板已不可用，已标为失败`);
+      toast(message.join(' '));
+      b.busy = false;
+      await refreshBatch(false);
+    } catch (err) {
+      b.busy = false;
+      toast(err.message);
+      const node = $('batch-produce-error');
+      node.textContent = err.message;
+      node.classList.remove('hidden');
+      renderProduce(batch);
+    }
+  }
+
+  function itemStateClass(state) {
+    if (state === 'done') return 'batch-done';
+    if (state === 'failed') return 'batch-failed';
+    if (state === 'producing') return 'batch-producing';
+    return 'batch-pending';
+  }
+  function renderItems() {
+    const root = $('batch-item-list');
+    // 轮询每 4 秒来一次：条目状态没变就不重建 DOM，避免用户正在看的列表被刷掉。
+    const signature = `${b.itemFilter}|${b.itemLimit}|${b.items.length}|`
+      + b.items.map((item) => `${txt(item.template_id)}:${txt(item.state)}:${txt(item.job_id)}:${txt(item.error) ? 1 : 0}:${txt(item.verify_warn) ? 1 : 0}`).join(',');
+    if (signature === b.itemsSignature && root.childElementCount) return;
+    b.itemsSignature = signature;
+    root.replaceChildren();
+    const filtered = b.itemFilter === 'all' ? b.items : b.items.filter((item) => txt(item.state) === b.itemFilter);
+    if (!b.items.length) {
+      root.append(el('div', 'empty', '清单还没有条目。'));
+      $('batch-items-more').classList.add('hidden');
+      return;
+    }
+    const slice = filtered.slice(0, b.itemLimit);
+    if (!slice.length) {
+      root.append(el('div', 'empty', '该状态下没有条目。'));
+    } else {
+      const fragment = document.createDocumentFragment();
+      for (const item of slice) fragment.append(itemRow(item));
+      root.append(fragment);
+    }
+    const more = $('batch-items-more');
+    const rest = Math.max(0, filtered.length - slice.length);
+    more.classList.toggle('hidden', rest === 0);
+    more.textContent = `加载更多条目（还有 ${rest} 条）`;
+  }
+  function itemRow(item) {
+    const state = txt(item.state) || 'pending';
+    const row = el('div', 'batch-record');
+    const nameCell = el('div', 'batch-record-name');
+    nameCell.append(el('b', null, txt(item.name) || txt(item.template_id) || '未命名场景'), el('small', null, txt(item.template_id)));
+    const stateCell = el('div', 'batch-record-state');
+    stateCell.append(el('span', `status ${itemStateClass(state)}`, ITEM_STATE_TEXT[state] || state));
+    const infoCell = el('div', 'batch-record-info');
+    const info = txt(item.error) || txt(item.archive_warning) || (item.job_id ? `任务 ${txt(item.job_id)}` : '');
+    if (info) infoCell.append(el('small', null, info));
+    // verify_warn：模型实际输出偏离预期（时长不符/文件过小）的质量提示。
+    // 它是提示不是失败 —— 状态徽标仍然是 done，颜色用 --amber。
+    const warn = txt(item.verify_warn);
+    if (warn) infoCell.append(el('small', 'batch-verify-warn', `质量提示：${warn}`));
+    if (!infoCell.childNodes.length) infoCell.append(el('small', null, ''));
+    const actions = el('div', 'record-actions');
+    // items 契约里没有 download_url；done 条目按历史分组同一套路径拼（/api/jobs/{job}/download/{template_id}），
+    // 后端若以后直接返回 download_url，这里优先用返回值。
+    const downloadUrl = txt(item.download_url) || (state === 'done' && txt(item.job_id) && txt(item.template_id)
+      ? `/api/jobs/${encodeURIComponent(txt(item.job_id))}/download/${encodeURIComponent(txt(item.template_id))}`
+      : '');
+    if (downloadUrl) {
+      const link = el('a', 'link-btn', '下载');
+      link.href = downloadUrl;
+      actions.append(link);
+    }
+    if (txt(item.job_id)) {
+      const btn = el('button', 'quiet', '任务详情');
+      btn.type = 'button';
+      btn.addEventListener('click', () => openJobDetail(txt(item.job_id)));
+      actions.append(btn);
+    }
+    if (!actions.childNodes.length) actions.append(el('span', 'muted', '—'));
+    row.append(nameCell, stateCell, infoCell, actions);
+    return row;
+  }
+
+  /* ---------- 批次详情与轮询 ---------- */
+  async function loadBatchDetail(silent = false) {
+    const batch = b.current;
+    if (!batch || !batch.id) return;
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(batch.id)}`);
+      if (data.batch) b.current = data.batch;
+      b.items = Array.isArray(data.items) ? data.items : [];
+      renderBatch();
+      maybePoll();
+    } catch (err) {
+      if (/不存在|404|Not Found/i.test(err.message)) {
+        b.current = null; b.items = []; b.mode = 'list';
+        renderBatch();
+        loadBatches();
+        toast('这个批次已不存在，已回到批次列表。');
+        return;
+      }
+      if (!silent) toast(err.message);
+    }
+  }
+  async function refreshBatch(silent = true) {
+    if (!b.current || !b.current.id) { loadBatches(); return; }
+    await loadBatchDetail(silent);
+    const activeId = txt(b.current && b.current.active_job_id);
+    if (activeId) {
+      try {
+        const data = await api(`/api/jobs/${encodeURIComponent(activeId)}`);
+        b.activeJob = data.job || null;
+      } catch (_) { b.activeJob = null; }
+    } else {
+      b.activeJob = null;
+    }
+    if (b.current) renderProduce(b.current);
+  }
+  function maybePoll() {
+    if (txt(b.current && b.current.active_job_id)) startPoll();
+    else stopPoll();
+  }
+  function startPoll() {
+    if (b.pollTimer) return;
+    b.pollTimer = setInterval(() => {
+      if (document.hidden) return;
+      // 离开大批量页就停表，回来时 enter() 会重新起表。
+      if (!$('batch-view').classList.contains('active-view')) { stopPoll(); return; }
+      if (b.busy) return;
+      refreshBatch(true);
+    }, POLL_MS);
+  }
+  function stopPoll() {
+    if (b.pollTimer) { clearInterval(b.pollTimer); b.pollTimer = null; }
+  }
+
+  /* ---------- 批次列表 ---------- */
+  async function loadBatches(silent = false) {
+    try {
+      const data = await api(`/api/batches?scope=${scopeParam()}`);
+      b.batches = Array.isArray(data.batches) ? data.batches : [];
+      b.listLoaded = true;
+      renderBatchList();
+    } catch (err) {
+      b.batches = [];
+      b.listLoaded = true;
+      renderBatchList(err.message);
+      if (!silent) toast(err.message);
+    }
+  }
+  function renderBatchList(error) {
+    const root = $('batch-list');
+    root.replaceChildren();
+    if (error) {
+      root.append(el('div', 'empty', `批次列表暂时不可用：${error}`));
+      return;
+    }
+    if (!b.batches.length) {
+      root.append(el('div', 'empty', b.listLoaded ? '还没有批次。点右上角「新建批次」开始。' : '正在加载批次…'));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const batch of b.batches) fragment.append(batchCard(batch));
+    root.append(fragment);
+  }
+  function batchCard(batch) {
+    const total = num(batch.total_items);
+    const done = num(batch.done);
+    const failed = num(batch.failed);
+    const pending = num(batch.pending, Math.max(0, total - done - failed));
+    const state = txt(batch.state) || 'draft';
+    const running = !!txt(batch.active_job_id);
+    const card = el('article', 'card batch-card');
+    const main = el('div', 'batch-card-main');
+    const title = el('div', 'batch-card-title');
+    title.append(el('b', null, txt(batch.batch_no) || '未命名批次'));
+    title.append(el('span', `status ${running ? 'batch-producing' : `batch-${state}`}`, running ? '生产中' : (BATCH_STATE_TEXT[state] || state)));
+    main.append(title);
+    const meta = [fmtTime(batch.created_at), `已结束 ${done + failed} / ${total}`, `待生产 ${pending}`];
+    if (failed) meta.push(`失败 ${failed}`);
+    if (App.state.user && App.state.user.role === 'admin' && txt(batch.owner)) meta.push(txt(batch.owner));
+    main.append(el('div', 'job-meta', meta.join(' · ')));
+    const progress = el('div', 'progress');
+    const fill = document.createElement('span');
+    fill.style.width = `${total ? Math.min(100, ((done + failed) / total) * 100) : 0}%`;
+    progress.append(fill);
+    main.append(progress);
+    const side = el('div', 'batch-card-side');
+    const open = el('button', 'quiet', state === 'draft' ? '继续筛选' : '打开');
+    open.type = 'button';
+    open.addEventListener('click', () => openBatch(txt(batch.id)));
+    side.append(open);
+    card.append(main, side);
+    return card;
+  }
+  async function openBatch(id) {
+    if (!id) return;
+    b.mode = 'view';
+    b.formOpen = false;   // 打开已有批次默认收起冻结的设置表单，把高度留给候选
+    b.current = b.batches.find((item) => txt(item.id) === id) || { id };
+    b.items = [];
+    resetCandidates();
+    resetItemsView();
+    stopPoll();
+    renderBatch();
+    await loadBatchDetail();
+    if (b.current && (txt(b.current.state) || 'draft') === 'draft') {
+      const snapshot = b.current.tag_filters;
+      b.tagFilters = snapshot && typeof snapshot === 'object' ? snapshot : {};
+      syncTagInputs();
+      await fetchCandidates();
+    }
+  }
+  function resetItemsView() {
+    b.itemFilter = 'all';
+    b.itemLimit = ITEM_PAGE;
+    if ($('batch-item-filter')) $('batch-item-filter').value = 'all';
+  }
+  function newBatch() {
+    b.mode = 'new';
+    b.current = null;
+    b.formOpen = true;    // 新建时必须填表
+    b.items = [];
+    resetCandidates();
+    resetItemsView();
+    stopPoll();
+    b.activeJob = null;
+    resetBatchForm();
+    renderBatch();
+    const no = $('batch-no');
+    if (no) no.focus();
+  }
+
+  /* ---------- 历史任务：按批次分组 ---------- */
+  function groupSignature(group) {
+    return `${num(group.job_count)}|${num(group.success)}|${num(group.failed)}|${num(group.last_at)}`;
+  }
+  async function refreshHistory(openId = '') {
+    if (!App.state.user) return;
+    // 不在历史页时不发请求：切回历史页时 switchView 会再调一次。
+    if (!$('history-view').classList.contains('active-view')) return;
+    try {
+      const data = await api(`/api/history/groups?scope=${scopeParam()}`);
+      b.groups = Array.isArray(data.groups) ? data.groups : [];
+      b.historyMode = 'groups';
+      $('jobs-list').classList.add('hidden');
+      $('history-groups').classList.remove('hidden');
+      renderGroups();
+      const openKeys = [...b.openGroups];
+      for (const key of openKeys) {
+        const group = b.groups.find((item) => txt(item.key) === key);
+        const signature = group ? groupSignature(group) : '';
+        if (!b.groupDetails.has(key) || b.groupSig.get(key) !== signature) await loadGroupDetail(key, true);
+        b.groupSig.set(key, signature);
+      }
+      if (openId) App.openJob(openId);
+    } catch (err) {
+      // 分组接口还没上线/不可用：退回旧的平铺任务列表，绝不白屏。
+      b.historyMode = 'flat';
+      $('history-groups').classList.add('hidden');
+      $('jobs-list').classList.remove('hidden');
+      if (!b.flatWarned) {
+        b.flatWarned = true;
+        toast(`批次分组暂不可用（${err.message}），已回退到任务列表。`);
+      }
+      await App.refreshFlatJobs(openId);
+    }
+  }
+  function renderGroups() {
+    const root = $('history-groups');
+    root.replaceChildren();
+    if (!b.groups.length) {
+      root.append(el('div', 'empty', '暂无任务记录。先去「小批量试跑」或「大批量生产」提交一次。'));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const group of b.groups) fragment.append(groupCard(group));
+    root.append(fragment);
+  }
+  function groupCard(group) {
+    const key = txt(group.key);
+    const isUngrouped = key === '__ungrouped__' || group.is_ungrouped === true;
+    const open = b.openGroups.has(key);
+    const card = el('article', 'card history-group');
+    card.dataset.key = key;
+    const head = el('button', 'history-group-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    const titleWrap = el('div', 'history-group-title');
+    titleWrap.append(el('b', null, isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次')));
+    const parts = [`${num(group.job_count)} 个任务`, `成功 ${num(group.success)}`, `失败 ${num(group.failed)}`];
+    titleWrap.append(el('small', null, `${parts.join(' · ')} · ${fmtTime(group.first_at)} → ${fmtTime(group.last_at)}`));
+    const side = el('div', 'history-group-side');
+    if (num(group.failed)) side.append(el('span', 'status failed', `失败 ${num(group.failed)}`));
+    const chevron = el('span', 'history-chevron', open ? '收起' : '展开');
+    side.append(chevron);
+    head.append(titleWrap, side);
+    const body = el('div', 'history-group-body');
+    if (!open) body.classList.add('hidden');
+    head.addEventListener('click', async () => {
+      if (b.openGroups.has(key)) {
+        b.openGroups.delete(key);
+        body.classList.add('hidden');
+        head.setAttribute('aria-expanded', 'false');
+        chevron.textContent = '展开';
+        return;
+      }
+      b.openGroups.add(key);
+      body.classList.remove('hidden');
+      head.setAttribute('aria-expanded', 'true');
+      chevron.textContent = '收起';
+      if (!b.groupDetails.has(key)) await loadGroupDetail(key, false);
+      else renderGroupBody(key, body);
+    });
+    card.append(head, body);
+    if (open) {
+      renderGroupBody(key, body);
+      if (!b.groupDetails.has(key)) loadGroupDetail(key, false);
+    }
+    return card;
+  }
+  function groupBody(key) {
+    const cards = $('history-groups').querySelectorAll('.history-group');
+    for (const card of cards) if (card.dataset.key === key) return card.querySelector('.history-group-body');
+    return null;
+  }
+  async function loadGroupDetail(key, silent) {
+    const body = groupBody(key);
+    try {
+      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=0&limit=${HISTORY_PAGE}`);
+      b.groupDetails.set(key, {
+        items: Array.isArray(data.items) ? data.items : [],
+        total: num(data.total, (data.items || []).length),
+        batchNo: txt(data.batch_no),
+      });
+      if (body) renderGroupBody(key, body);
+    } catch (err) {
+      if (!silent) toast(err.message);
+      if (body) body.replaceChildren(el('p', 'error', err.message));
+    }
+  }
+  async function loadMoreGroup(key, detail) {
+    try {
+      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=${detail.items.length}&limit=${HISTORY_PAGE}`);
+      const more = Array.isArray(data.items) ? data.items : [];
+      detail.items = detail.items.concat(more);
+      detail.total = num(data.total, detail.items.length);
+      const body = groupBody(key);
+      if (body) renderGroupBody(key, body);
+    } catch (err) { toast(err.message); }
+  }
+  function renderGroupBody(key, body) {
+    const detail = b.groupDetails.get(key);
+    body.replaceChildren();
+    if (!detail) { body.append(el('p', 'muted', '正在加载明细…')); return; }
+    if (!detail.items.length) { body.append(el('div', 'empty', '这一组没有明细。')); return; }
+    const list = el('div', 'record-list');
+    const fragment = document.createDocumentFragment();
+    for (const item of detail.items) fragment.append(historyRow(item));
+    list.append(fragment);
+    body.append(list);
+    const rest = detail.total - detail.items.length;
+    if (rest > 0) {
+      const more = el('button', 'quiet history-more', `加载更多（还有 ${rest} 条）`);
+      more.type = 'button';
+      more.addEventListener('click', () => loadMoreGroup(key, detail));
+      body.append(more);
+    }
+    body.append(el('p', 'muted history-group-foot', `共 ${detail.total} 条${detail.batchNo ? ` · 批次 ${detail.batchNo}` : ''}`));
+  }
+  function historyRow(item) {
+    const status = txt(item.status);
+    const row = el('div', 'history-record');
+    const nameCell = el('div', 'history-record-name');
+    nameCell.append(el('b', null, txt(item.template_name) || txt(item.template_id) || '未命名场景'), el('small', null, txt(item.template_id)));
+    const statusCell = el('div', 'history-record-state');
+    const statusText = App.statusText || {};
+    statusCell.append(el('span', `status ${status}`, statusText[status] || status || '—'));
+    const infoCell = el('div', 'history-record-info');
+    const parts = [];
+    if (txt(item.job_id)) parts.push(`任务 ${txt(item.job_id)}`);
+    if (num(item.seconds)) parts.push(`用时 ${num(item.seconds)} 秒`);
+    if (txt(item.archive_warning)) parts.push(txt(item.archive_warning));
+    if (parts.length) infoCell.append(el('small', null, parts.join(' · ')));
+    // 与批次条目同口径：done 的质量提示，状态徽标仍是 success/done
+    const warn = txt(item.verify_warn);
+    if (warn) infoCell.append(el('small', 'history-verify-warn', `质量提示：${warn}`));
+    const actions = el('div', 'record-actions');
+    if (txt(item.download_url)) {
+      const link = el('a', 'link-btn', '下载');
+      link.href = txt(item.download_url);
+      actions.append(link);
+    } else {
+      actions.append(el('span', 'muted', '无文件'));
+    }
+    if (txt(item.job_id)) {
+      const btn = el('button', 'quiet', '任务详情');
+      btn.type = 'button';
+      btn.addEventListener('click', () => App.openJob(txt(item.job_id)));
+      actions.append(btn);
+    }
+    row.append(nameCell, statusCell, infoCell, actions);
+    return row;
+  }
+
+  /* ---------- 事件绑定与入口 ---------- */
+  function bindEvents() {
+    bindDropZone();
+    // 定妆图缩略图走 /api/uploads/{id}：取不到（会话过期/文件被清理）时安静隐藏，不留破图。
+    $('batch-image-preview').addEventListener('error', () => $('batch-image-preview').classList.add('hidden'));
+    $('batch-new-btn').addEventListener('click', newBatch);
+    $('batch-refresh-btn').addEventListener('click', async () => {
+      if (b.mode === 'view' && b.current && b.current.id) await refreshBatch(false);
+      else await loadBatches();
+    });
+    $('batch-create-btn').addEventListener('click', createBatch);
+    $('batch-a-toggle').addEventListener('click', () => setBatchFormOpen(!b.formOpen));
+    $('batch-exit-btn').addEventListener('click', exitBatch);
+    $('batch-prompt-select').addEventListener('change', () => {
+      $('batch-prompt-body').value = $('batch-prompt-select').selectedOptions[0]?.dataset.body || '';
+      updateBatchPromptCount();
+    });
+    $('batch-prompt-body').addEventListener('input', updateBatchPromptCount);
+    $('batch-candidates-btn').addEventListener('click', fetchCandidates);
+    $('batch-tag-toggle').addEventListener('click', toggleTagPanel);
+    $('batch-clear-tags').addEventListener('click', () => {
+      document.querySelectorAll('#batch-tag-groups .batch-tag-input').forEach((input) => { input.checked = false; });
+      b.tagFilters = {};
+      $('batch-tag-summary').textContent = '已清除筛选，点「刷新候选」重新匹配。';
+    });
+    // 三个全选按钮 —— 已选集合跨页累计，「本页」的改动绝不碰其它页。
+    // 全选本页：只加当前页的已就绪候选
+    $('batch-select-page').addEventListener('click', () => {
+      for (const item of b.candPageItems) if (item.ready) b.selected.add(item.id);
+      renderCandidates();
+    });
+    // 反选本页：只反转当前页（未就绪的本来就不能选，跳过）
+    $('batch-invert').addEventListener('click', () => {
+      for (const item of b.candPageItems) {
+        if (!item.ready) continue;
+        if (b.selected.has(item.id)) b.selected.delete(item.id);
+        else b.selected.add(item.id);
+      }
+      renderCandidates();
+    });
+    // 全选全部 N 条：N 是当前筛选命中总数，跨所有页
+    $('batch-select-all').addEventListener('click', () => {
+      for (const item of candidateMatched()) if (item.ready) b.selected.add(item.id);
+      renderCandidates();
+    });
+    $('batch-only-selected').addEventListener('change', (event) => {
+      const on = event.target.checked;
+      // 打开「只看已选」从第 1 页看起；关掉时回到打开前的页码（页数变了，renderCandidates 会夹住）
+      if (on) { b.candPageBackup = b.candPage; b.candPage = 1; }
+      else { b.candPage = b.candPageBackup || 1; b.candPageBackup = 0; }
+      b.onlySelected = on;
+      renderCandidates();
+    });
+    $('batch-page-prev').addEventListener('click', () => goCandPage(b.candPage - 1));
+    $('batch-page-next').addEventListener('click', () => goCandPage(b.candPage + 1));
+    $('batch-lock-btn').addEventListener('click', lockBatch);
+    $('batch-item-filter').addEventListener('change', (event) => {
+      b.itemFilter = event.target.value || 'all';
+      b.itemLimit = ITEM_PAGE;
+      renderItems();
+    });
+    $('batch-items-more').addEventListener('click', () => { b.itemLimit += ITEM_PAGE; renderItems(); });
+
+    // 预览播放器：失败要有交代，成功/被拦各有提示，绝不留一块黑屏
+    const video = $('batch-preview-video');
+    video.addEventListener('error', () => {
+      if (!video.getAttribute('src')) return;
+      showPreviewNote('这条候选的视频加载失败（模板可能已下架或文件缺失），换一条试试。', true);
+    });
+    video.addEventListener('loadeddata', () => showPreviewNote(''));
+    video.addEventListener('playing', () => showPreviewNote(''));
+    window.addEventListener('resize', queueCandHeight);
+  }
+
+  let initialized = false;
+  function init() {
+    if (initialized) return;
+    initialized = true;
+    bindEvents();
+    fillPromptSelect();
+    renderBatchTagFilters();
+    renderBatch();
+  }
+  function onTemplates() {
+    if (!initialized) fillPromptSelect();
+    renderBatchTagFilters();
+    if (b.mode === 'view' && b.current) renderBatch();
+  }
+  function enter() {
+    init();
+    // 切回大批量页时视口/页头可能变了，重新量一次候选区高度
+    queueCandHeight();
+    if (b.mode === 'list') loadBatches();
+    else refreshBatch(true);
+  }
+
+  window.BatchUI = {
+    enter,
+    onTemplates,
+    refreshHistory,
+    // 供调试/外部刷新使用
+    refresh: () => (b.mode === 'list' ? loadBatches() : refreshBatch(false)),
+  };
+})();

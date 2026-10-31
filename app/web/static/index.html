@@ -7,7 +7,9 @@
   <title>换装视频工作台</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
+  <link rel="stylesheet" href="/static/batch.css">
   <script defer src="/static/app.js"></script>
+  <script defer src="/static/batch.js"></script>
 </head>
 <body>
   <main id="login-view" class="login-wrap">
@@ -40,12 +42,14 @@
 
       <div id="notice" class="notice hidden"></div>
       <nav class="tabs" aria-label="页面导航">
-        <button class="tab active" data-view="create-view">新建任务</button>
-        <button class="tab" data-view="history-view">我的任务</button>
+        <button class="tab active" data-view="create-view">小批量试跑</button>
+        <button class="tab" data-view="batch-view">大批量生产</button>
+        <button class="tab" data-view="history-view">历史任务</button>
         <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
       </nav>
 
       <section id="create-view" class="view active-view">
+        <div class="section-head"><div><h2>小批量试跑</h2><p class="muted">一张图最多 20 条，用来验证素材、标签筛选和提示词是否合适。跑通了再开大批量批次。</p></div></div>
         <div class="form-grid">
           <article class="card upload-card">
             <div class="step-title"><span class="step">1</span><div><h2>上传服装图片</h2><p>JPG、PNG 或 WebP，最多 20MB</p></div></div>
@@ -90,9 +94,138 @@
         </article>
       </section>
 
+      <section id="batch-view" class="view">
+        <div class="section-head">
+          <div><h2>大批量生产</h2><p class="muted">一个批次号管一批素材：建批次 → 筛候选 → 锁清单 → 分批生产。批次级设置创建后冻结。</p></div>
+          <div class="top-actions"><button id="batch-new-btn" class="quiet" type="button">新建批次</button><button id="batch-refresh-btn" class="quiet" type="button">刷新</button></div>
+        </div>
+
+        <ol id="batch-stepper" class="batch-steps" aria-label="批次生产步骤">
+          <li class="batch-step" data-step="a"><span class="batch-step-no">1</span><div><b>建批次</b><small>批次号、定妆图、固定设置</small></div></li>
+          <li class="batch-step" data-step="b"><span class="batch-step-no">2</span><div><b>筛候选</b><small>标签筛选与逐条预览</small></div></li>
+          <li class="batch-step" data-step="c"><span class="batch-step-no">3</span><div><b>锁清单</b><small>锁定后不可更改</small></div></li>
+          <li class="batch-step" data-step="d"><span class="batch-step-no">4</span><div><b>分批生产</b><small>20 / 50 / 100 条</small></div></li>
+        </ol>
+
+        <div id="batch-list" class="batch-list"></div>
+
+        <div id="batch-work" class="hidden">
+          <article class="card batch-panel" id="batch-step-a">
+            <div class="step-title">
+              <span class="step">1</span>
+              <div><h2>建批次</h2><p id="batch-a-hint">提示词、画质、时长在批次级冻结；建好后要改只能新建批次。</p><p id="batch-a-summary" class="batch-a-summary muted hidden"></p></div>
+              <div class="batch-a-actions">
+                <!-- 退出当前批次计划：只在草稿态出现，退回批次列表、不删数据（草稿还在，下次点「继续筛选」接着做） -->
+                <button id="batch-exit-btn" class="quiet batch-exit hidden" type="button" title="回到批次列表；草稿会保留，下次点「继续筛选」还能接着筛">退出当前批次计划</button>
+                <button id="batch-a-toggle" class="quiet batch-a-toggle hidden" type="button" aria-expanded="true" aria-controls="batch-a-body">收起设置</button>
+              </div>
+            </div>
+            <div id="batch-a-body">
+              <div class="batch-form-grid">
+                <label class="field">批次号（必填，1–40 字）<input id="batch-no" maxlength="40" autocomplete="off" placeholder="例如 2026-11-秋装-01"></label>
+                <label class="field">备注（可选，≤60 字）<input id="batch-title" maxlength="60" autocomplete="off" placeholder="例如 秋装第二批，测试光线"></label>
+              </div>
+              <label id="batch-drop-zone" class="drop-zone batch-drop">
+                <input id="batch-image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
+                <img id="batch-image-preview" class="image-preview hidden" alt="定妆图预览">
+                <span id="batch-drop-copy"><span class="upload-icon">↑</span><strong>上传定妆图</strong><small>整批 500 条共用这一张图</small></span>
+              </label>
+              <div id="batch-image-info" class="image-info muted"></div>
+              <div class="batch-form-grid batch-form-grid-3">
+                <label class="field">提示词模板<select id="batch-prompt-select"></select></label>
+                <label class="field">画质<select id="batch-resolution"><option value="480P" selected>标准 480P</option><option value="720P">高清 720P</option></select></label>
+                <label class="field">输出时长<input id="batch-duration" class="readonly-input" value="7 秒（固定）" readonly tabindex="-1" aria-readonly="true"></label>
+              </div>
+              <label class="field prompt-editor-label">批次提示词（整批共用，可按需要微调）<textarea id="batch-prompt-body" rows="6" maxlength="4000" spellcheck="false"></textarea></label>
+              <div class="prompt-meta"><span>提示词保存到批次上，之后每次分批生产都用这一份，不随单次改动。</span><span id="batch-prompt-length">0 / 4000</span></div>
+              <p id="batch-create-error" class="error hidden"></p>
+              <div class="batch-actions"><button id="batch-create-btn" class="primary" type="button">创建批次</button><span id="batch-create-hint" class="muted"></span></div>
+            </div>
+          </article>
+
+          <article class="card batch-panel hidden" id="batch-step-b">
+            <div class="step-title"><span class="step">2</span><div><h2>筛选候选</h2><p>点卡片即选中并在右侧播放；同一类别内满足任一标签，不同类别之间同时满足。</p></div></div>
+            <div id="batch-tag-card" class="tag-filter-card hidden">
+              <div id="batch-tag-groups" class="tag-filter-groups"></div>
+              <div class="tag-filter-footer">
+                <button id="batch-clear-tags" class="quiet" type="button">清除筛选</button>
+                <span class="muted batch-tag-hint">改完标签点工具条的「刷新候选」重新匹配。</span>
+              </div>
+            </div>
+            <div class="batch-cand-toolbar">
+              <div class="batch-toolbar-info">
+                <span id="batch-count-label" class="batch-count">已选 0 / 候选 0</span>
+                <span id="batch-tag-summary" class="muted batch-tag-summary"></span>
+              </div>
+              <div class="batch-toolbar-actions">
+                <button id="batch-tag-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="batch-tag-card">标签筛选</button>
+                <button id="batch-candidates-btn" class="quiet" type="button">刷新候选</button>
+                <button id="batch-select-page" class="quiet" type="button">全选本页</button>
+                <button id="batch-invert" class="quiet" type="button">反选本页</button>
+                <button id="batch-select-all" class="quiet" type="button">全选全部 0 条</button>
+                <label class="batch-toggle"><input id="batch-only-selected" type="checkbox"><span>只看已选</span></label>
+              </div>
+            </div>
+            <div id="batch-cand-chips" class="batch-chips"></div>
+            <div class="batch-cand-layout">
+              <div class="batch-cand-main">
+                <div id="batch-cand-grid" class="batch-cand-grid" role="group" aria-label="候选场景列表" tabindex="0"></div>
+                <p id="batch-cand-note" class="muted batch-cand-note hidden"></p>
+                <!-- 候选区底部一行：左边翻页条，右边锁定条。
+                     锁定挨着候选清单，右列整列留给播放器；桌面共用一行，避免额外侵占候选高度。 -->
+                <div class="batch-cand-foot">
+                  <div id="batch-cand-pager" class="batch-cand-pager hidden" role="group" aria-label="候选分页">
+                    <button id="batch-page-prev" class="quiet" type="button" aria-label="上一页候选">‹ 上一页</button>
+                    <span id="batch-page-info" class="batch-page-info" role="status" aria-live="polite">第 1 / 1 页</span>
+                    <button id="batch-page-next" class="quiet" type="button" aria-label="下一页候选">下一页 ›</button>
+                  </div>
+                  <div class="batch-lock-bar">
+                    <div class="batch-lock-info">
+                      <b id="batch-lock-count">已选 0 条</b>
+                      <p id="batch-lock-hint" class="muted">锁定后清单不可更改，未勾选的候选不会生产。</p>
+                    </div>
+                    <button id="batch-lock-btn" class="primary" type="button" disabled>锁定清单</button>
+                    <p id="batch-lock-error" class="error hidden"></p>
+                  </div>
+                </div>
+              </div>
+              <div class="batch-side">
+                <aside class="batch-preview">
+                  <video id="batch-preview-video" class="template-preview batch-preview-video" controls preload="metadata" playsinline></video>
+                  <p id="batch-preview-name" class="muted batch-preview-name">进入候选后会在这里自动播放第一条，点任意候选即可切换（整页只有一个播放器）。</p>
+                  <p id="batch-preview-note" class="batch-preview-note hidden"></p>
+                </aside>
+              </div>
+            </div>
+          </article>
+
+          <article class="card batch-panel hidden" id="batch-step-c">
+            <div class="step-title"><span class="step">3</span><div><h2>锁定清单</h2><p id="batch-c-hint">清单已锁定，条目不可再增删。</p></div></div>
+            <div id="batch-summary" class="batch-summary"></div>
+          </article>
+
+          <article class="card batch-panel hidden" id="batch-step-d">
+            <div class="step-title"><span class="step">4</span><div><h2>分批生产</h2><p>一次只排队一个 job，跑完再点下一批。提交后不能撤回。</p></div></div>
+            <div id="batch-counters" class="batch-counters"></div>
+            <div class="batch-progress-line"><div class="progress"><span id="batch-progress-fill"></span></div><p id="batch-progress-text" class="muted">等待开始</p></div>
+            <div id="batch-produce-actions" class="batch-produce-actions"></div>
+            <div id="batch-retry" class="batch-retry hidden"></div>
+            <p id="batch-price-hint" class="muted batch-price-hint"></p>
+            <p id="batch-produce-error" class="error hidden"></p>
+            <div class="batch-items-head">
+              <h3>清单条目</h3>
+              <label class="field batch-filter-field">状态<select id="batch-item-filter"><option value="all" selected>全部</option><option value="pending">待生产</option><option value="producing">生产中</option><option value="done">已完成</option><option value="failed">失败</option></select></label>
+            </div>
+            <div id="batch-item-list" class="batch-item-list"></div>
+            <div class="batch-more"><button id="batch-items-more" class="quiet hidden" type="button">加载更多条目</button></div>
+          </article>
+        </div>
+      </section>
+
       <section id="history-view" class="view">
-        <div class="section-head"><div><h2 id="jobs-heading">我的任务</h2><p class="muted">任务进度自动更新，完成后可预览和下载。</p></div><div class="top-actions"><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
-        <div id="jobs-list" class="jobs-list"><div class="empty">暂无任务。开始新建一个试试。</div></div>
+        <div class="section-head"><div><h2 id="jobs-heading">历史任务</h2><p class="muted">按批次分组，展开看每条任务的状态和下载。没有批次号的老任务都在「未分组」里。</p></div><div class="top-actions"><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
+        <div id="history-groups" class="history-groups"></div>
+        <div id="jobs-list" class="jobs-list hidden"><div class="empty">暂无任务。开始新建一个试试。</div></div>
         <article id="job-detail" class="card detail-card hidden"></article>
       </section>
 

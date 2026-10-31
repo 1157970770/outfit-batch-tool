@@ -12,8 +12,8 @@
   }
   function toast(text) { const el = $('toast'); el.textContent = text; el.classList.remove('hidden'); clearTimeout(el._timer); el._timer = setTimeout(() => el.classList.add('hidden'), 3200); }
   function showLogin() { $('app-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); state.user = null; state.showAll = false; clearInterval(state.timer); }
-  function showApp() { $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; $('jobs-heading').textContent = '我的任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); }
-  function switchView(id) { document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === id)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active-view', v.id === id)); if (id === 'history-view') refreshJobs(); if (id === 'admin-view') refreshAdmin(); }
+  function showApp() { $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); }
+  function switchView(id) { document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === id)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active-view', v.id === id)); if (id === 'history-view') refreshJobs(); if (id === 'admin-view') refreshAdmin(); if (id === 'batch-view' && window.BatchUI) window.BatchUI.enter(); }
   document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
 
   $('login-form').addEventListener('submit', async (event) => {
@@ -49,6 +49,7 @@
       renderTagFilters();
       refreshFilteredTemplates();
     } catch (err) { $('notice').textContent = err.message; $('notice').classList.remove('hidden'); }
+    if (window.BatchUI && window.BatchUI.onTemplates) window.BatchUI.onTemplates();
   }
 
   function collectTagFilters() {
@@ -208,8 +209,14 @@
   function showCreateError(text) { const el = $('create-error'); el.textContent = text; el.classList.toggle('hidden', !text); }
 
   $('refresh-btn').addEventListener('click', () => refreshJobs());
-  $('scope-toggle').addEventListener('click', async () => { state.showAll = !state.showAll; $('scope-toggle').textContent = state.showAll ? '只看我的任务' : '查看全部用户'; $('jobs-heading').textContent = state.showAll ? '全部用户任务' : '我的任务'; await refreshJobs(); });
+  $('scope-toggle').addEventListener('click', async () => { state.showAll = !state.showAll; $('scope-toggle').textContent = state.showAll ? '只看我的任务' : '查看全部用户'; $('jobs-heading').textContent = state.showAll ? '全部用户任务' : '历史任务'; await refreshJobs(); });
   async function refreshJobs(openId = '') {
+    if (!state.user) return;
+    if (window.BatchUI && window.BatchUI.refreshHistory) return window.BatchUI.refreshHistory(openId);
+    return refreshFlatJobs(openId);
+  }
+  // 旧版平铺任务列表：分组接口不可用时兜底，避免整页空白。
+  async function refreshFlatJobs(openId = '') {
     if (!state.user) return;
     try {
       const scope = state.user.role === 'admin' && state.showAll ? 'all' : 'mine';
@@ -240,7 +247,7 @@
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled'].includes(r.status)).length;
     if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.addEventListener('click', async () => { if (!confirm(`只重试失败的 ${failedCount} 条，可能再次产生费用。是否继续？`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); toast('失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
     const list = document.createElement('div'); list.className = 'record-list';
-    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); const small = document.createElement('small'); small.textContent = rec.error || rec.archive_warning || (rec.seconds ? `用时 ${rec.seconds} 秒` : ''); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
+    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
     const logs = document.createElement('div'); logs.className = 'log-box'; logs.textContent = (job.log_tail || []).slice(-60).join('\n') || '任务日志将在这里显示。'; root.append(logs);
   }
 
@@ -258,6 +265,8 @@
   }
   $('reload-templates').addEventListener('click', async () => { try { const result = await api('/api/admin/reload-templates', { method: 'POST', body: '{}' }); toast(`已加载 ${result.count} 个视频场景`); await bootstrap(); } catch (err) { toast(err.message); } });
   $('add-user-form').addEventListener('submit', async e => { e.preventDefault(); const f = new FormData(e.currentTarget); try { await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username: f.get('username'), password: f.get('password'), role: f.get('role') }) }); e.currentTarget.reset(); toast('账号已添加。'); await refreshAdmin(); } catch (err) { toast(err.message); } });
+  // 供 batch.js 复用：同一套 api 封装、共享 state、同一个详情面板。
+  window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText };
   async function init() { try { const data = await api('/api/me'); state.user = data.user; await bootstrap(); } catch (_) { showLogin(); } }
   init();
 })();

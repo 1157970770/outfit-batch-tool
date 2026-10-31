@@ -1,0 +1,294 @@
+/*
+ * batch.css —— 大批量生产页 + 历史任务分组视图
+ * 只放本页新增的结构：步骤条、候选网格、预览侧栏、锁定摘要、生产按钮、分组手风琴。
+ * 颜色一律取自 style.css 的 :root 变量，用 color-mix 派生浅色底，不写字面色值。
+ */
+
+/* ---------- 步骤条 ---------- */
+.batch-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;list-style:none;margin:0 0 18px;padding:0}
+.batch-step{display:flex;align-items:center;gap:9px;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--paper);color:var(--muted);font-size:12px}
+.batch-step-no{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue);font-size:11px;font-weight:800}
+.batch-step b{display:block;font-size:13px;color:var(--ink)}
+.batch-step small{display:block;font-size:11px;color:var(--muted);margin-top:1px}
+.batch-step.is-active{border-color:color-mix(in srgb,var(--blue) 55%,white);background:color-mix(in srgb,var(--blue) 6%,white);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 12%,transparent)}
+.batch-step.is-done .batch-step-no{background:var(--green);color:var(--paper)}
+
+/* ---------- 批次列表 ---------- */
+.batch-list{display:grid;gap:11px}
+.batch-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;margin:0;padding:15px 17px}
+.batch-card-main{min-width:0}
+.batch-card-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.batch-card-title b{font-size:14px;overflow-wrap:anywhere}
+.batch-card-side{display:flex;align-items:center;gap:8px}
+
+/* ---------- 面板 ---------- */
+.batch-panel{margin-bottom:18px}
+.batch-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.batch-form-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.batch-drop{min-height:190px;margin-top:2px}
+.batch-drop.is-frozen{cursor:default;border-style:solid;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-drop.is-frozen strong,.batch-drop.is-frozen small{opacity:.75}
+.readonly-input{background:color-mix(in srgb,var(--bg) 70%,white);color:var(--muted);cursor:default}
+.batch-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px}
+.batch-actions .muted{font-size:12px}
+
+/* ---------- 建批次表单折叠 ----------
+   批次建立后这些设置全部冻结、页面上改不了，展开的 900px 表单会把候选区推到屏幕外，
+   所以打开已有批次时折成一行摘要（批次号 / 画质 / 时长 / 定妆图），可随时展开查看。 */
+/* 摘要条右侧的两个次要按钮：退出当前批次计划（仅草稿态） / 收起设置。
+   退出用 quiet，不做主按钮 —— 它只是「离开这个批次」，不是推进流程；
+   位置放在建批次摘要条的右端，离下面的锁定/生产操作栏足够远，不会误触。 */
+.batch-a-actions{display:flex;align-items:center;gap:8px;margin-left:auto;flex:none;min-width:0}
+.batch-a-actions .quiet{min-height:30px;padding:4px 10px;font-size:12px}
+/* 8 个中文字不许在窄屏折成两行把摘要条顶高 */
+.batch-exit{white-space:nowrap}
+.batch-a-toggle{flex:none;min-height:30px;padding:4px 10px;font-size:12px}
+.batch-a-summary{font-size:12px;margin:2px 0 0;overflow-wrap:anywhere}
+#batch-step-a.is-collapsed{padding:12px 16px}
+#batch-step-a.is-collapsed .step-title{margin-bottom:0}
+#batch-step-a.is-collapsed #batch-a-hint{display:none}
+
+/* ---------- 候选工具条 ---------- */
+.batch-cand-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}
+.batch-toolbar-info{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+.batch-count{font-size:13px;font-weight:800}
+.batch-tag-summary{font-size:12px;overflow-wrap:anywhere}
+.batch-toolbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.batch-toolbar-actions .quiet{min-height:30px;padding:4px 10px;font-size:12px}
+.batch-toolbar-actions .quiet.is-on{border:1px solid color-mix(in srgb,var(--blue) 55%,white);background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue-dark);font-weight:700}
+.batch-toggle{display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:0 2px;font-size:12px;color:var(--ink);cursor:pointer;user-select:none}
+.batch-toggle input{accent-color:var(--blue);width:14px;height:14px;margin:0}
+.batch-tag-hint{font-size:11px}
+
+/* ---------- 候选标签快筛 ---------- */
+.batch-chips{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-bottom:8px}
+.batch-chips-label{font-size:11px;color:var(--muted)}
+.batch-chip{min-height:24px;padding:2px 8px;border:1px solid var(--line);border-radius:999px;background:color-mix(in srgb,var(--bg) 60%,white);color:var(--ink);font-size:11px}
+.batch-chip:hover{border-color:color-mix(in srgb,var(--blue) 40%,white)}
+.batch-chip.is-on{border-color:color-mix(in srgb,var(--blue) 55%,white);background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue-dark);font-weight:700}
+
+/* ---------- 候选网格（密集行） + 预览栏 ---------- */
+/* 候选区高度由 JS 实测写入 --batch-cand-h（见 batch.js syncCandHeight）。
+   底部翻页 + 锁定共用一行，避免额外挤掉候选行；网格在一页 50 条放不下时保留内部滚动。 */
+.batch-cand-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,30%);gap:14px;align-items:start}
+/* 竖屏素材的有效宽度由高度决定，右列只需容纳约 400px 的画面；
+   宽屏固定为 446px，把原来的横屏黑边宽度还给候选网格。 */
+@media(min-width:1720px){
+  .batch-cand-layout{grid-template-columns:minmax(0,1fr) 446px}
+}
+.batch-cand-main{display:flex;flex-direction:column;min-width:0;height:var(--batch-cand-h,calc(100vh - 430px));min-height:240px}
+.batch-cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:5px;align-content:start;flex:1 1 auto;min-height:96px;overflow-y:auto;overflow-x:hidden;padding:1px 2px 1px 1px}
+.batch-cand-grid:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+/* 单张卡：两行（勾选框 + 文件名 / 标签），整卡可点 = 选中 + 预览 */
+.batch-cand{display:grid;grid-template-columns:14px minmax(0,1fr);grid-template-areas:"box name" "meta meta";align-items:center;gap:0 6px;min-width:0;padding:4px 8px;border:1px solid var(--line);border-left:3px solid transparent;border-radius:8px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
+.batch-cand:hover{border-color:color-mix(in srgb,var(--blue) 32%,white);background:color-mix(in srgb,var(--blue) 3%,white)}
+.batch-cand.is-selected{border-color:color-mix(in srgb,var(--blue) 45%,white);border-left-color:var(--blue);background:color-mix(in srgb,var(--blue) 6%,white)}
+.batch-cand.is-unready{border-style:dashed;background:color-mix(in srgb,var(--bg) 55%,white)}
+.batch-cand.is-unready:hover{border-color:color-mix(in srgb,var(--muted) 40%,white)}
+.batch-cand.is-previewing{border-color:var(--blue);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 40%,white)}
+.batch-cand:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.batch-cand-pick{grid-area:box;display:flex;align-items:center;justify-content:center;min-width:0;cursor:pointer}
+.batch-cand-check{width:14px;height:14px;margin:0;accent-color:var(--blue);cursor:pointer}
+.batch-cand-check:disabled{cursor:not-allowed}
+.batch-cand-line{grid-area:name;display:flex;align-items:center;gap:4px;min-width:0}
+.batch-cand-name{flex:1 1 auto;min-width:0;font-size:12px;font-weight:700;line-height:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-cand.is-unready .batch-cand-name{color:var(--muted);font-weight:600}
+.batch-cand-badge{flex:none;padding:1px 4px;border-radius:4px;background:color-mix(in srgb,var(--amber) 14%,white);color:var(--amber);font-size:10px;font-weight:800;line-height:12px}
+.batch-cand-meta{grid-area:meta;min-width:0;font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-cand-empty{grid-column:1/-1}
+.batch-cand-note{font-size:11px;line-height:1.4;margin:6px 0 0}
+
+/* ---------- 候选区底部一行：翻页（左） + 锁定（右） ----------
+   锁定是对候选清单的操作，因此放在网格下方、分页条之后，右列整列留给播放器。
+   桌面两项共用一条 38px 高的紧凑行，不另占一行候选高度；窄屏再换成上下布局。 */
+.batch-cand-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;flex:none;margin-top:6px;padding-top:5px;border-top:1px solid var(--line);min-height:38px}
+.batch-cand-pager{display:flex;align-items:center;gap:8px;flex:none;min-width:0}
+.batch-cand-pager .quiet{min-height:28px;padding:3px 12px;font-size:12px}
+.batch-page-info{min-width:0;font-size:12px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-cand-pager .quiet:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.batch-preview{position:sticky;top:84px;align-self:start;display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--bg) 55%,white)}
+.batch-preview .template-preview,.batch-preview-video{display:block;width:100%;height:clamp(320px,72vh,760px);max-height:none;margin:0 auto;aspect-ratio:auto;background:color-mix(in srgb,var(--ink) 7%,var(--paper));border-radius:10px;object-fit:contain}
+.batch-preview-video.is-empty{background:color-mix(in srgb,var(--ink) 8%,white)}
+.batch-preview-name{font-size:12px;line-height:1.4;margin:0;overflow-wrap:anywhere}
+.batch-preview-note{font-size:11px;line-height:1.45;margin:0;color:var(--amber)}
+.batch-preview-note.is-error{color:var(--red)}
+
+/* ---------- 锁定条 ----------
+   桌面：嵌在上一行末尾（已选 N 条 · 提示 · 锁定清单），高度锁死在 32px 按钮，不给候选网格让路。
+   ≤900 手机：右列用 display:contents 拆开，播放器 order:-1 在上，底部的翻页 + 锁定跟在列表后面，
+   跟原来「锁定条在候选列表之后」的观感一致。 */
+.batch-side{min-width:0}
+.batch-lock-bar{display:flex;align-items:center;gap:10px;flex:none;margin-left:auto;min-width:0}
+.batch-lock-info{display:flex;align-items:baseline;gap:8px;min-width:0}
+.batch-lock-bar b{flex:none;font-size:13px;white-space:nowrap}
+.batch-lock-info p{min-width:0;margin:0;font-size:11px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-lock-bar .primary{flex:none;min-height:32px;padding:5px 20px;font-size:13px;border-radius:9px}
+.batch-lock-bar .error{flex:1 1 100%;margin:0;font-size:11px}
+@media(min-width:901px){
+  /* 右列（播放器）**不再**跟候选区等高：播放器高度只由 .batch-preview-video 的 72vh 决定。
+     1920×880 下容器约 634px，竖屏素材有效画面约 401×713 —— 这是播放器面积最大的一版。
+     代价是右列比候选区高约 150~250px，页面出现纵向滚动，这是明确的取舍。
+     不要为了消滚动把 .batch-side 绑回 var(--batch-cand-h)：那会把播放器压到 ~374px。 */
+  .batch-side{position:sticky;top:84px;align-self:start;min-width:0}
+}
+
+/* 矮屏只收紧播放器下面的文件名；画面高度仍由 72vh 决定，竖屏与横屏都完整 contain。 */
+@media(min-width:901px) and (max-height:820px){
+  .batch-preview-name,.batch-preview-note{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .batch-preview{gap:6px}
+}
+
+/* ---------- 锁定摘要 ---------- */
+.batch-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.batch-summary-cell{min-width:0;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-summary-cell small{display:block;font-size:11px;color:var(--muted)}
+.batch-summary-cell b{display:block;margin-top:3px;font-size:13px;font-weight:700;overflow-wrap:anywhere}
+.batch-summary-hint{font-size:12px;margin:12px 0 0}
+
+/* ---------- 生产区 ---------- */
+.batch-counters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.batch-progress-line{margin-top:12px}
+.batch-progress-line .progress{margin-top:6px}
+.batch-progress-line p{font-size:12px;margin:6px 0 0}
+.batch-produce-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
+.batch-produce-btn{min-height:50px;font-size:14px;line-height:1.3}
+.batch-produce-btn:disabled{opacity:.55;cursor:not-allowed}
+.batch-price-hint{font-size:12px;margin:8px 0 0}
+.batch-retry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
+.batch-retry .quiet{min-height:38px;padding:6px 12px;font-size:12px}
+.batch-retry .muted{font-size:12px}
+.batch-items-head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin:18px 0 4px}
+.batch-items-head h3{margin:0;font-size:15px}
+.batch-filter-field{margin:0;flex:none;font-size:12px}
+.batch-filter-field select{min-height:36px}
+.batch-item-list{display:grid}
+.batch-record{display:grid;grid-template-columns:minmax(0,1.2fr) 88px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:13px}
+.batch-record-name b{display:block;font-size:13px;overflow-wrap:anywhere}
+.batch-record-name small{display:block;font-size:11px;color:var(--muted)}
+.batch-record-info small{display:block;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.batch-record .record-actions{display:flex;gap:6px;justify-content:flex-end}
+.batch-more{margin-top:6px}
+.batch-more .quiet{min-height:28px;padding:3px 10px;font-size:11px}
+/* done 条目的质量提示（verify_warn）：是提示，不是失败，状态徽标仍是 done */
+.batch-record-info .batch-verify-warn,.history-record-info .history-verify-warn{color:var(--amber)}
+
+/* ---------- 条目 / 分组用状态徽标 ---------- */
+.status.batch-draft{background:color-mix(in srgb,var(--muted) 12%,white);color:var(--muted)}
+.status.batch-locked{background:color-mix(in srgb,var(--blue) 12%,white);color:var(--blue-dark)}
+.status.batch-closed{background:color-mix(in srgb,var(--muted) 16%,white);color:var(--muted)}
+.status.batch-pending{background:color-mix(in srgb,var(--muted) 12%,white);color:var(--muted)}
+.status.batch-producing{background:color-mix(in srgb,var(--blue) 14%,white);color:var(--blue-dark)}
+.status.batch-done{background:color-mix(in srgb,var(--green) 12%,white);color:var(--green)}
+.status.batch-failed{background:color-mix(in srgb,var(--red) 12%,white);color:var(--red)}
+.status.batch-unready{background:color-mix(in srgb,var(--amber) 13%,white);color:var(--amber)}
+
+/* ---------- 焦点态（键盘可见） ---------- */
+.batch-produce-btn:focus-visible,
+.batch-chip:focus-visible,
+.batch-toolbar-actions .quiet:focus-visible,
+.batch-toolbar-actions .batch-toggle input:focus-visible,
+.batch-lock-bar .primary:focus-visible,
+.batch-cand-foot .quiet:focus-visible,
+.batch-a-actions .quiet:focus-visible,
+.batch-retry .quiet:focus-visible,
+.batch-card-side .quiet:focus-visible,
+.batch-items-head select:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+
+/* ---------- 历史任务分组 ---------- */
+.history-groups{display:grid;gap:11px}
+.history-group{margin:0;padding:0;overflow:hidden}
+.history-group-head{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;min-height:62px;padding:13px 16px;border:0;background:transparent;text-align:left;color:var(--ink)}
+.history-group-head:hover{background:color-mix(in srgb,var(--bg) 55%,white)}
+.history-group-head:focus-visible{outline:2px solid var(--blue);outline-offset:-3px}
+.history-group-title{min-width:0}
+.history-group-title b{display:block;font-size:14px;overflow-wrap:anywhere}
+.history-group-title small{display:block;margin-top:3px;font-size:12px;color:var(--muted)}
+.history-group-side{display:flex;align-items:center;gap:8px;flex:none}
+.history-chevron{font-size:12px;font-weight:700;color:var(--blue)}
+.history-group-body{padding:0 16px 14px}
+.history-record{display:grid;grid-template-columns:minmax(0,1.2fr) 88px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:13px}
+.history-record-name b{display:block;font-size:13px;overflow-wrap:anywhere}
+.history-record-name small{display:block;font-size:11px;color:var(--muted)}
+.history-record-info small{display:block;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.history-record .record-actions{display:flex;gap:6px;justify-content:flex-end}
+.history-more{margin-top:10px}
+.history-group-foot{font-size:12px;margin:10px 0 0}
+
+/* ---------- 宽屏工作区：加宽 + 压缩页头，保证候选一屏可见 ----------
+   .hero 是营销横幅，打开批次后它占掉的 130px 正好是 3 行候选，所以在「已进入某个批次」时
+   只对大批量页隐藏；批次列表页仍保留（tab 和 h2 已足够表明位置）。 */
+:root{--batch-workspace-w:1680px}
+/* 只有大批量页收起本机提示；底部留白与 JS 的 CAND_BOTTOM_GAP 同为 12px。 */
+.shell:has(#batch-view.active-view){margin-bottom:12px}
+.shell:has(#batch-view.active-view) > footer{display:none}
+@media(min-width:1024px){
+  .shell:has(#batch-view.active-view){width:min(100% - 36px,var(--batch-workspace-w));margin-top:22px}
+  .shell:has(#batch-view.active-view):has(#batch-work:not(.hidden)) .hero{display:none}
+  .shell:has(#batch-view.active-view) .tabs{margin-bottom:10px}
+  body:has(#batch-view.active-view) .topbar{padding:0 max(18px,calc((100vw - var(--batch-workspace-w)) / 2))}
+  #batch-view .section-head{margin-bottom:10px}
+  #batch-view .batch-steps{margin-bottom:10px}
+  #batch-view .batch-step{padding:7px 10px}
+  #batch-view .batch-step small{display:none}
+  #batch-step-b{padding:12px}
+  #batch-step-b .step-title{margin-bottom:10px}
+  #batch-step-b .step-title h2{font-size:16px}
+  /* 候选区要一直长到「视口底部 - 12px」：卡片底内边距、卡片下外边距、shell 下边距会白白垫掉
+     42px，把它们收掉，候选区才能贴到视口底部且页面不出滚动条（JS 里 tail 会如实量到 0）。
+     只在「已进入某个批次、候选面板可见」时生效（锁清单后候选面板隐藏，页面恢复自然留白）。 */
+  .shell:has(#batch-view.active-view):has(#batch-step-b:not(.hidden)){margin-bottom:0}
+  #batch-step-b{padding-bottom:0;margin-bottom:0}
+  #batch-step-b .batch-cand-foot{padding-bottom:6px}
+}
+
+/* ---------- 响应式 ---------- */
+@media(max-width:900px){
+  .batch-cand-layout{grid-template-columns:minmax(0,1fr);gap:12px}
+  /* 拆开右列：播放器在上（order:-1）；翻页 + 锁定条在候选列表后面（它们本来就在 .batch-cand-main 末尾） */
+  .batch-side{display:contents}
+  .batch-preview{position:static;order:-1;top:auto}
+  /* 平板/手机不再固定高度，交回页面自然滚动，避免嵌套滚动条 */
+  .batch-cand-main{height:auto;min-height:0}
+  .batch-cand-grid{flex:none;overflow:visible;padding:1px;grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+  /* 窄屏一行放不下「翻页 + 已选 + 锁定」，拆成两行 */
+  .batch-cand-foot{flex-wrap:wrap;gap:8px;min-height:0;margin-top:10px;padding-top:6px}
+  .batch-lock-bar{flex:1 1 100%;margin-left:0;gap:8px}
+}
+@media(max-width:760px){
+  .batch-steps{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .batch-step{padding:8px 10px}
+  .batch-form-grid,.batch-form-grid-3{grid-template-columns:minmax(0,1fr)}
+  .batch-card{grid-template-columns:minmax(0,1fr)}
+  .batch-card-side{justify-content:flex-end}
+  .batch-produce-actions{grid-template-columns:minmax(0,1fr)}
+  .batch-drop{min-height:170px}
+  /* 手机上「锁定清单」是主操作，独占一行、点得准 */
+  .batch-cand-foot{display:grid;gap:8px}
+  .batch-lock-bar{flex:1 1 auto;flex-wrap:wrap;gap:6px}
+  .batch-lock-info{flex:1 1 100%;flex-wrap:wrap}
+  .batch-lock-info p{white-space:normal}
+  .batch-lock-bar .primary{flex:1 1 100%;width:100%;min-height:42px;font-size:13px}
+  .batch-cand-toolbar{flex-direction:column;align-items:stretch}
+  .batch-toolbar-actions{justify-content:flex-start}
+  .batch-cand-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:5px}
+  .batch-cand{padding:5px 8px}
+  .batch-count{font-size:13px}
+  /* 手机上候选区不再固定高度，分页条跟着列表走；按钮做大一点好点 */
+  .batch-cand-pager{justify-content:space-between;gap:6px;width:100%}
+  .batch-cand-pager .quiet{min-height:38px;padding:6px 10px}
+  .batch-page-info{font-size:11px}
+  /* 「退出当前批次计划」和「收起设置」在窄屏挤不下，换到标题下方一行 */
+  #batch-step-a .step-title{flex-wrap:wrap}
+  .batch-a-actions{flex:1 1 100%;justify-content:flex-end;margin-top:8px}
+  /* 手机上标题和右上角按钮挤在一行会把按钮压成竖排，改成上下堆 */
+  #batch-view .section-head{flex-direction:column;align-items:stretch;gap:10px}
+  #batch-view .section-head .top-actions{justify-content:flex-end}
+  .batch-record,.history-record{grid-template-columns:minmax(0,1fr) auto}
+  .batch-record-name,.history-record-name{grid-column:1}
+  .batch-record-state,.history-record-state{grid-column:2;justify-self:end}
+  .batch-record-info,.history-record-info{grid-column:1}
+  .batch-record .record-actions,.history-record .record-actions{grid-column:2;justify-self:end}
+  .batch-items-head{flex-direction:column;align-items:stretch}
+  .history-group-head{padding:12px}
+  .history-group-body{padding:0 12px 12px}
+}
