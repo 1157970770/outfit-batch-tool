@@ -152,6 +152,7 @@ def read_workbook(path: Path, sheet_name: str) -> dict:
                 "duration": _f(cell(values, "时长(秒)")),
                 "tags": tags,
                 "status": _s(cell(values, "状态")),
+                "source_dir": _s(cell(values, "来源目录")),
             })
     finally:
         workbook.close()
@@ -244,24 +245,34 @@ def audit(rows: list[dict], extra_files: set[str]) -> dict:
 
 
 def resolve_source(video_dir: Path, row: dict) -> Path | None:
-    """按工作簿找源文件；优先相对路径，再退文件名，最后不区分大小写匹配。"""
-    for raw in (row["relative_path"], row["filename"]):
-        text = str(raw or "").replace("\\", "/").strip()
-        if not text or ".." in text.split("/") or ABS_PATH_RE.match(text):
-            continue  # 空、上跳、绝对路径一律不认，只认视频目录下的相对路径
-        path = (video_dir / text)
+    """按工作簿找源文件；行上带「来源目录」时优先用它，再退默认视频目录。"""
+    dirs: list[Path] = []
+    extra = str(row.get("source_dir") or "").strip()
+    if extra:
+        candidate_dir = Path(extra)
+        if candidate_dir.is_dir():
+            dirs.append(candidate_dir)
+    if video_dir not in dirs:
+        dirs.append(video_dir)
+    for base in dirs:
+        for raw in (row["relative_path"], row["filename"]):
+            text = str(raw or "").replace("\\", "/").strip()
+            if not text or ".." in text.split("/") or ABS_PATH_RE.match(text):
+                continue  # 空、上跳、绝对路径一律不认，只认视频目录下的相对路径
+            path = (base / text)
+            try:
+                if path.is_file():
+                    return path
+            except OSError:
+                continue
+    target = row["filename"].lower()
+    for base in dirs:
         try:
-            if path.is_file():
-                return path
+            for child in base.iterdir():
+                if child.is_file() and child.name.lower() == target:
+                    return child
         except OSError:
             continue
-    target = row["filename"].lower()
-    try:
-        for child in video_dir.iterdir():
-            if child.is_file() and child.name.lower() == target:
-                return child
-    except OSError:
-        return None
     return None
 
 
