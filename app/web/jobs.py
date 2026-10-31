@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.core import BatchRunner, BatchSpec, unique_batch_dir
 from app.runtime import build_storages
+from app.wan_api import global_inflight
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _SECRET_PATTERNS = [
@@ -26,6 +27,19 @@ def _redact(text: str) -> str:
     for pattern, replacement in _SECRET_PATTERNS:
         result = pattern.sub(replacement, result)
     return result
+
+
+def duration_ok(value) -> bool:
+    """时长校验，与 app/wan_api.py 的 validate_task 保持同一口径。
+
+    -1 = 跟随素材/智能时长；2–30 = 固定输出秒数（网页标配 7 秒）。
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return False
+    return number == -1 or 2 <= number <= 30
+
 
 
 class JobManager:
@@ -43,7 +57,10 @@ class JobManager:
         self.jobs: dict[str, dict] = {}
         self.active: dict[str, dict] = {}
         self.stop_event = threading.Event()
-        self.submit_slots = threading.Semaphore(max(1, min(3, int(settings.config.get("WAN_MAX_CONCURRENCY") or 3))))
+        # 进程级在飞额度（单例）：跨 job 共享，覆盖 submit → wait 全程。
+        # 原来这里是 max(1, min(3, ...)) 的每实例信号量，两个 job 并行即在飞数翻倍。
+        self.inflight = global_inflight()
+        self.submit_slots = self.inflight      # 兼容旧字段名
         self._load_jobs()
         self.dispatcher = threading.Thread(target=self._dispatch, name="web-job-dispatch", daemon=True)
         self.dispatcher.start()
@@ -74,7 +91,9 @@ class JobManager:
 
     def create(self, owner: str, image_path: Path, image_name: str,
                templates: list[dict], prompt_id: str, resolution: str = "480P",
-               duration: int = 5, prompt_body: str | None = None) -> dict:
+               duration: int = 5, prompt_body: str | None = None, *,
+               batch_ref: str = "", limit_items: int | None = None) -> dict:
+        """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。"""
         if prompt_id not in self.prompts:
             raise ValueError("请选择有效的提示词模板")
         prompt = str(prompt_body if prompt_body is not None else self.prompts[prompt_id]).strip()
@@ -84,9 +103,11 @@ class JobManager:
             raise ValueError("提示词最多 4000 个字符")
         if not templates:
             raise ValueError("至少选择一个视频场景")
-        if len(templates) > self.settings.max_items:
-            raise ValueError(f"一次最多生成 {self.settings.max_items} 条")
-        if resolution not in ("480P", "720P") or duration not in (5, -1):
+        max_items = int(limit_items if limit_items is not None else self.settings.max_items)
+        max_items = max(1, min(500, max_items))
+        if len(templates) > max_items:
+            raise ValueError(f"一次最多生成 {max_items} 条")
+        if resolution not in ("480P", "720P") or not duration_ok(duration):
             raise ValueError("生成参数无效，请刷新页面后重试")
         job_id = uuid.uuid4().hex[:12]
         now = time.time()
@@ -101,6 +122,8 @@ class JobManager:
             "resolution": resolution, "duration": duration, "total": len(templates),
             "done": 0, "records": [], "summary": None, "message": "已排队，开始前可取消。",
             "out_dir": "", "log_tail": [], "cancel_requested": False,
+            # 批次归属：批次生产时指向 BatchManager 的 id，试跑/老 job 为空。
+            "batch_ref": str(batch_ref or ""),
         }
         with self.changed:
             if sum(1 for item in self.jobs.values() if item.get("status") == "queued") >= 50:
@@ -182,7 +205,8 @@ class JobManager:
         try:
             template_store, output_store = build_storages(self.settings.config)
             cfg = self.settings.config
-            concurrency = max(1, min(3, int(cfg.get("WAN_MAX_CONCURRENCY") or 3)))
+            # 线程数只是工作线程，不再与 API 并发/速率绑在一起；上限 50 防止误配。
+            concurrency = self.settings.max_concurrency
             spec = BatchSpec(
                 batch_id=Path(job["out_dir"]).name,
                 image_path=job["image_path"], prompt=job["prompt"], out_dir=Path(job["out_dir"]),
@@ -197,7 +221,7 @@ class JobManager:
                 storage=output_store, template_storage=template_store,
                 source_prefix=str(cfg.get("COS_SOURCE_PREFIX") or ""),
                 price_per_second=cfg.get("WAN_PRICE_PER_SECOND") or {},
-                submit_semaphore=self.submit_slots,
+                inflight_semaphore=self.inflight,
             )
             runner = BatchRunner(spec, on_event=lambda e: self._on_event(job_id, e),
                                  log=lambda m: self._append_log(job_id, m))
@@ -293,8 +317,9 @@ class JobManager:
         with self.lock:
             safe = {k: job.get(k) for k in (
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
-                "batch_id", "image_name", "prompt_id", "template_ids", "resolution",
+                "batch_id", "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
                 "duration", "total", "done", "message", "log_tail", "cancel_requested")}
+            safe["batch_ref"] = str(safe.get("batch_ref") or "")
             if safe.get("message"):
                 safe["message"] = _redact(safe["message"])
             safe["log_tail"] = [_redact(line) for line in (safe.get("log_tail") or [])]

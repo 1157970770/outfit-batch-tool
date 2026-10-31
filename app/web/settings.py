@@ -11,6 +11,18 @@ from pathlib import Path
 
 from app import config as appconfig
 
+# 单 job 线程上限（与 wan_api.SUBMIT_MAX_CONCURRENCY 一致）：配置写更大也不放大。
+MAX_CONCURRENCY_CAP = 50
+# 批次清单上限与单次生产档位上限（v2：只允许 20/50/100 三档）。
+MAX_BATCH_ITEMS_CAP = 500
+MAX_BATCH_RUN_ITEMS_CAP = 100
+# price_per_second 为 null 时的兜底单价（元/计费秒），来自阿里云百炼控制台
+# wan3.0-video（万相 3.0 视频）公开定价页：480P 0.3 / 720P 0.6 / 1080P 1.2。
+# 这是公开价目表、不是密钥；**仅用于给用户看预估金额，实际以账单为准**。
+# 配置里有值时一律以配置为准（unit_price 返回 source="config"）。
+DEFAULT_PRICE_PER_SECOND = {"480P": 0.3, "720P": 0.6, "1080P": 1.2}
+
+
 
 @dataclass
 class WebSettings:
@@ -37,6 +49,47 @@ class WebSettings:
     @property
     def max_items(self) -> int:
         return max(1, min(100, int(self.web.get("max_job_items", 20))))
+
+    @property
+    def max_concurrency(self) -> int:
+        """单 job 工作线程数；读 WAN_MAX_CONCURRENCY，钳在 1–50。"""
+        try:
+            value = int(self.config.get("WAN_MAX_CONCURRENCY") or 3)
+        except (TypeError, ValueError):
+            value = 3
+        return max(1, min(MAX_CONCURRENCY_CAP, value))
+
+    @property
+    def max_batch_items(self) -> int:
+        """一个批次锁定清单的条目上限。"""
+        try:
+            value = int(self.web.get("max_batch_items", MAX_BATCH_ITEMS_CAP))
+        except (TypeError, ValueError):
+            value = MAX_BATCH_ITEMS_CAP
+        return max(1, min(MAX_BATCH_ITEMS_CAP, value))
+
+    @property
+    def max_batch_run_items(self) -> int:
+        """批次单次生产上限（20/50/100 三档里的最大可用档）。"""
+        try:
+            value = int(self.web.get("max_batch_run_items", MAX_BATCH_RUN_ITEMS_CAP))
+        except (TypeError, ValueError):
+            value = MAX_BATCH_RUN_ITEMS_CAP
+        return max(1, min(MAX_BATCH_RUN_ITEMS_CAP, value))
+
+    def unit_price(self, resolution: str) -> tuple[float | None, str]:
+        """返回 (元/秒, 来源)。config 有值就用 config；null 时用兜底常量并标注 default。"""
+        key = str(resolution or "").strip().upper()
+        raw = self.config.get("WAN_PRICE_PER_SECOND")
+        value = raw.get(key) if isinstance(raw, dict) else None
+        if value not in (None, ""):
+            try:
+                return float(value), "config"
+            except (TypeError, ValueError):
+                pass
+        fallback = DEFAULT_PRICE_PER_SECOND.get(key)
+        return (fallback, "default") if fallback else (None, "missing")
+
 
 
 def _read_json(path: Path) -> dict:
@@ -79,7 +132,7 @@ def load_settings(*, base_dir: str | Path | None = None,
         if not tag_workbook_path.is_absolute():
             tag_workbook_path = base / tag_workbook_path
     elif use_runtime_defaults:
-        tag_workbook_path = Path.home() / "Desktop" / "标签清单1版.xlsx"
+        tag_workbook_path = Path.home() / "Desktop" / "新标签清单.xlsx"
     else:
         # 测试/嵌入模式未指定时不隐式读取用户桌面工作簿。
         tag_workbook_path = None

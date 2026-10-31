@@ -17,6 +17,7 @@ from pathlib import Path
 
 
 TAG_CATEGORIES = ["景别", "适合季节", "场景", "姿势"]
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
 
 
 def _normalize_id(value) -> str:
@@ -123,7 +124,7 @@ class TemplateCatalog:
 
         try:
             categories = self._read_tag_dictionary(workbook["标签字典"])
-            rows = self._read_tag_rows(workbook["视频标签清单"], categories)
+            rows, untagged, listed = self._read_tag_rows(workbook["视频标签清单"], categories)
             video_dir = self._read_project_video_dir(workbook)
         finally:
             workbook.close()
@@ -153,7 +154,8 @@ class TemplateCatalog:
             "source_ready_templates": matched_source,
             "manifest_entries": manifest_count,
             "manifest_unmatched": manifest_count - matched_source,
-            "unlisted_files": self._count_unlisted(video_dir, rows),
+            "untagged_skipped": untagged,
+            "unlisted_files": self._count_unlisted(video_dir, listed),
         }
         return dict(self.tag_workbook_info)
 
@@ -186,7 +188,13 @@ class TemplateCatalog:
         return None
 
     @staticmethod
-    def _read_tag_rows(sheet, categories: dict[str, str]) -> list[dict]:
+    def _read_tag_rows(sheet, categories: dict[str, str]) -> tuple[list[dict], int, set[str]]:
+        """返回 (可参与筛选的行, 被排除的废弃行数, 清单里出现过的全部文件名)。
+
+        约定：**没打标签的行就是废弃素材**，直接排除，不进候选集、不提示、不当作待办。
+        仅当整张表一行可用的都没有时才报错（说明清单本身没打标）。
+        第三个返回值用于统计"目录里有、清单里没有"的文件，不能被排除项污染。
+        """
         header = [str(value or "").strip() for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
         columns = {name: i for i, name in enumerate(header)}
         needed = ("模板ID", "相对路径", "文件名", "标签")
@@ -201,6 +209,8 @@ class TemplateCatalog:
 
         rows: list[dict] = []
         seen: dict[str, int] = {}
+        untagged = 0
+        listed: set[str] = set()
         for values in sheet.iter_rows(min_row=2, values_only=True):
             if not values or cell(values, "模板ID") is None or not str(cell(values, "模板ID")).strip():
                 continue
@@ -211,13 +221,16 @@ class TemplateCatalog:
             filename = str(cell(values, "文件名") or "").strip()
             if not relative or not filename:
                 raise TemplateError(f"标签清单中模板ID {template_id} 的视频路径或文件名为空")
+            listed |= {_basename(relative), _basename(filename)} - {""}
             raw_tags = str(cell(values, "标签") or "")
             tags = list(dict.fromkeys(part.strip() for part in raw_tags.replace("；", ";").split(";") if part.strip()))
             unknown = [tag for tag in tags if tag not in categories]
             if unknown:
                 raise TemplateError(f"视频 {relative} 使用了标签字典外的值：{unknown[0]}")
             if not tags:
-                raise TemplateError(f"视频 {relative} 没有任何标签，无法参与筛选")
+                untagged += 1
+                seen[template_id] = -1
+                continue
             size = _as_float(cell(values, "大小(MB)"))
             rows.append({
                 "id": template_id,
@@ -236,8 +249,9 @@ class TemplateCatalog:
             })
             seen[template_id] = len(rows) - 1
         if not rows:
-            raise TemplateError("视频标签清单没有任何有效行")
-        return rows
+            raise TemplateError(
+                f"视频标签清单里没有可用行（{untagged} 行都没有标签），请先在打标工具里完成标注")
+        return rows, untagged, listed
 
     def _build_source_index(self):
         """用旧 manifest 建索引，键只取文件名/相对路径/指纹，不取 ID。"""
@@ -270,14 +284,15 @@ class TemplateCatalog:
         return next(iter(unique.values())) if len(unique) == 1 else None
 
     @staticmethod
-    def _count_unlisted(video_dir: Path | None, rows: list[dict]) -> int | None:
+    def _count_unlisted(video_dir: Path | None, listed: set[str]) -> int | None:
+        """统计目录里有、清单里没有的视频文件数（只看视频，忽略 csv/记录文件等）。"""
         if video_dir is None:
             return None
         try:
             if not video_dir.is_dir():
                 return None
-            listed = {_basename(row["relative_path"]) for row in rows}
-            files = {path.name.lower() for path in video_dir.iterdir() if path.is_file()}
+            files = {path.name.lower() for path in video_dir.iterdir()
+                     if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES}
         except OSError:
             return None
         return len(files - listed)
@@ -346,6 +361,37 @@ class TemplateCatalog:
         else:
             raise TemplateError("请选择自动推荐或手动挑选场景")
         return [dict(item) for item in selected]
+
+    def pick_by_ids(self, ids: list[str], *, require_ready: bool = True,
+                    max_items: int | None = None) -> list[dict]:
+        """按 ID 列表取模板（保持入参顺序、自动去重），供批次锁定清单使用。
+
+        校验口径与 `choose` 一致：ID 必须存在、默认必须已上传云端（有 url 或 key）。
+        `require_ready=False` 时只保证 ID 存在，让调用方自己处理「模板已下架」。
+        """
+        if not isinstance(ids, (list, tuple)) or not ids:
+            raise TemplateError("清单不能为空")
+        ordered: list[str] = []
+        for raw in ids:
+            template_id = _normalize_id(raw)
+            if template_id and template_id not in ordered:
+                ordered.append(template_id)
+        if max_items is not None and len(ordered) > int(max_items):
+            raise TemplateError(f"清单最多 {int(max_items)} 条")
+        chosen: list[dict] = []
+        pending: list[str] = []
+        for template_id in ordered:
+            item = self.by_id.get(template_id)
+            if not item:
+                raise TemplateError(f"模板 {template_id} 不在当前视频场景清单里")
+            if require_ready and not (item.get("url") or item.get("key")):
+                pending.append(template_id)
+            chosen.append(dict(item))
+        if pending:
+            raise TemplateError(
+                f"所选视频尚未上传到云端模板库（例如 {pending[0]}，共 {len(pending)} 条），"
+                "先在管理页上传并重载模板清单后再锁定。")
+        return chosen
 
     def preview(self, template_id: str) -> dict:
         item = self.by_id.get(_normalize_id(template_id))

@@ -27,7 +27,9 @@ from app import config as appconfig
 from app.media import MediaError, validate_image
 from app.prompts import PromptLibrary
 from app.runtime import build_storages
+from app.wan_api import configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
+from app.web.batches import BatchError, BatchManager
 from app.web.jobs import JobManager
 from app.web.settings import WebSettings, load_settings
 from app.web.templates import TemplateCatalog, TemplateError
@@ -71,6 +73,9 @@ def _load_prompts() -> dict[str, dict]:
 class WebApplication:
     def __init__(self, settings: WebSettings):
         self.settings = settings
+        # 进程级限流单例：速率与在飞上限只在这里定一次，多个 job 并行不叠加。
+        configure_globals(query_rpm=settings.config.get("WAN_QUERY_RPM"),
+                          max_inflight=settings.config.get("WAN_MAX_INFLIGHT"))
         self.prompts = _load_prompts()
         self.catalog = TemplateCatalog(settings.templates)
         self.catalog.tag_workbook_info = settings.tag_workbook_info or {}
@@ -83,6 +88,22 @@ class WebApplication:
         self.upload_meta.mkdir(parents=True, exist_ok=True)
         self._template_store = None
         self._template_store_lock = threading.Lock()
+        # 批次管理器复用 JobManager.lock；catalog 用回调取，热重载后无需重建。
+        self.batches = BatchManager(settings, self.jobs, lambda: self.catalog, self.resolve_upload)
+
+    def resolve_upload(self, upload_id: str, owner: str) -> dict | None:
+        """按 upload_id 取上传元数据；归属不符或文件已丢失返回 None。"""
+        if not re.fullmatch(r"[a-f0-9]{32}", str(upload_id or "")):
+            return None
+        try:
+            meta = json.loads((self.upload_meta / f"{upload_id}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(meta, dict) or meta.get("owner") != owner:
+            return None
+        if not Path(str(meta.get("path") or "")).is_file():
+            return None
+        return meta
 
     def user_for_token(self, token: str) -> dict | None:
         return self.signer.verify(token, self.settings.users)
@@ -264,9 +285,15 @@ def make_handler(app: WebApplication):
                                                "templates_count": len(app.catalog.items),
                                                "templates_error": app.settings.templates_error,
                                                "max_items": app.settings.max_items,
+                                               "max_batch_items": app.settings.max_batch_items,
+                                               "max_batch_run_items": app.settings.max_batch_run_items,
+                                               "produce_choices": [choice for choice in (20, 50, 100)
+                                                                   if choice <= app.settings.max_batch_run_items],
+                                               "max_concurrency": app.settings.max_concurrency,
                                                 "tag_filter_enabled": any(app.catalog.tag_values.values()),
                                                 "tagged_templates_count": len(app.catalog.items) if app.catalog.tag_workbook_info else 0,
                                                 "source_ready_templates": int((app.catalog.tag_workbook_info or {}).get("source_ready_templates", 0)),
+                                                "untagged_skipped": int((app.catalog.tag_workbook_info or {}).get("untagged_skipped", 0)),
                                                 "unlisted_files": (app.catalog.tag_workbook_info or {}).get("unlisted_files"),
                                                 "manifest_warning": (app.catalog.tag_workbook_info or {}).get("manifest_warning", ""),
                                                "notice": cfg.get("NOTICE") or ""},
@@ -285,6 +312,36 @@ def make_handler(app: WebApplication):
                     return
                 template_id = path.split("/")[-2]
                 return self._preview(template_id)
+            if path.startswith("/api/uploads/"):
+                user = self._user()
+                if not user:
+                    return
+                return self._upload_file(path.strip("/").split("/")[2], user)
+            if path == "/api/batches":
+                user = self._user()
+                if not user:
+                    return
+                return self._batch_list(urllib.parse.parse_qs(parsed.query), user)
+            if path.startswith("/api/batches/"):
+                user = self._user()
+                if not user:
+                    return
+                parts = path.strip("/").split("/")
+                if len(parts) == 4 and parts[3] == "files.zip":
+                    return self._batch_zip(parts[2], user)
+                if len(parts) == 3:
+                    return self._batch_detail(parts[2], urllib.parse.parse_qs(parsed.query), user)
+            if path == "/api/history/groups":
+                user = self._user()
+                if not user:
+                    return
+                return self._history_groups(urllib.parse.parse_qs(parsed.query), user)
+            if path.startswith("/api/history/groups/"):
+                user = self._user()
+                if not user:
+                    return
+                key = urllib.parse.unquote(path.strip("/").split("/")[3])
+                return self._history_items(key, urllib.parse.parse_qs(parsed.query), user)
             if path.startswith("/api/jobs/"):
                 user = self._user()
                 if not user:
@@ -319,8 +376,26 @@ def make_handler(app: WebApplication):
                 return self._json({"ok": True, "version": WEB_VERSION,
                                    "templates": len(app.catalog.items), "queued": queued_count,
                                    "active": active_count, "free_gb": round(usage.free / (1024**3), 1),
+                                   "max_concurrency": app.settings.max_concurrency,
+                                   "limits": global_limits(),
                                    "users": [{"username": n, "role": u.get("role", "user"), "enabled": u.get("enabled", True)}
                                              for n, u in app.settings.users.items()]})
+            if path == "/api/admin/template-health":
+                if not self._user(admin=True):
+                    return
+                info = app.catalog.tag_workbook_info or {}
+                workbook_rows = int(info.get("workbook_rows") or 0)
+                source_ready = int(info.get("source_ready_templates") or 0)
+                return self._json({
+                    "ok": True,
+                    "workbook_rows": workbook_rows,
+                    "tagged_rows": int(info.get("matched_templates") or 0),
+                    "source_ready": source_ready,
+                    "unmatched": int(info.get("manifest_unmatched") or 0),
+                    "untagged": int(info.get("untagged_skipped") or 0),
+                    "ready_ratio": round(source_ready / workbook_rows, 4) if workbook_rows else 0,
+                    "manifest_warning": str(info.get("manifest_warning") or ""),
+                })
             if path == "/api/admin/users":
                 if not self._user(admin=True):
                     return
@@ -367,14 +442,40 @@ def make_handler(app: WebApplication):
                     return self._json({"ok": True, "job": retry}, 201)
                 except ValueError as exc:
                     return self._error(exc, 409)
+            if path == "/api/batches":
+                return self._batch_create(data, user)
+            if path.startswith("/api/batches/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    action = parts[3]
+                    if action == "image":
+                        return self._batch_image(parts[2], data, user)
+                    if action == "candidates":
+                        return self._batch_candidates(parts[2], data, user)
+                    if action == "lock":
+                        return self._batch_lock(parts[2], data, user)
+                    if action == "produce":
+                        return self._batch_produce(parts[2], data, user)
+                    if action == "close":
+                        return self._batch_close(parts[2], user)
+                    if action == "retry-failed":
+                        return self._batch_retry(parts[2], data, user)
             if path == "/api/admin/reload-templates":
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
                 try:
                     app.reload_templates()
-                    return self._json({"ok": True, "count": len(app.catalog.items)})
                 except Exception as exc:
                     return self._error(f"重载失败：{exc}", 503)
+                info = app.catalog.tag_workbook_info or {}
+                return self._json({
+                    "ok": True,
+                    "count": len(app.catalog.items),
+                    "source_ready_templates": int(info.get("source_ready_templates") or 0),
+                    "manifest_unmatched": int(info.get("manifest_unmatched") or 0),
+                    "untagged_skipped": int(info.get("untagged_skipped") or 0),
+                    "manifest_warning": str(info.get("manifest_warning") or ""),
+                })
             if path == "/api/admin/users":
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
@@ -496,6 +597,113 @@ def make_handler(app: WebApplication):
             if not app.jobs.cancel(job_id):
                 return self._error("该任务目前不能取消。", 409)
             return self._json({"ok": True})
+
+        def _upload_file(self, upload_id, user):
+            if not re.fullmatch(r"[a-f0-9]{32}", str(upload_id or "")):
+                return self._error("找不到这张图片。", 404)
+            try:
+                meta = json.loads((app.upload_meta / f"{upload_id}.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return self._error("找不到这张图片。", 404)
+            if user.get("role") != "admin" and meta.get("owner") != user.get("username"):
+                return self._error("无权查看这张图片。", 403)
+            path = Path(str(meta.get("path") or ""))
+            if not path.is_file():
+                return self._error("图片已失效，请重新上传。", 404)
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            return self._send_file(path, mime, str(meta.get("name") or path.name))
+
+        # ---------------------------------------------------------- 批次
+        def _batch_create(self, data, user):
+            try:
+                batch = app.batches.create(user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, "batch": batch}, 201)
+
+        def _batch_image(self, batch_id, data, user):
+            try:
+                result = app.batches.set_image(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result})
+
+        def _batch_candidates(self, batch_id, data, user):
+            try:
+                result = app.batches.candidates(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result})
+
+        def _batch_lock(self, batch_id, data, user):
+            try:
+                batch = app.batches.lock(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, "batch": batch})
+
+        def _batch_produce(self, batch_id, data, user):
+            try:
+                result = app.batches.produce(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result}, 201)
+
+        def _batch_retry(self, batch_id, data, user):
+            try:
+                result = app.batches.retry_failed(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result}, 201)
+
+        def _batch_close(self, batch_id, user):
+            try:
+                batch = app.batches.close(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, "batch": batch})
+
+        def _batch_list(self, query, user):
+            scope = query.get("scope", ["mine"])[0]
+            all_users = scope == "all"
+            if all_users and user.get("role") != "admin":
+                return self._error("此操作需要管理员权限。", 403)
+            return self._json({"ok": True, "batches": app.batches.list_for(user, all_users)})
+
+        def _batch_detail(self, batch_id, query, user):
+            item_state = query.get("item_state", [""])[0]
+            try:
+                batch, items = app.batches.detail(batch_id, user, item_state)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, "batch": batch, "items": items})
+
+        def _batch_zip(self, batch_id, user):
+            try:
+                path = app.batches.zip_path(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._send_file(path, "application/zip", f"batch-{batch_id}.zip")
+
+        # ---------------------------------------------------------- 历史分组
+        def _history_groups(self, query, user):
+            scope = query.get("scope", ["mine"])[0]
+            all_users = scope == "all"
+            if all_users and user.get("role") != "admin":
+                return self._error("此操作需要管理员权限。", 403)
+            return self._json({"ok": True, "groups": app.batches.history_groups(user, all_users)})
+
+        def _history_items(self, key, query, user):
+            try:
+                offset = int(query.get("offset", ["0"])[0] or 0)
+                limit = int(query.get("limit", ["200"])[0] or 200)
+            except (TypeError, ValueError):
+                return self._error("分页参数无效。", 400)
+            try:
+                result = app.batches.history_items(key, user, offset, limit)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result})
 
         def _admin_add_user(self, data):
             username = str(data.get("username") or "").strip()
