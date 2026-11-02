@@ -231,6 +231,8 @@
     const setting = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${edited ? ' · 已微调提示词' : ''}`;
     $('summary-detail').textContent = `${setting} · 筛选后 ${available} 个场景${available && !readyAvailable ? ' · 尚未上传云端，暂不能生成' : ''}`;
     $('submit-btn').disabled = state.submitting || !available || !readyAvailable || !count || count > available;
+    // 数量是分段按钮：值改了还要把高亮同步过去，否则点了没反应（值其实变了）
+    syncCountButtons();
   }
 
   const fileInput = $('image-file');
