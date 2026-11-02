@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0 };
+  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
   const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', success: '成功' };
   const esc = (s) => String(s ?? '');
   // 6 栏位款号标签：读取容器内 [data-tag-slot]，返回 {top:...} 形式（空值丢弃）。
@@ -135,6 +135,36 @@
     );
   }
 
+  // 款号-模板防重标记：按上衣款号查已用模板（批次生产才记账，小批量不计入），选项尾部加【已用】。
+  function paintTemplateUsed() {
+    const select = $('template-select');
+    if (!select) return;
+    [...select.options].forEach(option => {
+      if (!option.dataset.base) option.dataset.base = option.textContent;
+      const used = state.styleUsed[option.value];
+      option.textContent = used ? `${option.dataset.base}【已用】` : option.dataset.base;
+    });
+  }
+  async function refreshStyleUsed() {
+    const top = collectTagSlots('style-tags').top || '';
+    state.styleUsedTop = top;
+    if (!top) { state.styleUsed = {}; paintTemplateUsed(); return; }
+    try {
+      const data = await api(`/api/style-usage?top=${encodeURIComponent(top)}`);
+      if (state.styleUsedTop !== top) return;   // 输入又变了，丢弃过期结果
+      state.styleUsed = data.used || {};
+    } catch { state.styleUsed = {}; }
+    paintTemplateUsed();
+  }
+  function scheduleStyleUsed() {
+    clearTimeout(state.styleUsedTimer);
+    state.styleUsedTimer = setTimeout(refreshStyleUsed, 400);
+  }
+  // 该款号已用过的候选模板数量（提交前确认用）。
+  function usedCount(ids) {
+    return (ids || []).filter(id => state.styleUsed[id]).length;
+  }
+
   function renderTagFilters() {
     const card = $('tag-filter-card');
     const root = $('tag-filter-groups');
@@ -197,6 +227,7 @@
     updateTemplatePreview();
     updateSummary();
     syncCountButtons();
+    paintTemplateUsed();
   }
 
   $('clear-tag-filter').addEventListener('click', () => {
@@ -230,7 +261,7 @@
   });
   $('prompt-select').addEventListener('change', () => { $('prompt-body').value = $('prompt-select').selectedOptions[0]?.dataset.body || ''; updatePromptCount(); updateSummary(); });
   $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
-  document.querySelectorAll('#style-tags input[data-tag-slot]').forEach(input => input.addEventListener('input', updateSummary));
+  document.querySelectorAll('#style-tags input[data-tag-slot]').forEach(input => input.addEventListener('input', () => { updateSummary(); scheduleStyleUsed(); }));
   function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }
   $('template-select').addEventListener('change', () => { updateTemplatePreview(); updateSummary(); });
   function updateTemplatePreview() {
@@ -311,6 +342,13 @@
     if (!count || count > state.filteredTemplates.length) return showCreateError(`当前筛选只有 ${state.filteredTemplates.length} 个视频场景，请减少生成数量。`);
     if (!promptBody) return showCreateError('提示词不能为空，请选择模板或填写内容。');
     if (promptBody.length > 4000) return showCreateError('提示词最多 4000 个字符。');
+    // 同款号防重（软拦截）：上衣款号已用过的模板再提交，弹确认让使用者自己定夺。
+    const topNow = collectTagSlots('style-tags').top || '';
+    if (topNow && state.styleUsedTop === topNow) {
+      const chosen = selection === 'selected' ? [$('template-select').value] : state.filteredTemplates.map(t => String(t.id));
+      const reused = usedCount(chosen);
+      if (reused && !confirm(`款号 ${topNow} 有 ${reused} 个候选视频模板在之前的批次里用过。\n\n确定要重复使用吗？（历史记录只为防重提醒，不影响归档）`)) return;
+    }
     if (!confirm(`将提交 ${count} 条生成任务，标签筛选后有 ${state.filteredTemplates.length} 个候选视频。已提交的任务不能撤回。是否继续？`)) return;
     const btn = $('submit-btn'); state.submitting = true; btn.disabled = true; btn.textContent = '正在上传…'; showCreateError('');
     try {

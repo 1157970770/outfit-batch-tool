@@ -49,6 +49,7 @@
     promptDraft: '',         // 编辑中的草稿文本（与 batch.prompt 分离，避免误覆盖）
     groups: [], openGroups: new Set(), groupDetails: new Map(), groupSig: new Map(),
     historyMode: 'groups', flatWarned: false,
+    styleUsed: {},           // 当前批次上衣款号已用过的模板（{id: {batch_no,...}}），防重标记
   };
 
   /* ---------- 小工具 ---------- */
@@ -495,9 +496,19 @@
     $('batch-cand-note').classList.add('hidden');
   }
 
+  async function refreshStyleUsed(batch) {
+    const top = txt((batch && batch.tags && batch.tags.top) || (batch && batch.style_no) || '');
+    if (!top) { b.styleUsed = {}; return; }
+    try {
+      const data = await api(`/api/style-usage?top=${encodeURIComponent(top)}`);
+      b.styleUsed = data.used || {};
+    } catch { b.styleUsed = {}; }
+  }
+
   async function fetchCandidates() {
     const batch = b.current;
     if (!batch || !batch.id) return;
+    await refreshStyleUsed(batch);   // 先查该款号已用模板，候选行才能挂「已用」标记
     const btn = $('batch-candidates-btn');
     b.tagFilters = collectBatchTagFilters();
     btn.disabled = true; btn.textContent = '正在筛选…';
@@ -724,6 +735,12 @@
     name.title = item.name;
     line.append(name);
     if (!item.ready) line.append(el('span', 'batch-cand-badge', '未上传'));
+    const usedInfo = b.styleUsed[item.id];
+    if (usedInfo) {
+      line.append(el('span', 'batch-cand-badge batch-cand-badge-used',
+        `已用${txt(usedInfo.batch_no) ? `·${txt(usedInfo.batch_no)}` : ''}`));
+      tile.title += `\n款号已在批次「${txt(usedInfo.batch_no) || txt(usedInfo.batch_id) || '未知'}」用过该模板`;
+    }
     const tags = item.tags.slice(0, 4).join(' / ');
     const meta = el('div', 'batch-cand-meta', `${item.id}${tags ? ` · ${tags}` : ''}`);
     meta.title = item.tags.length ? item.tags.join(' / ') : item.id;
@@ -942,6 +959,9 @@
     if (!batch || !batch.id || b.busy) return;
     const ids = [...b.selected];
     if (!ids.length) { toast('至少勾选一条候选。'); return; }
+    // 同款号防重（软拦截）：勾了该款号已用过的模板，弹确认让使用者自己定夺。
+    const reused = ids.filter((id) => b.styleUsed[id]);
+    if (reused.length && !confirm(`当前款号有 ${reused.length} 条候选在之前的批次里用过。\n\n确定要重复使用吗？（历史记录只为防重提醒，不影响归档）`)) return;
     if (!confirm(`锁定 ${ids.length} 条为待生产清单？\n\n锁定后不能再增删条目，也不能换定妆图；要改只能新建批次。`)) return;
     const btn = $('batch-lock-btn');
     b.busy = true; btn.disabled = true; btn.textContent = '正在锁定…';

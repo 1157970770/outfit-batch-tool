@@ -358,6 +358,13 @@ def make_handler(app: WebApplication):
                 if not user:
                     return
                 return self._upload_file(path.strip("/").split("/")[2], user)
+            if path == "/api/style-usage":
+                user = self._user()
+                if not user:
+                    return
+                query = urllib.parse.parse_qs(parsed.query)
+                top = str(query.get("top", [""])[0] or "").strip()
+                return self._json({"ok": True, "top": top, "used": app.batches.usage.used(top)})
             if path == "/api/batches":
                 user = self._user()
                 if not user:

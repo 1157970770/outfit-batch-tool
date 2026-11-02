@@ -447,6 +447,20 @@ def main() -> int:
         assert app.jobs.jobs[produced["job"]["id"]]["prompt"] == new_prompt, \
             "第二批生产必须使用改过之后的提示词"
         job_ids.append(produced["job"]["id"])
+
+        # ---------------- 款号-模板防重账本：提交时记账 + 查询接口
+        used = app.batches.usage.used("AW26-001")
+        assert set(used) == set(ready_ids), (len(used), len(ready_ids))
+        first = used[ready_ids[0]]
+        assert first["batch_id"] == batch_id and first["batch_no"], first
+        code, _, usage_raw = call(bob, base, "/api/style-usage?top=AW26-001")
+        assert code == 200, (code, usage_raw)
+        assert set(body(usage_raw)["used"]) == set(ready_ids), usage_raw
+        code, _, nobody = call(urllib.request.build_opener(), base, "/api/style-usage?top=AW26-001")
+        assert code in (401, 403), code
+        code, _, blank = call(bob, base, "/api/style-usage?top=")
+        assert code == 200 and body(blank)["used"] == {}, blank
+        print("  ✓ 款号-模板账本：生产提交即记账，/api/style-usage 可查、未登录拒绝")
         run2_job = wait_job(alice, base, job_ids[1])
         assert run2_job["status"] == "succeeded", run2_job
         batch = wait_batch(alice, base, batch_id,

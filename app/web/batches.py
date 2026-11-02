@@ -27,6 +27,7 @@ import zipfile
 from pathlib import Path
 
 from app.web.jobs import _redact, clean_style_no, clean_tags, duration_ok
+from app.web.style_usage import StyleUsageLedger
 from app.web.templates import TemplateError
 
 BATCH_STATES = ("draft", "locked", "closed")
@@ -94,6 +95,8 @@ class BatchManager:
         self.batches: dict[str, dict] = {}
         self.by_no: dict[str, str] = {}
         self.warnings: list[str] = []
+        # 款号-模板记账本：批次生产提交时记账，供前端「同款号不重复用模板」标记。
+        self.usage = StyleUsageLedger(settings.data_dir)
         self._load()
 
     # ------------------------------------------------------------------ 存储
@@ -553,6 +556,10 @@ class BatchManager:
         except ValueError as exc:
             raise BatchError(str(exc), 409) from None
         job_id = str(job["id"])
+        # 款号-模板记账（提交时记，失败重试也覆盖为最近一次）：小批量试跑不经过这里，天然不计入。
+        top = str((batch.get("tags") or {}).get("top") or "").strip() or clean_style_no(batch.get("style_no"))
+        self.usage.record(top, [str(item.get("template_id")) for item, _ in taken],
+                          batch_no=str(batch.get("batch_no") or ""), batch_id=str(batch["id"]))
         for item, _live_item in taken:
             item["state"] = "producing"
             item["job_id"] = job_id

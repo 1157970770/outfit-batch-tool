@@ -191,10 +191,21 @@ web-data/
 ├── uploads/<32hex>.png     定妆图（单个 job 引用）
 ├── output/<batch_id>/      成片 mp4 + 归档清单
 ├── logs/<job_id>.log       逐条提交日志
+├── style_template_usage.json  款号-模板防重账本（v0.11.0，见 5.3）
 └── 访问地址.txt            启动时写入的本机/局域网地址
 ```
 
 `server/` 下：`web.json`（账号、会话密钥、并发上限）、`config.json`（**明文 Key**、模型、COS、单价、限流）。
+
+### 5.3 `web-data/style_template_usage.json`（款号-模板防重账本）
+
+需求：同一款号跨批次生成时不重复使用视频模板（**软拦截**——前端标记 + 提交确认，可强制）。
+
+- 记账时机：**批次生产提交时**（`BatchManager._start_run`）；失败重试覆盖为最近一次；小批量试跑不计入。
+- 记账键：上衣款号（`tags.top`，老批次回退 `style_no`）。
+- 结构：`{ "<top>": { "<template_id>": { "batch_no", "batch_id", "at" } } }`。
+- 查询：`GET /api/style-usage?top=<款号>`（登录即可），返回 `{ "used": {...} }`。
+- 前端：批次候选行挂「已用·批次号」徽标，锁定清单时弹确认；小批量下拉选项尾部加「【已用】」，提交时弹确认。
 
 ## 7. HTTP 接口
 
@@ -211,6 +222,7 @@ web-data/
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
 | GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、set-image、candidates、lock、produce、retry-failed、close、zip |
 | GET | `/api/history/groups[/<key>]` | 登录 | 历史按批次分组 / 组内条目；分组带 `small_jobs`/`big_jobs` 用于分离试跑 |
+| GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |
 | GET | `/api/admin/status` | admin | 服务状态、队列、额度、账号 |
 | GET | `/api/admin/usage` | admin | 按账户汇总 |
 | GET | `/api/admin/accounts/<name>/work[.csv]` | admin | 账户逐条明细 / 导出 |

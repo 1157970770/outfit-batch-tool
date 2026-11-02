@@ -32,6 +32,7 @@ REQUIRED = [
     "test_remote_config",
     "test_template_catalog",
     "test_cos_rest",
+    "test_style_usage",
     "test_web_auth",
     "test_web_tags",
     "test_web",
