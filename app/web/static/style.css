@@ -301,14 +301,6 @@ textarea {
   background: var(--paper);
 }
 
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
-
-@media (min-width: 901px) {
-  /* 右列比左列长：上传卡跟随滚动，改提示词、调参数时仍能看到定妆图 */
-  .upload-card { position: sticky; top: 72px; }
-}
-.form-grid > .card { margin-bottom: 0; }
-
 .step-title { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 14px; }
 
 .step {
@@ -330,13 +322,126 @@ textarea {
 .step-title p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 .step-title .batch-a-actions { margin-left: auto; }
 
+/* ============================================================
+   小批量试跑：三列控制台
+   目标是在 1440×900 上不出现纵向滚动条：整块高度锁到视口，
+   面板内部用 flex 分配剩余空间（图片区、提示词区自动伸展）。
+   ============================================================ */
+
+.console-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 12px;
+}
+.console-head h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+.console-head p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+
+.console-badge {
+  flex: none;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fbfcfd;
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: .02em;
+}
+
+.console-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, .92fr) minmax(300px, 1fr) minmax(340px, 1.2fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.panel-head b { display: block; font-size: 13.5px; font-weight: 650; }
+.panel-head small { display: block; margin-top: 1px; color: var(--muted); font-size: 11.5px; }
+
+.panel .field { margin: 9px 0; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.field-row .field { margin: 9px 0 0; }
+
+.panel-note {
+  margin: auto 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 分段控件：选择方式 / 数量，比两个大号单选卡省一半高度 */
+.segmented {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: #f3f4f6;
+}
+
+.segment {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 30px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color .12s, color .12s;
+}
+.segment input { position: absolute; opacity: 0; pointer-events: none; }
+.segment:hover { color: var(--ink-2); }
+.segment:has(input:checked) { background: var(--paper); color: var(--ink); box-shadow: var(--shadow); }
+.segment:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+.segmented-count { margin-top: 0; }
+.segmented-count button {
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  transition: background-color .12s, color .12s;
+}
+.segmented-count button:hover:not(:disabled) { color: var(--ink-2); }
+.segmented-count button.active { background: var(--paper); color: var(--ink); box-shadow: var(--shadow); }
+.segmented-count button:disabled { color: #b9bec7; cursor: not-allowed; }
+
 /* ------------------------------------------------------------ 上传区 */
 
 .drop-zone {
   position: relative;
   display: grid;
   place-items: center;
-  min-height: 240px;
+  min-height: 210px;
   padding: 16px;
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-md);
@@ -366,85 +471,107 @@ textarea {
 .drop-zone strong { display: block; font-size: 13px; font-weight: 600; }
 .drop-zone small { display: block; margin-top: 4px; color: var(--muted); font-size: 11.5px; }
 
-.image-preview { max-width: 100%; max-height: 240px; border-radius: var(--radius-sm); object-fit: contain; }
-.image-info { min-height: 18px; margin-top: 8px; font-size: 11.5px; }
-
-.template-preview, .preview-video {
-  display: block;
-  width: 100%;
-  max-height: 245px;
-  margin: 10px 0;
-  border-radius: var(--radius-sm);
-  background: #111;
+/* 控制台的图片位：图片或模板视频都铺满同一块区域，画面用 contain 不裁切 */
+.console-drop { flex: 1; min-height: 180px; }
+.console-drop .image-preview,
+.console-drop .template-preview {
+  position: absolute;
+  inset: 8px;
+  width: calc(100% - 16px);
+  height: calc(100% - 16px);
+  max-height: none;
+  margin: 0;
+  border-radius: 4px;
+  background: #f7f7f8;
   object-fit: contain;
 }
+.console-drop:has(.image-preview:not(.hidden)) #drop-copy,
+.console-drop:has(.template-preview:not(.hidden)) #drop-copy { display: none; }
+/* 视频要盖在文件输入框之上，否则播放条点不到；图片仍让输入框在上，点图即可换图 */
+.console-drop .template-preview { z-index: 3; }
 
+.image-preview { max-width: 100%; max-height: 240px; border-radius: var(--radius-sm); object-fit: contain; }
+.image-info { min-height: 16px; margin-top: 6px; font-size: 11.5px; }
 
-/* 小批量页：模板视频是竖屏 9:16，按竖版比例显示，不被横版容器压扁 */
-#create-view .template-preview {
-  width: min(100%, calc(min(82vh, 760px) * 9 / 16));
-  height: auto;
-  max-height: none;
-  aspect-ratio: 9 / 16;
-  margin: 12px auto 2px;
+/* ------------------------------------------------------------ 提示词与提交 */
+
+.panel-prompt #prompt-body {
+  height: 100%;
+  min-height: 96px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
 }
+.panel-prompt .prompt-field { flex: 1; min-height: 0; grid-template-rows: auto minmax(96px, 1fr); }
 
-/* ------------------------------------------------------------ 选项与提示词 */
-
-.choice-group { margin: 0 0 14px; padding: 0; border: 0; }
-.choice-group legend { margin-bottom: 8px; color: var(--ink-2); font-size: 12px; font-weight: 600; }
-
-.radio-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-  padding: 9px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: border-color .12s, background-color .12s;
-}
-.radio-card:hover { border-color: var(--line-strong); }
-.radio-card:has(input:checked) { border-color: var(--ink); background: #fafafb; }
-.radio-card input { accent-color: var(--ink); }
-.radio-card:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
-.radio-card b { display: block; font-size: 12.5px; font-weight: 600; }
-.radio-card small { display: block; margin-top: 1px; color: var(--muted); font-size: 11.5px; }
-
-.lane-hint { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
-
-#prompt-body { min-height: 160px; }
 .prompt-meta {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  margin-top: -4px;
+  margin-top: 2px;
   color: var(--muted);
   font-size: 11px;
 }
 
-.advanced { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
-.advanced summary { color: var(--ink-2); font-size: 12.5px; font-weight: 600; cursor: pointer; }
-.advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-
-/* ------------------------------------------------------------ 确认提交 */
-
-.confirmation-card { padding: 16px 20px; }
-.confirmation-card .step-title { margin-bottom: 10px; }
-.confirm-row {
+.submit-block {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding-top: 14px;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid var(--line);
 }
-.confirm-row strong { font-size: 13.5px; font-weight: 600; }
-.confirm-row p { margin: 3px 0 0; font-size: 12px; }
-.confirm-row .primary { min-width: 140px; }
+.submit-summary { min-width: 0; }
+.submit-summary strong { display: block; font-size: 13px; font-weight: 650; }
+.submit-summary p {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.submit-block .primary { min-width: 124px; }
 
 .error { margin: 8px 0 0; color: var(--red); font-size: 12.5px; }
+
+/* ------------------------------------------------------------ 单屏模式
+   只在「够宽 + 够高」时启用；小屏自动退回普通流式布局并允许滚动。 */
+
+@media (min-width: 1024px) {
+  body:has(#create-view.active-view) .shell { width: min(100% - 48px, 1800px); }
+}
+
+/* 中等宽度：三列会挤，改成两列，提示词单独一行 */
+@media (max-width: 1099px) {
+  .console-grid { grid-template-columns: 1fr 1fr; }
+  .panel-prompt { grid-column: 1 / -1; min-height: 260px; }
+}
+
+@media (max-width: 760px) {
+  .console-grid { grid-template-columns: 1fr; }
+  .panel { min-height: auto; }
+  .console-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .console-drop { min-height: 220px; }
+}
+
+@media (min-width: 1100px) and (min-height: 680px) {
+  body:has(#create-view.active-view) { overflow: hidden; }
+  body:has(#create-view.active-view) #app-view { display: flex; flex-direction: column; height: 100dvh; }
+  body:has(#create-view.active-view) .shell {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    margin-bottom: 14px;
+  }
+  body:has(#create-view.active-view) .shell > footer { display: none; }
+
+  #create-view.active-view { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+  #create-view .console-grid { flex: 1; min-height: 0; }
+  #create-view .panel { overflow: hidden; }
+}
 
 /* ------------------------------------------------------------ 任务列表 */
 

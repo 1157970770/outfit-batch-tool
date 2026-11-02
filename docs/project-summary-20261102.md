@@ -143,7 +143,7 @@ app/wan_api.py  百炼 DashScope / RunningHub 适配
 | ----------------------- | ------ | --------------------- |
 | `max_active_jobs`       | 4      | 同时跑几个**大批量** job      |
 | `max_active_per_user`   | 1      | 每人几个大批量 job           |
-| `max_job_items`         | 20     | 试跑页单次上限               |
+| `max_job_items`         | 3      | 试跑页单次上限（v0.7 起 20 → 3） |
 | `max_batch_items`       | 缺省 500 | 一个批次清单上限              |
 | `max_batch_run_items`   | 缺省 100 | 批次单次生产上限（20/50/100 档） |
 | `small_lane_items`      | 3      | 快速通道判定阈值              |
@@ -158,7 +158,7 @@ app/wan_api.py  百炼 DashScope / RunningHub 适配
 
 ### 7.1 小批量试跑
 
-- 单次最多 20 条，用于验证素材、标签、提示词；
+- 单次最多 3 条，用于验证素材、标签、提示词；
 - ≤3 条自动走快速通道；
 - 输出时长默认 7 秒，可选跟随场景。
 

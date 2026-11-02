@@ -46,51 +46,67 @@
       <div id="notice" class="notice hidden"></div>
 
       <section id="create-view" class="view active-view">
-        <div class="section-head"><div><h1>小批量试跑</h1><p class="muted">一张图最多 20 条，用来验证素材、标签与提示词；跑通后再开大批量批次。</p></div></div>
-        <div class="form-grid">
-          <article class="card upload-card">
-            <div class="step-title"><span class="step">1</span><div><h2>上传服装图片</h2><p>JPG、PNG 或 WebP，最多 20MB</p></div></div>
-            <label id="drop-zone" class="drop-zone">
-              <input id="image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
-              <img id="image-preview" class="image-preview hidden" alt="服装图片预览">
-              <span id="drop-copy"><span class="upload-icon">↑</span><strong>点击选择或拖拽图片到这里</strong><small>图片只会上传到本机服务</small></span>
-            </label>
-            <div id="image-info" class="image-info muted"></div>
-            <!-- 模板视频是竖屏 9:16：预览放左列、按竖版比例显示，避免横版容器把画面压成中间一条。
-                 选中场景即自动播放并循环；muted 是自动播放的前置条件（模板视频本身无音轨）。 -->
-            <video id="template-preview" class="template-preview hidden" controls loop muted playsinline preload="metadata"></video>
-          </article>
-
-          <article class="card settings-card">
-            <div class="step-title"><span class="step">2</span><div><h2>选择生成方式</h2><p>普通试做建议先生成 1 条</p></div></div>
-            <fieldset id="tag-filter-card" class="choice-group tag-filter-card hidden">
-              <legend>按标签筛选视频（可选）</legend>
-              <p class="filter-hint">同一类别内满足任一标签，不同类别之间同时满足；未列入标签清单的视频不会进入候选集。</p>
-              <div id="tag-filter-groups" class="tag-filter-groups"></div>
-              <div class="tag-filter-footer"><button id="clear-tag-filter" class="quiet" type="button">清除筛选</button><span id="tag-filter-summary" class="muted"></span></div>
-            </fieldset>
-            <fieldset class="choice-group">
-              <legend>视频场景</legend>
-              <label class="radio-card"><input type="radio" name="selection" value="random" checked><span><b>自动推荐</b><small>系统随机挑选，适合快速试做</small></span></label>
-              <label class="radio-card"><input type="radio" name="selection" value="selected"><span><b>我来挑选</b><small>从视频场景中选一个</small></span></label>
-            </fieldset>
-            <label id="template-wrap" class="field hidden">选择视频场景<select id="template-select"></select></label>
-            <label id="count-wrap" class="field">生成数量<select id="count-select"><option value="1">1 条（推荐先试做）</option><option value="3">3 条</option><option value="5">5 条</option><option value="10">10 条</option></select><small class="lane-hint">≤3 条走快速通道，不受大批量排队影响</small></label>
-            <label class="field">提示词模板<select id="prompt-select"></select></label>
-            <label class="field prompt-editor-label">本次提示词（可按需要微调）<textarea id="prompt-body" rows="7" maxlength="4000" spellcheck="false"></textarea></label>
-            <div class="prompt-meta"><span>选择模板会复制正文到这里；修改只影响本次任务。</span><span id="prompt-length">0 / 4000</span></div>
-            <details class="advanced"><summary>更多设置</summary><div class="advanced-grid">
-              <label class="field">画质<select id="resolution"><option value="480P" selected>标准 480P</option><option value="720P">高清 720P</option></select></label>
-              <label class="field">视频时长<select id="duration"><option value="5" selected>5 秒</option><option value="-1">跟随视频场景</option></select></label>
-            </div></details>
-          </article>
+        <div class="console-head">
+          <div><h1>小批量试跑</h1><p class="muted">一次最多 3 条，走快速通道，不与大批量排队。</p></div>
         </div>
 
-        <article class="card confirmation-card">
-          <div class="step-title"><span class="step">3</span><div><h2>确认并提交</h2><p>确认信息无误后提交，已提交的生成任务不能撤回。</p></div></div>
-          <div class="confirm-row"><div><strong id="summary-title">准备生成 1 条视频</strong><p id="summary-detail" class="muted">480P · 5 秒 · 标准换装</p></div><button id="submit-btn" class="primary">确认提交</button></div>
-          <p id="create-error" class="error hidden"></p>
-        </article>
+        <div class="console-grid">
+          <article class="panel panel-media">
+            <div class="panel-head"><span class="step">1</span><div><b>定妆图</b><small>JPG / PNG / WebP，≤ 20MB</small></div></div>
+            <label id="drop-zone" class="drop-zone console-drop">
+              <input id="image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
+              <img id="image-preview" class="image-preview hidden" alt="服装图片预览">
+              <video id="template-preview" class="template-preview hidden" controls loop muted playsinline preload="metadata"></video>
+              <span id="drop-copy" class="drop-copy"><span class="upload-icon">↑</span><strong>点击或拖拽图片到这里</strong><small>只上传到本机服务</small></span>
+            </label>
+            <div id="image-info" class="image-info muted"></div>
+          </article>
+
+          <article class="panel panel-scene">
+            <div class="panel-head"><span class="step">2</span><div><b>场景与参数</b><small>标签筛选 → 选择方式 → 数量画质</small></div></div>
+
+            <fieldset id="tag-filter-card" class="tag-filter-card hidden">
+              <p class="filter-hint">同类别任一命中，不同类别需同时满足。</p>
+              <div id="tag-filter-groups" class="tag-filter-groups"></div>
+              <div class="tag-filter-footer"><button id="clear-tag-filter" class="quiet btn-sm" type="button">清除</button><span id="tag-filter-summary" class="muted"></span></div>
+            </fieldset>
+
+            <div class="segmented" role="group" aria-label="视频场景选择方式">
+              <label class="segment"><input type="radio" name="selection" value="random" checked><span>自动推荐</span></label>
+              <label class="segment"><input type="radio" name="selection" value="selected"><span>我来挑选</span></label>
+            </div>
+
+            <label id="template-wrap" class="field hidden">视频场景<select id="template-select"></select></label>
+
+            <div id="count-wrap" class="field">
+              <span>生成数量（上限 3 条）</span>
+              <div class="segmented segmented-count" id="count-buttons" role="group" aria-label="生成数量">
+                <button type="button" data-count="1">1 条</button>
+                <button type="button" data-count="2">2 条</button>
+                <button type="button" data-count="3">3 条</button>
+              </div>
+              <select id="count-select" class="hidden" tabindex="-1" aria-hidden="true"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select>
+            </div>
+
+            <div class="field-row">
+              <label class="field">画质<select id="resolution"><option value="480P" selected>480P 标准</option><option value="720P">720P 高清</option></select></label>
+              <label class="field">时长<select id="duration"><option value="5" selected>5 秒</option><option value="-1">跟随场景</option></select></label>
+            </div>
+            <p class="panel-note">≤3 条走快速通道：独立在飞名额，不会排在大批量后面。</p>
+          </article>
+
+          <article class="panel panel-prompt">
+            <div class="panel-head"><span class="step">3</span><div><b>提示词</b><small>选模板，可按需要微调</small></div></div>
+            <label class="field">提示词模板<select id="prompt-select"></select></label>
+            <label class="field prompt-field">本次提示词<textarea id="prompt-body" maxlength="4000" spellcheck="false"></textarea></label>
+            <div class="prompt-meta"><span>修改只影响本次任务</span><span id="prompt-length">0 / 4000</span></div>
+            <div class="submit-block">
+              <div class="submit-summary"><strong id="summary-title">准备生成 1 条视频</strong><p id="summary-detail" class="muted">480P · 5 秒</p></div>
+              <button id="submit-btn" class="primary" type="button">确认提交</button>
+            </div>
+            <p id="create-error" class="error hidden"></p>
+          </article>
+        </div>
       </section>
 
       <section id="batch-view" class="view">

@@ -168,6 +168,7 @@
     }
     updateTemplatePreview();
     updateSummary();
+    syncCountButtons();
   }
 
   $('clear-tag-filter').addEventListener('click', () => {
@@ -181,6 +182,24 @@
     $('template-preview').classList.toggle('hidden', !selected); updateTemplatePreview(); updateSummary();
   }));
   ['count-select','resolution','duration'].forEach(id => $(id).addEventListener('change', updateSummary));
+  // 数量用小分段控件代替下拉：值仍写进隐藏的 #count-select，
+  // 这样上限裁剪、可用场景不足时的禁用逻辑都还能复用原来的 options.disabled。
+  function syncCountButtons() {
+    const select = $('count-select');
+    document.querySelectorAll('#count-buttons button').forEach(btn => {
+      const option = [...select.options].find(o => o.value === btn.dataset.count);
+      const active = btn.dataset.count === select.value;
+      btn.disabled = !option || option.disabled;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+  $('count-buttons').addEventListener('click', (event) => {
+    const btn = event.target.closest('button[data-count]');
+    if (!btn || btn.disabled) return;
+    $('count-select').value = btn.dataset.count;
+    $('count-select').dispatchEvent(new Event('change'));
+  });
   $('prompt-select').addEventListener('change', () => { $('prompt-body').value = $('prompt-select').selectedOptions[0]?.dataset.body || ''; updatePromptCount(); updateSummary(); });
   $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
   function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }

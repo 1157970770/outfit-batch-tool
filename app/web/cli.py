@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
                 "host": "0.0.0.0", "port": 8765,
                 "session_secret": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("="),
                 "session_hours": 12, "max_active_jobs": 2, "max_active_per_user": 1,
-                "max_job_items": 20, "confirm_over_items": 5, "max_upload_mb": 20,
+                "max_job_items": 3, "confirm_over_items": 5, "max_upload_mb": 20,
                 "data_root": "web-data", "retention_days": 0,
                 "users": {username: {**make_password(password), "role": "admin", "enabled": True,
                                        "version": 1, "expires": ""}},
