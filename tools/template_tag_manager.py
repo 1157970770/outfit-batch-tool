@@ -841,7 +841,7 @@ class TagManager(QMainWindow):
             self.project.setdefault("tag_categories", {})[tag] = self.tag_categories.get(tag, infer_tag_category(tag))
         changed = {}
         for relative in paths:
-            video = next((v for v in self.project.get("videos", []) if str(v.get("id", "")) == relative), None)
+            video = self._find_video(relative)
             if not video:
                 continue
             current = set(video.get("tags", []))
@@ -916,13 +916,27 @@ class TagManager(QMainWindow):
                 paths.append(str(item.data(Qt.ItemDataRole.UserRole)))
         return paths
 
+    def _find_video(self, key) -> dict | None:
+        """按模板ID找行（新加了多文件夹，相对路径可能重名），再退回相对路径。"""
+        if key is None or not self.project:
+            return None
+        wanted = str(key)
+        videos = self.project.get("videos", [])
+        for video in videos:
+            if str(video.get("id", "")) == wanted:
+                return video
+        for video in videos:
+            if video.get("relative_path") == wanted:
+                return video
+        return None
+
     def _current_video(self) -> dict | None:
         if not self.project:
             return None
         row = self.table.currentRow()
         item = self.table.item(row, 0) if row >= 0 else None
         path = item.data(Qt.ItemDataRole.UserRole) if item else None
-        return next((v for v in self.project["videos"] if str(v.get("id", "")) == path), None)
+        return self._find_video(path)
 
     def select_previous_video(self):
         if not self.project or not self.table.rowCount():
@@ -1068,7 +1082,7 @@ class TagManager(QMainWindow):
         changed = {}
         proposed = {}
         for relative in paths:
-            video = next((v for v in self.project["videos"] if str(v.get("id", "")) == relative), None)
+            video = self._find_video(relative)
             if not video:
                 continue
             current = set(video.get("tags", []))
@@ -1078,7 +1092,7 @@ class TagManager(QMainWindow):
                 current.discard(tag)
             proposed[relative] = list(current)
         for relative, labels in proposed.items():
-            video = next(v for v in self.project["videos"] if str(v.get("id", "")) == relative)
+            video = self._find_video(relative)
             set_video_tags(self.project, relative, labels)
             changed[relative] = video
         for row in range(self.table.rowCount()):

@@ -324,13 +324,20 @@ def add_tag(project: dict, value: str) -> str:
     return name
 
 
-def set_video_tags(project: dict, relative_path: str, selected: list[str]) -> None:
+def set_video_tags(project: dict, key: str, selected: list[str]) -> None:
+    """按模板ID（优先）或相对路径给某条视频设置标签。"""
     tags = list(project.get("tags") or [])
     for value in selected:
         if value not in tags:
             raise CatalogError(f"标签不存在：{value}")
-    for row in project.get("videos", []):
-        if row.get("relative_path") == relative_path:
+    wanted = str(key)
+    videos = project.get("videos", [])
+    for row in videos:
+        if str(row.get("id", "")) == wanted:
+            row["tags"] = normalize_tags(selected, tags)
+            return
+    for row in videos:
+        if row.get("relative_path") == key:
             row["tags"] = normalize_tags(selected, tags)
             return
     raise CatalogError("找不到指定视频")
