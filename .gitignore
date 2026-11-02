@@ -62,8 +62,14 @@ dist-web/
 web-data/
 server/web.json
 
+# 配置文件备份（web.json / config.json 的历史副本，可能含明文 Key，只留本机）
+*.bak-*
+
 # 前端改动的临时备份（回滚用，不进仓库）
 .backup-ui/
 
 # 打标工具的运行时状态
 _state/
+
+# 例外：包初始化文件不是临时脚本（上面的 _*.py 会误伤 __init__.py）
+!app/web/__init__.py
