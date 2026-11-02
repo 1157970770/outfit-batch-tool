@@ -136,6 +136,8 @@ def from_remote(remote: dict, output_root: str | Path) -> dict:
         "MANIFEST": str(remote.get("manifest_url") or "").strip(),
         "OUTPUT_ROOT": str(output_root),
         "COS_ENABLED": "true" if truthy(cos.get("enabled")) else "false",
+        "COS_PROVIDER": str(cos.get("provider") or "cos").strip(),
+        "COS_LOCAL_ROOT": str(cos.get("root") or "").strip(),
         "COS_BUCKET": str(cos.get("bucket") or "").strip(),
         "COS_TEMPLATE_BUCKET": str(cos.get("template_bucket") or cos.get("bucket") or "").strip(),
         "COS_OUTPUT_BUCKET": str(cos.get("output_bucket") or cos.get("bucket") or "").strip(),

@@ -11,16 +11,59 @@ import time
 import uuid
 from pathlib import Path
 
-from app.core import BatchRunner, BatchSpec, unique_batch_dir
+from app.core import TAG_SLOTS, BatchRunner, BatchSpec, unique_batch_dir
 from app.runtime import build_storages
 from app.wan_api import global_inflight, global_small_inflight
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _STYLE_MAX = 40
 
+TAG_LABELS = dict(TAG_SLOTS)   # slot -> 中文名（上衣/内衬/裤子/鞋子/场景/特殊备注）
+# 款号类栏位（上衣/内衬/裤子/鞋子）：英文+数字组合；场景/备注允许中文自由文本。
+_TAG_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
+_NOTE_MAX = 100
+
+
+def clean_tag_value(slot: str, value) -> str:
+    """单个标签值：去控制字符与首尾空白；款号类只认英文数字 -_，场景/备注放行中文。"""
+    text = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
+    if not text:
+        return ""
+    if slot == "note":
+        return text[:_NOTE_MAX]
+    if slot == "scene":
+        return text[:_STYLE_MAX]
+    if not _TAG_CODE_RE.fullmatch(text):
+        label = TAG_LABELS.get(slot, slot)
+        raise ValueError(f"「{label}」款号只能用英文、数字、- 和 _，最多 40 个字符")
+    return text
+
+
+def clean_tags(raw) -> dict:
+    """整理 6 栏位标签 dict：空值丢弃；top（上衣）缺失直接拒绝（路径段靠它）。"""
+    source = raw if isinstance(raw, dict) else {}
+    tags: dict[str, str] = {}
+    for slot, _label in TAG_SLOTS:
+        value = clean_tag_value(slot, source.get(slot))
+        if value:
+            tags[slot] = value
+    if not tags.get("top"):
+        raise ValueError("请填写「上衣」款号（云端归档路径按它命名）")
+    return tags
+
+
+def tags_summary(tags: dict | None, style_no: str = "") -> str:
+    """给列表/详情用的单行摘要：优先新标签，兜底旧款号字段。"""
+    source = tags if isinstance(tags, dict) else {}
+    parts = [f"{TAG_LABELS[key]} {value}" for key, value in source.items()
+             if value and key in TAG_LABELS]
+    if not parts and style_no:
+        parts = [f"上衣 {style_no}"]
+    return " · ".join(parts)
+
 
 def clean_style_no(value) -> str:
-    """款号：去空白与控制字符，最多 40 字。允许中文——路径里原样保留。"""
+    """旧款号字段（v0.9.0 及以前）：仅用于读取老数据，新提交一律走 clean_tags。"""
     text = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
     return text[:_STYLE_MAX]
 _SECRET_PATTERNS = [
@@ -101,8 +144,12 @@ class JobManager:
                templates: list[dict], prompt_id: str, resolution: str = "480P",
                duration: int = 5, prompt_body: str | None = None, *,
                batch_ref: str = "", limit_items: int | None = None,
-               style_no: str = "") -> dict:
-        """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。"""
+               tags: dict | None = None, style_no: str = "") -> dict:
+        """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。
+
+        tags：6 栏位标签（上衣必填）；style_no：v0.9.0 旧字段，读老批次时兜底，
+        两者都缺时报错——云端归档路径必须有上衣款号。
+        """
         if prompt_id not in self.prompts:
             raise ValueError("请选择有效的提示词模板")
         prompt = str(prompt_body if prompt_body is not None else self.prompts[prompt_id]).strip()
@@ -118,6 +165,10 @@ class JobManager:
             raise ValueError(f"一次最多生成 {max_items} 条")
         if resolution not in ("480P", "720P") or not duration_ok(duration):
             raise ValueError("生成参数无效，请刷新页面后重试")
+        # 上衣款号必填：COS 归档路径按它分段。tags 优先，老调用传 style_no 时兜底映射。
+        job_tags = clean_tags(tags) if tags else ({"top": clean_style_no(style_no)} if clean_style_no(style_no) else {})
+        if not job_tags.get("top"):
+            raise ValueError("请填写「上衣」款号（云端归档路径按它命名）")
         # 快速通道：3 条及以下的小批量独立排队，可与本人的大批量并行。
         lane = "small" if len(templates) <= self.settings.small_lane_items else "big"
         job_id = uuid.uuid4().hex[:12]
@@ -135,7 +186,9 @@ class JobManager:
             "out_dir": "", "log_tail": [], "cancel_requested": False,
             # 批次归属：批次生产时指向 BatchManager 的 id，试跑/老 job 为空。
             "batch_ref": str(batch_ref or ""),
-            # 款号：每批次/每次试跑一个，归档时进 COS 路径与标签。
+            # 标签：6 栏位（上衣必填），归档时进 COS 路径与对象标签。
+            "tags": job_tags,
+            # 旧款号字段：只服务 v0.9.0 老数据展示，新任务不再写入。
             "style_no": clean_style_no(style_no),
             # small = 快速通道（≤small_lane_items 条）；big = 走大批量队列。
             "lane": lane,
@@ -285,6 +338,7 @@ class JobManager:
                 # 单价必须带兜底：引擎不兜底，传全 null 会让每条记录的费用变成 None。
                 price_per_second=self.settings.price_map(),
                 style_no=str(job.get("style_no") or ""),
+                tags=dict(job.get("tags") or {}),
                 # 快速通道用自己的在飞池，3 条小任务不会被大批量的几十条挡住。
                 inflight_semaphore=(self.small_inflight if job.get("lane") == "small"
                                     else self.inflight),
@@ -344,7 +398,8 @@ class JobManager:
             if not image_path.is_file():
                 raise ValueError("原服装图片已不存在，请重新上传后新建任务")
             return self.create(owner, image_path, source.get("image_name", "服装图"), selected,
-                               source["prompt_id"], source["resolution"], source["duration"], source.get("prompt"))
+                               source["prompt_id"], source["resolution"], source["duration"], source.get("prompt"),
+                               tags=dict(source.get("tags") or {}), style_no=str(source.get("style_no") or ""))
 
     def cancel(self, job_id: str) -> bool:
         with self.changed:
@@ -557,9 +612,9 @@ class JobManager:
         with self.lock:
             safe = {k: job.get(k) for k in (
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
-                "batch_id", "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
+                "batch_id",                 "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
                 "duration", "total", "done", "message", "log_tail", "cancel_requested",
-                "lane", "style_no")}
+                "lane", "style_no", "tags")}
             safe["batch_ref"] = str(safe.get("batch_ref") or "")
             if safe.get("message"):
                 safe["message"] = _redact(safe["message"])

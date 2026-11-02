@@ -213,10 +213,12 @@
 
   /* ---------- 步骤 A：建批次 ---------- */
   function setFormFrozen(frozen) {
-    ['batch-no', 'batch-style-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution'].forEach((id) => {
+    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution'].forEach((id) => {
       const node = $(id);
       if (node) node.disabled = frozen;
     });
+    // 6 栏位标签随批次冻结：整排一起禁用/解禁
+    document.querySelectorAll('#batch-tags input[data-tag-slot]').forEach((input) => { input.disabled = frozen; });
     $('batch-create-btn').disabled = frozen;
     $('batch-drop-zone').classList.toggle('is-frozen', frozen);
     $('batch-a-hint').textContent = frozen
@@ -243,7 +245,9 @@
   }
   function fillBatchForm(batch) {
     $('batch-no').value = txt(batch.batch_no);
-    $('batch-style-no').value = txt(batch.style_no);
+    // 6 栏位标签：老批次只有 style_no 时映射到「上衣」栏位显示。
+    const legacy = !batch.tags && txt(batch.style_no) ? { top: txt(batch.style_no) } : batch.tags;
+    App.fillTagSlots('batch-tags', legacy || {});
     $('batch-title').value = txt(batch.title);
     if (txt(batch.resolution)) $('batch-resolution').value = txt(batch.resolution);
     const promptId = txt(batch.prompt_id);
@@ -259,7 +263,7 @@
     // 收起状态下这一行就是「这个批次是什么」的全部信息
     $('batch-a-summary').textContent = [
       txt(batch.batch_no) || '未命名批次',
-      txt(batch.style_no) ? `款号 ${txt(batch.style_no)}` : '',
+      App.tagSummaryText(batch.tags, txt(batch.style_no)) || '',
       txt(batch.title) || '',
       txt(batch.resolution) || '—',
       durationValue > 0 ? `输出 ${durationValue} 秒` : '输出跟随素材时长',
@@ -279,7 +283,7 @@
   }
   function resetBatchForm() {
     $('batch-no').value = '';
-    $('batch-style-no').value = '';
+    App.fillTagSlots('batch-tags', {});
     $('batch-title').value = '';
     $('batch-prompt-body').value = '';
     $('batch-image-info').textContent = '';
@@ -327,8 +331,9 @@
     try {
       const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: await readFile(file) }) });
       btn.textContent = '正在创建批次…';
-      const styleNo = $('batch-style-no').value.trim();
-      const payload = { batch_no: batchNo, title, style_no: styleNo, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_id: uploaded.upload_id };
+      const tags = App.collectTagSlots('batch-tags');
+      if (!tags.top) { showBatchError('请填写「上衣」款号（云端归档路径按它命名）。'); return; }
+      const payload = { batch_no: batchNo, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_id: uploaded.upload_id };
       const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
       if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
       b.current = data.batch;

@@ -93,7 +93,17 @@
               <select id="count-select" class="hidden" tabindex="-1" aria-hidden="true"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select>
             </div>
 
-            <label class="field">款号（可选）<input id="style-no" maxlength="40" autocomplete="off" placeholder="例如 AW26-143，用于 COS 归档命名"></label>
+            <div class="field">
+              <span>款号标签（上衣必填，云端归档路径按上衣命名）</span>
+              <div class="tag-input-grid" id="style-tags">
+                <label>上衣<input data-tag-slot="top" maxlength="40" autocomplete="off" placeholder="必填，如 AX111"></label>
+                <label>内衬<input data-tag-slot="lining" maxlength="40" autocomplete="off" placeholder="选填"></label>
+                <label>裤子<input data-tag-slot="pants" maxlength="40" autocomplete="off" placeholder="选填"></label>
+                <label>鞋子<input data-tag-slot="shoes" maxlength="40" autocomplete="off" placeholder="选填"></label>
+                <label>场景<input data-tag-slot="scene" maxlength="40" autocomplete="off" placeholder="选填，如 秋冬"></label>
+                <label>特殊备注<input data-tag-slot="note" maxlength="100" autocomplete="off" placeholder="选填"></label>
+              </div>
+            </div>
 
             <div class="field-row">
               <label class="field">画质<select id="resolution"><option value="480P" selected>480P 标准</option><option value="720P">720P 高清</option></select></label>
@@ -151,8 +161,18 @@
             <div id="batch-a-body">
               <div class="batch-form-grid batch-form-grid-3">
                 <label class="field">批次号（必填，1–40 字）<input id="batch-no" maxlength="40" autocomplete="off" placeholder="例如 2026-11-秋装-01"></label>
-                <label class="field">款号（可选，≤40 字）<input id="batch-style-no" maxlength="40" autocomplete="off" placeholder="例如 AW26-143"></label>
                 <label class="field">备注（可选，≤60 字）<input id="batch-title" maxlength="60" autocomplete="off" placeholder="例如 秋装第二批，测试光线"></label>
+              </div>
+              <div class="field">
+                <span>款号标签（上衣必填，云端归档路径按上衣命名）</span>
+                <div class="tag-input-grid" id="batch-tags">
+                  <label>上衣<input data-tag-slot="top" maxlength="40" autocomplete="off" placeholder="必填，如 AX111"></label>
+                  <label>内衬<input data-tag-slot="lining" maxlength="40" autocomplete="off" placeholder="选填"></label>
+                  <label>裤子<input data-tag-slot="pants" maxlength="40" autocomplete="off" placeholder="选填"></label>
+                  <label>鞋子<input data-tag-slot="shoes" maxlength="40" autocomplete="off" placeholder="选填"></label>
+                  <label>场景<input data-tag-slot="scene" maxlength="40" autocomplete="off" placeholder="选填，如 秋冬"></label>
+                  <label>特殊备注<input data-tag-slot="note" maxlength="100" autocomplete="off" placeholder="选填"></label>
+                </div>
               </div>
               <label id="batch-drop-zone" class="drop-zone batch-drop">
                 <input id="batch-image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
@@ -277,6 +297,19 @@
       <section id="admin-view" class="view">
         <div class="section-head"><div><h1>管理员</h1><p class="muted">服务状态、用户和模板由管理员维护。</p></div><button id="reload-templates" class="quiet">重新加载视频场景</button></div>
         <article class="card"><div id="admin-status" class="admin-status"></div></article>
+        <article class="card admin-archive">
+          <div class="section-head"><div><h3>云端归档</h3><p class="muted">按款号搜索已归档到 COS 的视频，勾选后生成 7 天内有效的下载链接。</p></div></div>
+          <div class="archive-search-row">
+            <input id="archive-style" maxlength="60" autocomplete="off" placeholder="输入款号，如 AX111">
+            <button id="archive-search-btn" class="quiet" type="button">搜索</button>
+          </div>
+          <div id="archive-result" class="muted"></div>
+          <div id="archive-table" class="usage-table"></div>
+          <div id="archive-actions" class="top-actions hidden">
+            <button id="archive-sign-btn" class="primary" type="button">生成下载链接（7 天有效）</button>
+            <button id="archive-copy-btn" class="quiet hidden" type="button">复制全部链接</button>
+          </div>
+        </article>
         <article class="card admin-usage"><div class="section-head"><div><h3>账户用量</h3><p class="muted">条数与计费秒来自云端，金额为估算；点账户名看逐条明细。</p></div></div><div id="usage-table" class="usage-table"></div></article>
         <article class="card admin-account hidden" id="account-detail">
           <div class="section-head">

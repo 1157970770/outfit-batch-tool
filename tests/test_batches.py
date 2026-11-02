@@ -289,17 +289,23 @@ def main() -> int:
         # ---------------- 1. 创建 / 绑定图 / 候选 / 锁定
         code, _, created = call(alice, base, "/api/batches", "POST", {
             "batch_no": "AW26-001", "prompt_id": prompt_id, "prompt": prompt_text,
-            "resolution": "720P", "duration": 7, "title": "秋冬打底", "style_no": "AW26-001"})
+            "resolution": "720P", "duration": 7, "title": "秋冬打底",
+            "tags": {"top": "AW26-001", "pants": "PZ-77"}})
         assert code == 201, (code, created)
         batch = body(created)["batch"]
-        assert batch["style_no"] == "AW26-001", batch
+        assert batch["tags"] == {"top": "AW26-001", "pants": "PZ-77"}, batch
+        # 上衣缺了必须 400
+        code, _, no_tag = call(alice, base, "/api/batches", "POST", {
+            "batch_no": "AW26-100", "prompt_id": prompt_id, "prompt": prompt_text,
+            "resolution": "720P", "duration": 7, "tags": {"pants": "PZ-77"}})
+        assert code == 400 and "上衣" in body(no_tag)["error"], (code, no_tag)
         batch_id = batch["id"]
         assert re.fullmatch(r"[a-f0-9]{12}", batch_id), batch_id
         assert batch["state"] == "draft" and batch["total_items"] == 0, batch
         assert batch["duration"] == 7, batch["duration"]     # 输出固定 7 秒
         code, _, dup = call(alice, base, "/api/batches", "POST", {
             "batch_no": "aw26-001", "prompt_id": prompt_id, "prompt": prompt_text,
-            "resolution": "720P", "duration": 7})
+            "resolution": "720P", "duration": 7, "tags": {"top": "AW26-001"}})
         assert code == 409, (code, dup)                       # 批次号忽略大小写唯一
         code, _, _ = call(alice, base, "/api/batches", "POST", {
             "batch_no": "AW26-002", "prompt_id": "nope", "prompt": prompt_text,
@@ -502,7 +508,8 @@ def main() -> int:
         # ---------------- 4. 历史分组
         code, _, trial = call(alice, base, "/api/jobs", "POST", {
             "upload_id": upload_id, "selection": "selected", "template_id": "001", "count": 1,
-            "prompt_id": prompt_id, "prompt": prompt_text, "resolution": "720P", "duration": 5})
+            "prompt_id": prompt_id, "prompt": prompt_text, "resolution": "720P", "duration": 5,
+            "tags": {"top": "AW26-TRIAL"}})
         assert code == 201, (code, trial)
         trial_job = body(trial)["job"]
         assert trial_job["batch_ref"] == "", trial_job           # 试跑页没有批次归属
@@ -542,7 +549,8 @@ def main() -> int:
         # ---------------- 4.5 retry-failed：真失败 → 条目落 failed → 重跑成功
         code, _, created2 = call(alice, base, "/api/batches", "POST", {
             "batch_no": "AW26-002", "prompt_id": prompt_id, "prompt": prompt_text,
-            "resolution": "720P", "duration": -1, "upload_id": upload_id})
+            "resolution": "720P", "duration": -1, "upload_id": upload_id,
+            "tags": {"top": "AW26-002"}})
         assert code == 201, (code, created2)
         batch2 = body(created2)["batch"]
         assert batch2["image_name"] == "look.png", batch2      # 创建时可直接带图
@@ -654,7 +662,8 @@ def main() -> int:
         def make_batch(batch_no, **extra):
             code, _, raw = call(alice, base2, "/api/batches", "POST", {
                 "batch_no": batch_no, "prompt_id": prompt_id, "prompt": prompt_text,
-                "resolution": "720P", "duration": 7, **extra})
+                "resolution": "720P", "duration": 7,
+                "tags": {"top": batch_no}, **extra})
             assert code == 201, (batch_no, code, raw)
             return body(raw)["batch"]["id"]
 

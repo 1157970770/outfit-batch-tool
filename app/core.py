@@ -164,6 +164,19 @@ def _as_seconds(value) -> float | None:
 # 批量执行
 # ---------------------------------------------------------------------------
 
+# 6 个固定标签栏位（v0.10.0）：top=上衣 必填、进 COS 归档路径；其余只进对象标签。
+# 放在引擎层，网页层（app/web/jobs.py）与归档共用同一份定义。
+TAG_SLOTS = (
+    ("top", "上衣"),
+    ("lining", "内衬"),
+    ("pants", "裤子"),
+    ("shoes", "鞋子"),
+    ("scene", "场景"),
+    ("note", "特殊备注"),
+)
+TAG_SLOT_LABELS = dict(TAG_SLOTS)
+
+
 @dataclass
 class BatchSpec:
     batch_id: str
@@ -191,6 +204,8 @@ class BatchSpec:
     archive_expires: int = 7 * 24 * 3600
     # 款号（每批次一个）：写进对象路径与元数据/标签，方便在 COS 里按款找片
     style_no: str = ""
+    # 6 栏位标签（top/lining/pants/shoes/scene/note）：v0.10.0 起，路径取 top；style_no 仅老数据兜底
+    tags: dict = field(default_factory=dict)
     # 服装图源目录：默认 {COS_PREFIX}/output/source
     source_prefix: str = ""
     source_expires: int = 7 * 24 * 3600
@@ -516,7 +531,10 @@ class BatchRunner:
         storage = self.spec.storage
         if storage is None or not path.exists():
             return
-        style = str(getattr(self.spec, "style_no", "") or "").strip()
+        spec_tags = {str(k): str(v) for k, v in (getattr(self.spec, "tags", None) or {}).items()
+                     if str(v).strip()}
+        # 路径段：新标签取「上衣」，老数据退回 style_no；都没有则路径里没有款号段。
+        style = spec_tags.get("top") or str(getattr(self.spec, "style_no", "") or "").strip()
         key = object_key(
             self.spec.archive_prefix, path.name, batch=self.spec.batch_id,
             prefix=storage.cfg.clean_prefix(),
@@ -525,17 +543,23 @@ class BatchRunner:
         )
         meta = {"batch": self.spec.batch_id}
         if style:
-            meta["style-no"] = style
+            meta["style-no"] = style   # x-cos-meta 只收 ASCII；中文标签走下面的 tagging
         try:
             storage.put_path(path, key, meta=meta)
             rec["cos_key"] = key
             rec["cos_url"] = storage.sign_url(key, self.spec.archive_expires)
-            if style and not getattr(self, "_tags_unavailable", False):
+            # 对象标签：6 栏位（中文键值对，COS 标签原生支持）+ 批次号；老数据退回 style_no。
+            cos_tags: dict = {}
+            for slot, value in spec_tags.items():
+                cos_tags[TAG_SLOT_LABELS.get(slot, slot)] = value
+            if not cos_tags and style:
+                cos_tags = {"款号": style}
+            if cos_tags and not getattr(self, "_tags_unavailable", False):
                 # 标签是可选能力：账号没开通 cos:PutObjectTagging 时这里会失败，
                 # 只记一条警告，不影响出片（路径与元数据仍然带款号）。
                 try:
-                    storage.tag_object(key, {"style_no": style, "batch": self.spec.batch_id})
-                    rec["cos_tags"] = {"style_no": style}
+                    storage.tag_object(key, {**cos_tags, "batch": self.spec.batch_id})
+                    rec["cos_tags"] = cos_tags
                 except Exception as exc:  # noqa: BLE001
                     rec["tag_warning"] = f"{type(exc).__name__}: {exc}"[:200]
                     self._tags_unavailable = True   # 一批里只提示一次，避免每条都刷日志

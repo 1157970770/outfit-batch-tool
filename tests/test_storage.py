@@ -202,7 +202,7 @@ def test_local_backend(tmp: Path) -> None:
     assert store.exists(key)
     assert store.stat(key)["size"] == 1000
     assert store.sign_url(key).startswith("file://")
-    assert store.list_prefix("output") == [key]
+    assert [row["key"] for row in store.list_prefix("output")] == [key]
     store.delete(key)
     assert not store.exists(key)
 
@@ -226,7 +226,7 @@ def test_cos_small(tmp: Path) -> None:
     assert store.stat(key)["size"] == 5
     assert "q-signature" in store.sign_url(key, 600)
     assert store.public_url(key).endswith(key)
-    assert store.list_prefix("output/") == [key]
+    assert [row["key"] for row in store.list_prefix("output/")] == [key]
     store.delete(key)
     assert not store.exists(key)
     print("  ✓ COS 小对象：put/head/sign/list/delete")

@@ -3,6 +3,34 @@
   const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0 };
   const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', success: '成功' };
   const esc = (s) => String(s ?? '');
+  // 6 栏位款号标签：读取容器内 [data-tag-slot]，返回 {top:...} 形式（空值丢弃）。
+  const TAG_LABELS = { top: '上衣', lining: '内衬', pants: '裤子', shoes: '鞋子', scene: '场景', note: '特殊备注' };
+  function collectTagSlots(containerId) {
+    const root = $(containerId);
+    if (!root) return {};
+    const tags = {};
+    root.querySelectorAll('input[data-tag-slot]').forEach(input => {
+      const value = input.value.trim();
+      if (value) tags[input.dataset.tagSlot] = value;
+    });
+    return tags;
+  }
+  function fillTagSlots(containerId, tags) {
+    const root = $(containerId);
+    if (!root) return;
+    const source = tags && typeof tags === 'object' ? tags : {};
+    root.querySelectorAll('input[data-tag-slot]').forEach(input => {
+      input.value = String(source[input.dataset.tagSlot] ?? '');
+    });
+  }
+  // 列表/详情里的一行标签摘要：上衣 AX111 · 内衬 BX222 …（旧数据只有 style_no 也兼容）。
+  function tagSummaryText(tags, styleNo) {
+    const source = tags && typeof tags === 'object' ? tags : {};
+    const parts = Object.entries(source).filter(([slot, value]) => value && TAG_LABELS[slot])
+      .map(([slot, value]) => `${TAG_LABELS[slot]} ${value}`);
+    if (!parts.length && styleNo) parts.push(`上衣 ${styleNo}`);
+    return parts.join(' · ');
+  }
   async function api(path, options = {}) {
     const res = await fetch(path, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) } });
     const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
@@ -202,7 +230,7 @@
   });
   $('prompt-select').addEventListener('change', () => { $('prompt-body').value = $('prompt-select').selectedOptions[0]?.dataset.body || ''; updatePromptCount(); updateSummary(); });
   $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
-  $('style-no').addEventListener('input', updateSummary);
+  document.querySelectorAll('#style-tags input[data-tag-slot]').forEach(input => input.addEventListener('input', updateSummary));
   function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }
   $('template-select').addEventListener('change', () => { updateTemplatePreview(); updateSummary(); });
   function updateTemplatePreview() {
@@ -229,8 +257,8 @@
     const available = state.filteredTemplates.length;
     const readyAvailable = state.filteredTemplates.filter(template => template.ready).length;
     $('summary-title').textContent = available ? `准备生成 ${count} 条视频` : '当前标签筛选没有匹配的视频';
-    const style = $('style-no').value.trim();
-    const setting = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${style ? ` · 款号 ${style}` : ''}${edited ? ' · 已微调提示词' : ''}`;
+    const style = collectTagSlots('style-tags').top || '';
+    const setting = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${style ? ` · 上衣 ${style}` : ''}${edited ? ' · 已微调提示词' : ''}`;
     $('summary-detail').textContent = `${setting} · 筛选后 ${available} 个场景${available && !readyAvailable ? ' · 尚未上传云端，暂不能生成' : ''}`;
     $('submit-btn').disabled = state.submitting || !available || !readyAvailable || !count || count > available;
     // 数量是分段按钮：值改了还要把高亮同步过去，否则点了没反应（值其实变了）
@@ -292,7 +320,8 @@
       const body = { upload_id: uploaded.upload_id, selection, count, template_id: $('template-select').value,
         tag_filters: state.tagFilters, prompt_id: $('prompt-select').value, prompt: promptBody,
         resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true,
-        style_no: $('style-no').value.trim() };
+        tags: collectTagSlots('style-tags') };
+      if (!body.tags) { state.submitting = false; btn.disabled = false; btn.textContent = '确认提交'; return showCreateError('请填写「上衣」款号（云端归档路径按它命名）。'); }
       const result = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
       toast('任务已提交，正在排队。'); fileInput.value = ''; state.upload = null; $('image-preview').classList.add('hidden'); $('drop-copy').classList.remove('hidden'); $('image-info').textContent = '';
       switchView('history-view'); await refreshJobs(result.job.id);
@@ -373,7 +402,7 @@
       meta.className = 'job-meta';
       const when = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : '';
       const dur = job.duration === -1 ? '跟随场景' : `${job.duration} 秒`;
-      meta.textContent = [when, job.resolution, dur, job.style_no ? `款号 ${job.style_no}` : '',
+      meta.textContent = [when, job.resolution, dur, tagSummaryText(job.tags, job.style_no),
         state.user && state.user.role === 'admin' ? job.owner : ''].filter(Boolean).join(' · ');
       left.append(title, meta);
       const actions = document.createElement('div');
@@ -565,9 +594,75 @@
     $('account-detail').classList.add('hidden');
     state.usageOwner = ''; state.usageRows = []; state.usageTotal = 0;
   });
+  /* ---------- 管理端 · 云端归档检索与分享 ---------- */
+  state.archiveEntries = []; state.archiveLinks = [];
+  async function searchArchive() {
+    const style = $('archive-style').value.trim();
+    if (!style) return toast('请输入款号');
+    const btn = $('archive-search-btn');
+    btn.disabled = true; btn.textContent = '搜索中…';
+    try {
+      const data = await api(`/api/admin/archive-search?style=${encodeURIComponent(style)}`);
+      state.archiveEntries = data.entries || [];
+      renderArchive(data);
+    } catch (err) { toast(err.message); }
+    finally { btn.disabled = false; btn.textContent = '搜索'; }
+  }
+  function renderArchive(data) {
+    const result = $('archive-result');
+    const root = $('archive-table');
+    root.replaceChildren();
+    $('archive-actions').classList.add('hidden');
+    $('archive-copy-btn').classList.add('hidden');
+    state.archiveLinks = [];
+    if (!state.archiveEntries.length) { result.textContent = `云端没有找到与「${data.style}」相关的归档视频。`; return; }
+    const src = data.source === 'cos' ? '（按云端路径匹配）' : '';
+    result.textContent = `找到 ${state.archiveEntries.length} 个归档视频${src}，默认全选。`;
+    const table = document.createElement('table');
+    const thead = document.createElement('thead'); const hr = document.createElement('tr');
+    ['', '时间', '批次号', '视频文件', '上传者'].forEach(label => { const th = document.createElement('th'); th.textContent = label; hr.append(th); });
+    thead.append(hr); table.append(thead);
+    const tbody = document.createElement('tbody');
+    state.archiveEntries.forEach(entry => {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      const box = document.createElement('input'); box.type = 'checkbox'; box.checked = true; box.dataset.key = entry.key;
+      td.append(box); tr.append(td);
+      [entry.created_at ? new Date(entry.created_at * 1000).toLocaleString() : '—',
+        entry.batch_no || '—', entry.key.split('/').pop(), entry.owner || '—'].forEach(value => {
+        const c = document.createElement('td'); c.textContent = String(value); c.title = entry.key; tr.append(c);
+      });
+      tbody.append(tr);
+    });
+    table.append(tbody); root.append(table);
+    $('archive-actions').classList.remove('hidden');
+  }
+  $('archive-search-btn').addEventListener('click', searchArchive);
+  $('archive-style').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); searchArchive(); } });
+  $('archive-sign-btn').addEventListener('click', async () => {
+    const keys = [...$('archive-table').querySelectorAll('input[type="checkbox"]:checked')].map(box => box.dataset.key);
+    if (!keys.length) return toast('请先勾选视频');
+    const btn = $('archive-sign-btn');
+    btn.disabled = true; btn.textContent = '正在生成…';
+    try {
+      const data = await api('/api/admin/archive-sign', { method: 'POST', body: JSON.stringify({ keys }) });
+      state.archiveLinks = data.links || [];
+      if ((data.failed || []).length) toast(`${data.failed.length} 个生成失败，其余已生成。`);
+      else toast(`已生成 ${state.archiveLinks.length} 条链接，7 天内有效。`);
+      $('archive-copy-btn').classList.toggle('hidden', !state.archiveLinks.length);
+    } catch (err) { toast(err.message); }
+    finally { btn.disabled = false; btn.textContent = '生成下载链接（7 天有效）'; }
+  });
+  $('archive-copy-btn').addEventListener('click', async () => {
+    const text = state.archiveLinks.map(link => `${link.key}\n${link.url}`).join('\n\n');
+    try { await navigator.clipboard.writeText(text); toast(`已复制 ${state.archiveLinks.length} 条链接。`); }
+    catch (_) { toast('复制失败，请手动选择链接文本。'); }
+  });
+
   // 供 batch.js 复用：同一套 api 封装、共享 state、同一个详情面板。
   window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText,
-    smallHistory: (id) => smallHistories[id], setCreatePane };
+    smallHistory: (id) => smallHistories[id], setCreatePane,
+    collectTagSlots, fillTagSlots, tagSummaryText, TAG_LABELS };
   // Esc：先关任务详情，再关账户明细，符合"从最上层开始退"的直觉。
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;

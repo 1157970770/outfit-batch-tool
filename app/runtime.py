@@ -9,10 +9,12 @@ from app.storage import StorageConfig, StorageError, open_storage
 
 def _make_storage(cfg: dict, bucket: str, prefix: str):
     manual = {
+        "provider": (cfg.get("COS_PROVIDER") or "cos").strip(),
         "bucket": bucket,
         "region": (cfg.get("COS_REGION") or "").strip(),
         "prefix": prefix,
         "domain": (cfg.get("COS_DOMAIN") or "").strip(),
+        "root": (cfg.get("COS_LOCAL_ROOT") or "").strip(),
     }
     sid = (cfg.get("COS_SECRET_ID") or "").strip()
     skey = (cfg.get("COS_SECRET_KEY") or "").strip()
@@ -20,7 +22,8 @@ def _make_storage(cfg: dict, bucket: str, prefix: str):
         manual["secret_id"] = sid
         manual["secret_key"] = skey
     resolved = StorageConfig.from_local_profile(**manual)
-    if not (resolved.secret_id and resolved.secret_key):
+    # 本地后端（测试/离线演练）不需要任何凭证；云端 provider 缺密钥必须当场报错
+    if resolved.provider != "local" and not (resolved.secret_id and resolved.secret_key):
         raise StorageError(
             "启用了 COS，但本机找不到可用凭证。"
             "请设置环境变量 COS_SECRET_ID/COS_SECRET_KEY，或放进 ~/.cos/credentials.json，"

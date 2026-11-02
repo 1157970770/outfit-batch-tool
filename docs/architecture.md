@@ -88,9 +88,15 @@ POST /api/batches/<id>/close      关闭批次（不可再生产）
 POST /api/batches/<id>/delete     删除（有运行中任务时拒绝）
 ```
 
-**COS 归档命名**：`{prefix}/output/{YYYY-MM-DD}/{款号}/{批次id}/{编号}-{指纹8}.mp4`。
-款号为空时该段省略（老任务路径不变）；中文款号原样保留，空格等字符转短横线。
-对象另带自定义元数据 `x-cos-meta-style-no`，以及（需 `cos:PutObjectTagging` 权限的）标签 `style_no`。
+**COS 归档命名（v0.10.0）**：`{prefix}/output/{YYYY-MM-DD}/{上衣款号}/{批次id}/{编号}-{指纹8}.mp4`。
+**6 栏位标签**（`app/core.py` 的 `TAG_SLOTS`）：上衣（必填，进路径）/ 内衬 / 裤子 / 鞋子 / 场景 / 特殊备注。
+上衣缺省时该段省略（老任务路径不变）；款号原样保留，空格等字符转短横线。
+对象另带自定义元数据 `x-cos-meta-style-no`（ASCII 款号值），以及（需 `cos:PutObjectTagging` 权限的）
+中文键值标签：`上衣=xx 内衬=yy … + batch=批次id`；无该权限时跳过（只记一次警告，不影响出片）。
+
+**云端归档检索（管理端）**：`GET /api/admin/archive-search?style=款号` 先查本机任务账本里
+记录的 `rec["cos_key"]`（归档时记账，重启不丢），空了再按路径前缀列举兜底（需 ListObjects 权限）；
+`POST /api/admin/archive-sign` 给勾选对象批量签 7 天下载链接（COS 永久密钥签名上限）。
 
 **状态回填**：`BatchManager._reconcile()` 用关联 job 的 `records` 反推每个条目的状态
 （pending → producing → done/failed），所以进程重启后批次进度能自愈，不需要单独的补偿任务。
@@ -154,7 +160,8 @@ while not stop:
 | `templates` / `template_ids` | 本次要跑的场景（含 COS 地址） |
 | `prompt` / `prompt_id` | 实际提交的提示词 |
 | `resolution` / `duration` / `total` / `done` | 生成参数与进度 |
-| `style_no` | 款号（每批次/每次试跑一个，归档时进 COS 路径与标签） |
+| `tags` | 6 栏位标签 `{top/lining/pants/shoes/scene/note}`（v0.10.0 起，top 必填进 COS 路径） |
+| `style_no` | 旧款号字段（v0.9.0 老数据展示用，新任务不再写入） |
 | `records[]` | 每条：`id / status / seconds / billable_seconds / estimated_cost / cost_source / error / cos_key` |
 | `summary` | 引擎汇总（success / failed / 计费秒等） |
 | `batch_ref` | 关联批次 id（试跑为空） |
@@ -169,7 +176,8 @@ while not stop:
 | `state` | `draft → locked → closed`（closed 不可再生产） |
 | `image_path` / `prompt_id` / `prompt` | 定妆图与提示词 |
 | `resolution` / `duration` | 本批次参数 |
-| `style_no` | 款号，建批次时填，冻结后不改 |
+| `tags` | 6 栏位标签，建批次时填，冻结后不改（旧批次只有 `style_no`） |
+| `style_no` | 旧款号字段（v0.9.0），仅老批次存在 |
 | `items[]` | 条目：`template_id / name / tags / state(pending/producing/done/failed) / job_id` |
 | `runs[]` | 每轮生产记录：`job_id / count / at` |
 | `active_job_id` | 当前跑的那一轮（同批次同时只允许一轮） |

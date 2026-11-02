@@ -26,7 +26,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from app.web.jobs import _redact, duration_ok
+from app.web.jobs import _redact, clean_style_no, clean_tags, duration_ok
 from app.web.templates import TemplateError
 
 BATCH_STATES = ("draft", "locked", "closed")
@@ -282,7 +282,7 @@ class BatchManager:
         with self.mutex:
             data = {key: batch.get(key) for key in (
                 "id", "batch_no", "title", "owner", "state", "image_upload_id", "image_name",
-                "prompt_id", "prompt", "resolution", "duration", "tag_filters", "style_no",
+                "prompt_id", "prompt", "resolution", "duration", "tag_filters", "style_no", "tags",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
                 "created_at", "updated_at", "locked_at", "closed_at")}
             data["image_url"] = (f"/api/uploads/{batch['image_upload_id']}"
@@ -372,6 +372,11 @@ class BatchManager:
             raise BatchError("画质只能是 480P 或 720P。")
         if not duration_ok(duration):
             raise BatchError("时长只能跟随素材（-1）或 2–30 秒。")
+        # 6 栏位标签：上衣必填（进 COS 归档路径），其余选填。旧批次只有 style_no，不强制补填。
+        try:
+            batch_tags = clean_tags(data.get("tags"))
+        except ValueError as exc:
+            raise BatchError(str(exc)) from None
         upload = None
         if upload_id:
             upload = self.resolve_upload(upload_id, user["username"])
@@ -387,8 +392,9 @@ class BatchManager:
             now = time.time()
             batch = {
                 "id": batch_id, "batch_no": batch_no, "title": title, "owner": user["username"],
-                # 款号：整批一个，冻结后不改；归档时进 COS 路径与对象标签。
+                # 标签：6 栏位（上衣必填）；style_no 只保留 v0.9.0 老批次的值。
                 "style_no": re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("style_no") or "")).strip()[:40],
+                "tags": batch_tags,
                 "state": "draft",
                 "image_upload_id": upload_id,
                 "image_path": str((upload or {}).get("path") or ""),
@@ -541,6 +547,7 @@ class BatchManager:
                 str(batch.get("prompt_id")), resolution, duration,
                 str(batch.get("prompt") or ""),
                 batch_ref=str(batch["id"]), limit_items=len(taken),
+                tags=dict(batch.get("tags") or {}),
                 style_no=str(batch.get("style_no") or ""),
             )
         except ValueError as exc:

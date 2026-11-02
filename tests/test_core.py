@@ -125,7 +125,7 @@ def main() -> int:
         for rec in state2["records"]:
             assert rec.get("cos_key"), rec
             assert store.exists(rec["cos_key"]), rec["cos_key"]
-        keys = sorted(store.list_prefix("output"))
+        keys = sorted(row["key"] for row in store.list_prefix("output"))
         assert len(keys) == 3, keys
         assert all(k.endswith(".mp4") for k in keys), keys
         print("归档 Key:", keys[0])

@@ -101,6 +101,8 @@ class WebApplication:
         self.upload_meta.mkdir(parents=True, exist_ok=True)
         self._template_store = None
         self._template_store_lock = threading.Lock()
+        self._output_store = None
+        self._output_store_lock = threading.Lock()
         # 批次管理器复用 JobManager.lock；catalog 用回调取，热重载后无需重建。
         self.batches = BatchManager(settings, self.jobs, lambda: self.catalog, self.resolve_upload)
 
@@ -133,6 +135,14 @@ class WebApplication:
                 template_store, _ = build_storages(self.settings.config)
                 self._template_store = template_store
             return self._template_store
+
+    def output_store(self):
+        """成品桶（管理端云端检索/签名用）；COS 关闭时返回 None。"""
+        with self._output_store_lock:
+            if self._output_store is None:
+                _, output_store = build_storages(self.settings.config)
+                self._output_store = output_store
+            return self._output_store
 
     def reload_templates(self) -> None:
         from app.core import load_manifest
@@ -460,6 +470,11 @@ def make_handler(app: WebApplication):
                     return
                 query = urllib.parse.parse_qs(parsed.query)
                 return self._admin_usage(query)
+            if path == "/api/admin/archive-search":
+                if not self._user(admin=True):
+                    return
+                query = urllib.parse.parse_qs(parsed.query)
+                return self._admin_archive_search(query)
             if path.startswith("/api/admin/accounts/"):
                 if not self._user(admin=True):
                     return
@@ -555,6 +570,10 @@ def make_handler(app: WebApplication):
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
                 return self._admin_add_user(data)
+            if path == "/api/admin/archive-sign":
+                if user.get("role") != "admin":
+                    return self._error("此操作需要管理员权限。", 403)
+                return self._admin_archive_sign(data)
             if path.startswith("/api/admin/users/"):
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
@@ -690,6 +709,7 @@ def make_handler(app: WebApplication):
                 job = app.jobs.create(user["username"], Path(meta["path"]), meta["name"], templates,
                                       prompt_id, str(data.get("resolution") or "480P"),
                                       int(data.get("duration") or 5), str(data.get("prompt") or ""),
+                                      tags=data.get("tags") if isinstance(data.get("tags"), dict) else None,
                                       style_no=str(data.get("style_no") or ""))
                 return self._json({"ok": True, "job": job}, 201)
             except (ValueError, TemplateError) as exc:
@@ -854,6 +874,101 @@ def make_handler(app: WebApplication):
                          "from": query.get("from", [""])[0],
                          "to": query.get("to", [""])[0]})
             return self._json(data)
+
+        def _admin_archive_search(self, query):
+            """按款号搜云端归档：先查本机任务账本（cos_key），空了再按路径前缀列举兜底。"""
+            style = str((query.get("style", [""])[0] or "")).strip()
+            if not style:
+                return self._error("请输入要搜索的款号。")
+            if len(style) > 60:
+                return self._error("款号过长。")
+            needle = style.lower()
+            entries: list[dict] = []
+            seen: set[str] = set()
+            for job in app.jobs.jobs.values():
+                tags = job.get("tags") if isinstance(job.get("tags"), dict) else {}
+                values = {str(v).strip().lower() for v in tags.values() if str(v).strip()}
+                legacy = str(job.get("style_no") or "").strip().lower()
+                if legacy:
+                    values.add(legacy)
+                if needle not in values:
+                    continue
+                for rec in job.get("records") or []:
+                    key = str(rec.get("cos_key") or "").strip()
+                    if not key or key in seen or str(rec.get("status")) != "success":
+                        continue
+                    seen.add(key)
+                    entries.append({
+                        "key": key,
+                        "job_id": job.get("id"),
+                        "record_id": rec.get("id"),
+                        "template_id": rec.get("id"),
+                        "owner": job.get("owner"),
+                        "batch_ref": job.get("batch_ref"),
+                        "created_at": rec.get("finished_at") or job.get("finished_at") or job.get("created_at"),
+                    })
+            source = "ledger"
+            if not entries:
+                # 兜底：账本没记上（老数据/归档异常）就按路径规则列举，款号是路径中的一段。
+                try:
+                    store = app.output_store()
+                except Exception as exc:  # noqa: BLE001
+                    return self._error(f"云端归档不可用：{exc}", 503)
+                if store is not None:
+                    try:
+                        listed = store.list_prefix(f"{store.cfg.clean_prefix()}/output/", limit=5000)
+                    except Exception as exc:  # noqa: BLE001
+                        return self._error(f"云端列举失败：{exc}", 502)
+                    for row in listed:
+                        key = str(row.get("key") or "")
+                        segments = key.split("/")
+                        if needle in (segment.lower() for segment in segments[:-1]):
+                            entries.append({
+                                "key": key, "size": int(row.get("size") or 0),
+                                "job_id": "", "record_id": "", "template_id": "",
+                                "owner": "", "batch_ref": "",
+                                "created_at": None,
+                            })
+                    source = "cos"
+            with app.batches.mutex:
+                for entry in entries:
+                    ref = str(entry.get("batch_ref") or "")
+                    batch = app.batches.batches.get(ref) if ref else None
+                    entry["batch_no"] = str((batch or {}).get("batch_no") or "")
+            entries.sort(key=lambda row: (row.get("created_at") or 0), reverse=True)
+            return self._json({"ok": True, "style": style, "source": source,
+                               "entries": entries, "total": len(entries)})
+
+        def _admin_archive_sign(self, data):
+            """给选中的云端对象批量签 7 天下载链接（COS 永久密钥签名上限）。"""
+            raw_keys = data.get("keys")
+            if not isinstance(raw_keys, list) or not raw_keys:
+                return self._error("请先勾选要生成链接的视频。")
+            keys = []
+            for item in raw_keys[:500]:
+                key = str(item or "").strip().lstrip("/")
+                if key and ".." not in key.split("/") and key not in keys:
+                    keys.append(key)
+            if not keys:
+                return self._error("没有可用的对象路径。")
+            try:
+                store = app.output_store()
+            except Exception as exc:  # noqa: BLE001 - 凭证/配置问题都归到这里
+                return self._error(f"云端归档不可用：{exc}", 503)
+            if store is None:
+                return self._error("云端归档未启用，无法生成下载链接。", 503)
+            expires = 7 * 24 * 3600
+            links: list[dict] = []
+            failed: list[dict] = []
+            deadline = time.time() + expires
+            for key in keys:
+                try:
+                    links.append({"key": key, "url": store.sign_url(key, expires),
+                                  "expires_at": deadline})
+                except Exception as exc:  # noqa: BLE001
+                    failed.append({"key": key, "error": str(exc)[:200]})
+            return self._json({"ok": True, "links": links, "failed": failed,
+                               "expires_at": deadline})
 
         def _account_work(self, owner, query, csv_mode=False):
             """某账户的逐条工作明细：哪个视频、什么时候、多少计费秒、多少钱。"""

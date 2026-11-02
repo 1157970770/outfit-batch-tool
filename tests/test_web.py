@@ -72,7 +72,11 @@ def main() -> int:
             "wan": {"provider": "dashscope", "api_key": "mock-api-key-123456789", "model": "wan3.0-video",
                     "base_url": f"http://127.0.0.1:{mock_port}/api/v1", "default_mode": "edit",
                     "poll_interval": 1, "poll_timeout": 30, "max_concurrency": 3},
-            "manifest_url": str(manifest), "cos": {"enabled": False},
+            "manifest_url": str(manifest),
+            # 本地 COS 后端：归档真跑一遍（落 tmp/cos-root），管理端云端检索/签名才有数据可查
+            # bucket 仅用于走通 build_storages 的分支判断，本地后端不校验桶名
+            "cos": {"enabled": True, "provider": "local", "root": str(tmp / "cos-root"),
+                    "bucket": "local-000000"},
         }), encoding="utf-8")
         web_config = tmp / "web.json"
         secret = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
@@ -118,10 +122,15 @@ def main() -> int:
         code, _, created = call(alice, base, "/api/jobs", "POST", {
             "upload_id": upload_id, "selection": "selected", "template_id": "001", "count": 1,
             "prompt_id": prompt_id, "prompt": custom_prompt, "resolution": "480P", "duration": 5,
-            "style_no": "AW26-143"})
+            "tags": {"top": "AW26-143", "lining": "NB-02", "scene": "秋冬"}})
         assert code == 201, (code, created)
         job_id = json.loads(created)["job"]["id"]
-        assert json.loads(created)["job"]["style_no"] == "AW26-143", created
+        assert json.loads(created)["job"]["tags"] == {"top": "AW26-143", "lining": "NB-02", "scene": "秋冬"}, created
+        # 上衣缺了必须 400：云端归档路径按上衣分段
+        code, _, no_tag = call(alice, base, "/api/jobs", "POST", {
+            "upload_id": upload_id, "selection": "selected", "template_id": "001", "count": 1,
+            "prompt_id": prompt_id, "prompt": custom_prompt, "resolution": "480P", "duration": 5})
+        assert code == 400 and "上衣" in json.loads(no_tag)["error"], (code, no_tag)
 
         deadline = time.time() + 40
         job = None
@@ -166,7 +175,7 @@ def main() -> int:
         code, _, bcreated = call(bob, base, "/api/jobs", "POST", {
             "upload_id": json.loads(bup)["upload_id"], "selection": "selected",
             "template_id": "001", "count": 1, "prompt_id": prompt_id, "prompt": custom_prompt,
-            "resolution": "480P", "duration": 5})
+            "resolution": "480P", "duration": 5, "tags": {"top": "BOB-001"}})
         assert code == 201, (code, bcreated)
         bjob_id = json.loads(bcreated)["job"]["id"]
         deadline = time.time() + 40
@@ -241,7 +250,27 @@ def main() -> int:
         assert derived_item["cost_source"] == "derived" and derived_item["estimated_cost"] > 0, derived_item
         record["estimated_cost"] = original_cost
 
-        print("OK 网页上传 → mock 生成 → 下载 → 用户隔离 → 账号管理 → 按账户用量与逐条明细")
+        # ---- 管理端 · 云端归档：账本检索 + 批量签名下载链接 ----
+        code, _, raw = call(admin, base, "/api/admin/archive-search?style=AW26-143")
+        assert code == 200, code
+        archive = json.loads(raw)
+        assert archive["source"] == "ledger" and archive["total"] == 1, archive
+        entry = archive["entries"][0]
+        assert entry["key"].endswith(".mp4") and entry["owner"] == "alice", entry
+        assert entry["batch_no"] == "", entry                # 试跑 job 没有批次归属
+        code, _, raw = call(admin, base, "/api/admin/archive-sign", "POST",
+                            {"keys": [entry["key"]]})
+        assert code == 200, raw
+        signed = json.loads(raw)
+        assert signed["links"] and signed["links"][0]["url"].startswith("file://"), signed
+        assert signed["links"][0]["expires_at"] > time.time(), signed
+        # 越权检查：普通用户不能检索云端归档
+        code, _, _ = call(alice, base, "/api/admin/archive-search?style=AW26-143")
+        assert code == 403, code
+        code, _, _ = call(alice, base, "/api/admin/archive-sign", "POST", {"keys": [entry["key"]]})
+        assert code == 403, code
+
+        print("OK 网页上传 → mock 生成 → 下载 → 用户隔离 → 账号管理 → 云端归档检索与签名")
         return 0
     finally:
         if server:

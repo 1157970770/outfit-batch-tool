@@ -10,7 +10,7 @@
 限制：
   · 单次 PUT（COS 单对象上限 5GB；本项目源图/5–10s 成片远小于此）；
   · `exists/stat` 用 Range GET 0-0 实现，兼容子账号只有 GetObject 的权限；
-  · `list_prefix` 不支持；需要完整能力请安装 cos-python-sdk-v5。
+  · `list_prefix` 用 GET bucket（ListObjects）实现，管理端云端检索的兜底数据源。
 
 签名算法与腾讯云 COS V5 一致：SignKey = HMAC-SHA1(SecretKey, q-key-time) 的 hexdigest。
 """
@@ -24,7 +24,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 try:                      # 作为包导入
     from .storage import StorageConfig, StorageError
@@ -109,12 +111,14 @@ class CosRestClient:
     def put_tagging(self, key: str, tags: dict) -> None:
         """给已存在的对象打标签（PUT ?tagging）。
 
+        中文键值对直接以 UTF-8 写进 XML（只做 XML 转义，不做 URL 编码）——
+        COS 标签原生支持中文（键 ≤127 字符、值 ≤255 字符）。
         需要 CAM 里的 cos:PutObjectTagging；没开通时 COS 返回
         "No put tagging auth"，调用方应把它当成可选动作失败，不要影响出片。
         """
         items = "".join(
-            f"<Tag><Key>{urllib.parse.quote(str(k), safe='')}</Key>"
-            f"<Value>{urllib.parse.quote(str(v), safe='')}</Value></Tag>"
+            f"<Tag><Key>{_xml_escape(str(k))}</Key>"
+            f"<Value>{_xml_escape(str(v))}</Value></Tag>"
             for k, v in tags.items()
         )
         body = f"<Tagging><TagSet>{items}</TagSet></Tagging>".encode("utf-8")
@@ -139,6 +143,52 @@ class CosRestClient:
             raise StorageError(f"COS 打标签失败：HTTP {exc.code} {message}") from None
         except urllib.error.URLError as exc:
             raise StorageError(f"COS 打标签网络错误：{exc.reason}") from None
+
+    def list_prefix(self, prefix: str, limit: int = 1000) -> list[dict]:
+        """GET bucket（ListObjects）：按前缀列举对象，返回 [{key, size}]。
+
+        管理端云端检索的兜底数据源；只解析 XML 里需要的 Key/Size 两个字段。
+        """
+        out: list[dict] = []
+        marker = ""
+        base = prefix.strip().lstrip("/")
+        while len(out) < limit:
+            params = {"prefix": base, "max-keys": str(min(1000, limit - len(out)))}
+            if marker:
+                params["marker"] = marker
+            query = "&".join(
+                f"{name}={urllib.parse.quote(value, safe='')}" for name, value in sorted(params.items())
+            )
+            auth = self._auth("get", "", params=params)
+            url = f"https://{self.host}/?{query}&" + urllib.parse.urlencode(auth)
+            req = urllib.request.Request(url, headers={"Host": self.host})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    root = ET.fromstring(resp.read())
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", "replace")[:200]
+                raise StorageError(f"COS 列举失败：HTTP {exc.code} {body}") from None
+            except urllib.error.URLError as exc:
+                raise StorageError(f"COS 列举网络错误：{exc.reason}") from None
+            ns = root.tag.split("}")[0].lstrip("{")
+            ns_prefix = f"{{{ns}}}" if ns else ""
+            for contents in root.findall(f"{ns_prefix}Contents"):
+                node = contents.find(f"{ns_prefix}Key")
+                if node is None or not (node.text or "").strip():
+                    continue
+                size_node = contents.find(f"{ns_prefix}Size")
+                try:
+                    size = int(size_node.text or 0) if size_node is not None else 0
+                except ValueError:
+                    size = 0
+                out.append({"key": node.text.strip(), "size": size})
+            truncated = (root.findtext(f"{ns_prefix}IsTruncated") or "").lower() == "true"
+            if not truncated:
+                break
+            marker = root.findtext(f"{ns_prefix}NextMarker") or (out[-1]["key"] if out else "")
+            if not marker:
+                break
+        return out[:limit]
 
     def sign_url(self, key: str, expires: int = 7 * 24 * 3600) -> str:
         params = self._auth("get", key, expires)
@@ -252,7 +302,6 @@ class CosRestStorage:
     def delete(self, key: str) -> None:
         self.client.delete(key.lstrip("/"))
 
-    def list_prefix(self, prefix: str, limit: int = 1000) -> list[str]:
-        raise StorageError(
-            "COS 快速实现不支持 list_prefix；安装 cos-python-sdk-v5 获得完整能力"
-        )
+    def list_prefix(self, prefix: str, limit: int = 1000) -> list[dict]:
+        base = prefix.strip().lstrip("/")
+        return self.client.list_prefix(base, limit)

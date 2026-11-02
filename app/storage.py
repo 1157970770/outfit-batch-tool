@@ -368,7 +368,8 @@ class Storage:
     def delete(self, key: str) -> None:
         raise NotImplementedError
 
-    def list_prefix(self, prefix: str, limit: int = 1000) -> list[str]:
+    def list_prefix(self, prefix: str, limit: int = 1000) -> list[dict]:
+        """按前缀列举对象，返回 [{"key": str, "size": int}]。"""
         raise NotImplementedError
 
     # -- 便利方法 --
@@ -523,9 +524,9 @@ class CosStorage(Storage):
         key = self._key(key)
         _with_retry(lambda: self.client.delete_object(Bucket=self.cfg.bucket, Key=key), f"删除 {key}")
 
-    def list_prefix(self, prefix: str, limit: int = 1000) -> list[str]:
+    def list_prefix(self, prefix: str, limit: int = 1000) -> list[dict]:
         base = self._key(prefix) if prefix else ""
-        keys: list[str] = []
+        keys: list[dict] = []
         marker: str | None = None
         while len(keys) < limit:
             params: dict[str, Any] = {
@@ -543,11 +544,15 @@ class CosStorage(Storage):
             for item in resp.get("Contents") or []:
                 key = item.get("Key")
                 if key:
-                    keys.append(str(key))
+                    try:
+                        size = int(item.get("Size") or 0)
+                    except (TypeError, ValueError):
+                        size = 0
+                    keys.append({"key": str(key), "size": size})
             truncated = str(resp.get("IsTruncated", "false")).lower() == "true"
             if not truncated or not keys:
                 break
-            marker = resp.get("NextMarker") or keys[-1]
+            marker = resp.get("NextMarker") or keys[-1]["key"]
         return keys[:limit]
 
 
@@ -613,20 +618,20 @@ class LocalStorage(Storage):
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
 
-    def list_prefix(self, prefix: str, limit: int = 1000) -> list[str]:
+    def list_prefix(self, prefix: str, limit: int = 1000) -> list[dict]:
         base = prefix.strip().lstrip("/")
         if not self.root.exists():
             return []
-        out: list[str] = []
+        out: list[dict] = []
         for path in self.root.rglob("*"):
             if not path.is_file():
                 continue
             rel = path.relative_to(self.root).as_posix()
             if rel.startswith(base):
-                out.append(rel)
+                out.append({"key": rel, "size": path.stat().st_size})
                 if len(out) >= limit:
                     break
-        return sorted(out)
+        return sorted(out, key=lambda row: row["key"])
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +683,7 @@ def _selfcheck() -> int:
         store.put_path(src, key)
         assert store.exists(key), key
         assert store.stat(key)["size"] == 1024
-        assert store.list_prefix("output") == [key], store.list_prefix("output")
+        assert [row["key"] for row in store.list_prefix("output")] == [key], store.list_prefix("output")
         print("本地后端 OK：", store.sign_url(key))
         store.delete(key)
         assert not store.exists(key)

@@ -30,6 +30,18 @@
 .batch-drop.is-frozen{cursor:default;border-style:solid;background:color-mix(in srgb,var(--bg) 60%,white)}
 .batch-drop.is-frozen strong,.batch-drop.is-frozen small{opacity:.75}
 .readonly-input{background:color-mix(in srgb,var(--bg) 70%,white);color:var(--muted);cursor:default}
+
+/* ---------- 6 栏位款号标签（上衣/内衬/裤子/鞋子/场景/特殊备注） ----------
+   3 列 2 行的小网格，紧凑贴在批次号/备注下面；label 内中文用小字号弱化。 */
+.tag-input-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 10px;margin-top:6px}
+.tag-input-grid label{display:flex;flex-direction:column;gap:3px;font-size:12px;font-weight:700;color:var(--muted)}
+.tag-input-grid input{font-weight:500}
+/* 管理端 · 云端归档：搜索行 + 结果表 */
+.archive-search-row{display:flex;gap:8px;margin:10px 0}
+.archive-search-row input{flex:1;min-width:0}
+.archive-search-row .quiet{flex:none;min-height:34px}
+.admin-archive .top-actions{margin-top:10px}
+#archive-result{margin:6px 0}
 .batch-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px}
 .batch-actions .muted{font-size:12px}
 
@@ -286,6 +298,7 @@
   .batch-steps{grid-template-columns:repeat(2,minmax(0,1fr))}
   .batch-step{padding:8px 10px}
   .batch-form-grid,.batch-form-grid-3{grid-template-columns:minmax(0,1fr)}
+  .tag-input-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .batch-card{grid-template-columns:minmax(0,1fr)}
   .batch-card-side{justify-content:flex-end}
   .batch-produce-actions{grid-template-columns:minmax(0,1fr)}
