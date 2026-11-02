@@ -88,6 +88,10 @@ POST /api/batches/<id>/close      关闭批次（不可再生产）
 POST /api/batches/<id>/delete     删除（有运行中任务时拒绝）
 ```
 
+**COS 归档命名**：`{prefix}/output/{YYYY-MM-DD}/{款号}/{批次id}/{编号}-{指纹8}.mp4`。
+款号为空时该段省略（老任务路径不变）；中文款号原样保留，空格等字符转短横线。
+对象另带自定义元数据 `x-cos-meta-style-no`，以及（需 `cos:PutObjectTagging` 权限的）标签 `style_no`。
+
 **状态回填**：`BatchManager._reconcile()` 用关联 job 的 `records` 反推每个条目的状态
 （pending → producing → done/failed），所以进程重启后批次进度能自愈，不需要单独的补偿任务。
 
@@ -150,6 +154,7 @@ while not stop:
 | `templates` / `template_ids` | 本次要跑的场景（含 COS 地址） |
 | `prompt` / `prompt_id` | 实际提交的提示词 |
 | `resolution` / `duration` / `total` / `done` | 生成参数与进度 |
+| `style_no` | 款号（每批次/每次试跑一个，归档时进 COS 路径与标签） |
 | `records[]` | 每条：`id / status / seconds / billable_seconds / estimated_cost / cost_source / error / cos_key` |
 | `summary` | 引擎汇总（success / failed / 计费秒等） |
 | `batch_ref` | 关联批次 id（试跑为空） |
@@ -164,6 +169,7 @@ while not stop:
 | `state` | `draft → locked → closed`（closed 不可再生产） |
 | `image_path` / `prompt_id` / `prompt` | 定妆图与提示词 |
 | `resolution` / `duration` | 本批次参数 |
+| `style_no` | 款号，建批次时填，冻结后不改 |
 | `items[]` | 条目：`template_id / name / tags / state(pending/producing/done/failed) / job_id` |
 | `runs[]` | 每轮生产记录：`job_id / count / at` |
 | `active_job_id` | 当前跑的那一轮（同批次同时只允许一轮） |

@@ -188,6 +188,19 @@ class StorageConfig:
 # Key 规则：所有对象名都从这里生成，避免中文/空格/时间戳乱飞
 # ---------------------------------------------------------------------------
 
+_SEG_UNSAFE = re.compile(r"[\\/:*?\"<>|\s]+")
+
+
+def path_segment(text: str, limit: int = 32) -> str:
+    """对象 Key 的一段：保留中文与大小写，只替换路径禁用字符。
+
+    与 _slug 的区别：_slug 会把中文整段丢掉（用于文件名兜底），
+    而款号这类业务标识要原样出现在 COS 路径里，中文也保留。
+    """
+    cleaned = _SEG_UNSAFE.sub("-", str(text or "").strip()).strip("-._")
+    return cleaned[:limit]
+
+
 def _slug(text: str, default: str = "file", limit: int = 48) -> str:
     """转成 URL 安全的小写片段；中文会退化成默认值（靠指纹保证唯一）。"""
     raw = unicodedata.normalize("NFKD", str(text))
@@ -199,10 +212,11 @@ def _slug(text: str, default: str = "file", limit: int = 48) -> str:
 
 def object_key(kind: str, filename: str, *, batch: str = "", prefix: str = "",
                when: datetime | None = None, digest: str = "",
-               ext: str | None = None) -> str:
+               ext: str | None = None, style: str = "") -> str:
     """生成对象 Key。
 
-    结构：`{prefix}/{kind}/{YYYY-MM-DD}/{batch}/{文件名}-{指纹8}.{ext}`
+    结构：`{prefix}/{kind}/{YYYY-MM-DD}[/{款号}]/{batch}/{文件名}-{指纹8}.{ext}`
+    款号段只在传入时插入（老任务没有款号，路径保持原样）。
 
     日期分区是为了让生命周期规则能按天扫；指纹是为了同一个文件重复上传时
     **命中同一个对象**，而不是每跑一次多存一份。
@@ -215,8 +229,9 @@ def object_key(kind: str, filename: str, *, batch: str = "", prefix: str = "",
     if suffix:
         name = f"{name}.{suffix}"
 
-    parts = [p for p in (prefix.strip().strip("/"), _slug(kind, "misc"),
-                         stamp, _slug(batch, "", 32) if batch else "") if p]
+    parts = [p for p in (prefix.strip().strip("/"), _slug(kind, "misc"), stamp,
+                         path_segment(style) if style else "",
+                         _slug(batch, "", 32) if batch else "") if p]
     return "/".join([*parts, name])
 
 
@@ -336,6 +351,10 @@ class Storage:
 
     def put_bytes(self, data: bytes, key: str, *, content_type: str = "") -> str:
         raise NotImplementedError
+
+    def tag_object(self, key: str, tags: dict) -> None:
+        """给对象打标签（可选能力）。默认不做——本地存储与没开通权限的账号都会跳过。"""
+        return None
 
     def exists(self, key: str) -> bool:
         raise NotImplementedError

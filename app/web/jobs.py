@@ -16,6 +16,13 @@ from app.runtime import build_storages
 from app.wan_api import global_inflight, global_small_inflight
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]+")
+_STYLE_MAX = 40
+
+
+def clean_style_no(value) -> str:
+    """款号：去空白与控制字符，最多 40 字。允许中文——路径里原样保留。"""
+    text = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
+    return text[:_STYLE_MAX]
 _SECRET_PATTERNS = [
     (re.compile(r"sk-[A-Za-z0-9._-]{12,}"), "[已隐藏密钥]"),
     (re.compile(r"(q-signature|q-ak|SecretId|SecretKey)=([^&\\s]+)", re.I), r"\1=[已隐藏]"),
@@ -93,7 +100,8 @@ class JobManager:
     def create(self, owner: str, image_path: Path, image_name: str,
                templates: list[dict], prompt_id: str, resolution: str = "480P",
                duration: int = 5, prompt_body: str | None = None, *,
-               batch_ref: str = "", limit_items: int | None = None) -> dict:
+               batch_ref: str = "", limit_items: int | None = None,
+               style_no: str = "") -> dict:
         """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。"""
         if prompt_id not in self.prompts:
             raise ValueError("请选择有效的提示词模板")
@@ -127,6 +135,8 @@ class JobManager:
             "out_dir": "", "log_tail": [], "cancel_requested": False,
             # 批次归属：批次生产时指向 BatchManager 的 id，试跑/老 job 为空。
             "batch_ref": str(batch_ref or ""),
+            # 款号：每批次/每次试跑一个，归档时进 COS 路径与标签。
+            "style_no": clean_style_no(style_no),
             # small = 快速通道（≤small_lane_items 条）；big = 走大批量队列。
             "lane": lane,
         }
@@ -274,6 +284,7 @@ class JobManager:
                 source_prefix=str(cfg.get("COS_SOURCE_PREFIX") or ""),
                 # 单价必须带兜底：引擎不兜底，传全 null 会让每条记录的费用变成 None。
                 price_per_second=self.settings.price_map(),
+                style_no=str(job.get("style_no") or ""),
                 # 快速通道用自己的在飞池，3 条小任务不会被大批量的几十条挡住。
                 inflight_semaphore=(self.small_inflight if job.get("lane") == "small"
                                     else self.inflight),
@@ -548,7 +559,7 @@ class JobManager:
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
                 "batch_id", "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
                 "duration", "total", "done", "message", "log_tail", "cancel_requested",
-                "lane")}
+                "lane", "style_no")}
             safe["batch_ref"] = str(safe.get("batch_ref") or "")
             if safe.get("message"):
                 safe["message"] = _redact(safe["message"])

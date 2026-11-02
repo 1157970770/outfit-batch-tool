@@ -117,9 +117,11 @@ def main() -> int:
         upload_id = json.loads(upload)["upload_id"]
         code, _, created = call(alice, base, "/api/jobs", "POST", {
             "upload_id": upload_id, "selection": "selected", "template_id": "001", "count": 1,
-            "prompt_id": prompt_id, "prompt": custom_prompt, "resolution": "480P", "duration": 5})
+            "prompt_id": prompt_id, "prompt": custom_prompt, "resolution": "480P", "duration": 5,
+            "style_no": "AW26-143"})
         assert code == 201, (code, created)
         job_id = json.loads(created)["job"]["id"]
+        assert json.loads(created)["job"]["style_no"] == "AW26-143", created
 
         deadline = time.time() + 40
         job = None

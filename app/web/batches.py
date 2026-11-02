@@ -282,7 +282,7 @@ class BatchManager:
         with self.mutex:
             data = {key: batch.get(key) for key in (
                 "id", "batch_no", "title", "owner", "state", "image_upload_id", "image_name",
-                "prompt_id", "prompt", "resolution", "duration", "tag_filters",
+                "prompt_id", "prompt", "resolution", "duration", "tag_filters", "style_no",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
                 "created_at", "updated_at", "locked_at", "closed_at")}
             data["image_url"] = (f"/api/uploads/{batch['image_upload_id']}"
@@ -387,6 +387,8 @@ class BatchManager:
             now = time.time()
             batch = {
                 "id": batch_id, "batch_no": batch_no, "title": title, "owner": user["username"],
+                # 款号：整批一个，冻结后不改；归档时进 COS 路径与对象标签。
+                "style_no": re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("style_no") or "")).strip()[:40],
                 "state": "draft",
                 "image_upload_id": upload_id,
                 "image_path": str((upload or {}).get("path") or ""),
@@ -539,6 +541,7 @@ class BatchManager:
                 str(batch.get("prompt_id")), resolution, duration,
                 str(batch.get("prompt") or ""),
                 batch_ref=str(batch["id"]), limit_items=len(taken),
+                style_no=str(batch.get("style_no") or ""),
             )
         except ValueError as exc:
             raise BatchError(str(exc), 409) from None

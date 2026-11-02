@@ -202,6 +202,7 @@
   });
   $('prompt-select').addEventListener('change', () => { $('prompt-body').value = $('prompt-select').selectedOptions[0]?.dataset.body || ''; updatePromptCount(); updateSummary(); });
   $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
+  $('style-no').addEventListener('input', updateSummary);
   function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }
   $('template-select').addEventListener('change', () => { updateTemplatePreview(); updateSummary(); });
   function updateTemplatePreview() {
@@ -228,7 +229,8 @@
     const available = state.filteredTemplates.length;
     const readyAvailable = state.filteredTemplates.filter(template => template.ready).length;
     $('summary-title').textContent = available ? `准备生成 ${count} 条视频` : '当前标签筛选没有匹配的视频';
-    const setting = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${edited ? ' · 已微调提示词' : ''}`;
+    const style = $('style-no').value.trim();
+    const setting = `${$('resolution').value} · ${$('duration').value === '-1' ? '跟随场景时长' : `${$('duration').value} 秒`} · ${prompt ? prompt.title : '标准换装'}${style ? ` · 款号 ${style}` : ''}${edited ? ' · 已微调提示词' : ''}`;
     $('summary-detail').textContent = `${setting} · 筛选后 ${available} 个场景${available && !readyAvailable ? ' · 尚未上传云端，暂不能生成' : ''}`;
     $('submit-btn').disabled = state.submitting || !available || !readyAvailable || !count || count > available;
     // 数量是分段按钮：值改了还要把高亮同步过去，否则点了没反应（值其实变了）
@@ -289,7 +291,8 @@
       btn.textContent = '正在提交…';
       const body = { upload_id: uploaded.upload_id, selection, count, template_id: $('template-select').value,
         tag_filters: state.tagFilters, prompt_id: $('prompt-select').value, prompt: promptBody,
-        resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true };
+        resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true,
+        style_no: $('style-no').value.trim() };
       const result = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
       toast('任务已提交，正在排队。'); fileInput.value = ''; state.upload = null; $('image-preview').classList.add('hidden'); $('drop-copy').classList.remove('hidden'); $('image-info').textContent = '';
       switchView('history-view'); await refreshJobs(result.job.id);
@@ -370,7 +373,7 @@
       meta.className = 'job-meta';
       const when = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : '';
       const dur = job.duration === -1 ? '跟随场景' : `${job.duration} 秒`;
-      meta.textContent = [when, job.resolution, dur,
+      meta.textContent = [when, job.resolution, dur, job.style_no ? `款号 ${job.style_no}` : '',
         state.user && state.user.role === 'admin' ? job.owner : ''].filter(Boolean).join(' · ');
       left.append(title, meta);
       const actions = document.createElement('div');

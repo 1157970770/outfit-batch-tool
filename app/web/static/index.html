@@ -93,6 +93,8 @@
               <select id="count-select" class="hidden" tabindex="-1" aria-hidden="true"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select>
             </div>
 
+            <label class="field">款号（可选）<input id="style-no" maxlength="40" autocomplete="off" placeholder="例如 AW26-143，用于 COS 归档命名"></label>
+
             <div class="field-row">
               <label class="field">画质<select id="resolution"><option value="480P" selected>480P 标准</option><option value="720P">720P 高清</option></select></label>
               <label class="field">时长<select id="duration"><option value="5" selected>5 秒</option><option value="-1">跟随场景</option></select></label>
@@ -147,8 +149,9 @@
               </div>
             </div>
             <div id="batch-a-body">
-              <div class="batch-form-grid">
+              <div class="batch-form-grid batch-form-grid-3">
                 <label class="field">批次号（必填，1–40 字）<input id="batch-no" maxlength="40" autocomplete="off" placeholder="例如 2026-11-秋装-01"></label>
+                <label class="field">款号（可选，≤40 字）<input id="batch-style-no" maxlength="40" autocomplete="off" placeholder="例如 AW26-143"></label>
                 <label class="field">备注（可选，≤60 字）<input id="batch-title" maxlength="60" autocomplete="off" placeholder="例如 秋装第二批，测试光线"></label>
               </div>
               <label id="batch-drop-zone" class="drop-zone batch-drop">

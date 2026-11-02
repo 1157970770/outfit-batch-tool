@@ -289,9 +289,10 @@ def main() -> int:
         # ---------------- 1. 创建 / 绑定图 / 候选 / 锁定
         code, _, created = call(alice, base, "/api/batches", "POST", {
             "batch_no": "AW26-001", "prompt_id": prompt_id, "prompt": prompt_text,
-            "resolution": "720P", "duration": 7, "title": "秋冬打底"})
+            "resolution": "720P", "duration": 7, "title": "秋冬打底", "style_no": "AW26-001"})
         assert code == 201, (code, created)
         batch = body(created)["batch"]
+        assert batch["style_no"] == "AW26-001", batch
         batch_id = batch["id"]
         assert re.fullmatch(r"[a-f0-9]{12}", batch_id), batch_id
         assert batch["state"] == "draft" and batch["total_items"] == 0, batch

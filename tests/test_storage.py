@@ -167,6 +167,16 @@ def test_keys() -> None:
 
     no_ext = object_key("input", "noext", digest="abcdef1234")
     assert no_ext.endswith("noext-abcdef12"), no_ext
+
+    # 款号段：ASCII 原样保留；中文保留（空格转短横线）；不传时不插入
+    styled = object_key("output", "001.mp4", batch="b1", prefix="prod",
+                        digest="abcdef1234", style="AW26-143")
+    assert "/2026-11-02/AW26-143/b1/" in styled or "/AW26-143/" in styled, styled
+    cn = object_key("output", "001.mp4", batch="b1", prefix="prod",
+                    digest="abcdef1234", style="秋季 143")
+    assert "秋季-143" in cn, cn
+    plain = object_key("output", "001.mp4", batch="b1", prefix="prod", digest="abcdef1234")
+    assert "AW26-143" not in plain and "秋季" not in plain, plain
     print("  ✓ Key 规则：", key)
 
 

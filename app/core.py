@@ -189,6 +189,8 @@ class BatchSpec:
     template_storage: Storage | None = None
     archive_prefix: str = "output"
     archive_expires: int = 7 * 24 * 3600
+    # 款号（每批次一个）：写进对象路径与元数据/标签，方便在 COS 里按款找片
+    style_no: str = ""
     # 服装图源目录：默认 {COS_PREFIX}/output/source
     source_prefix: str = ""
     source_expires: int = 7 * 24 * 3600
@@ -514,15 +516,30 @@ class BatchRunner:
         storage = self.spec.storage
         if storage is None or not path.exists():
             return
+        style = str(getattr(self.spec, "style_no", "") or "").strip()
         key = object_key(
             self.spec.archive_prefix, path.name, batch=self.spec.batch_id,
             prefix=storage.cfg.clean_prefix(),
             digest=file_fingerprint(path),
+            style=style,
         )
+        meta = {"batch": self.spec.batch_id}
+        if style:
+            meta["style-no"] = style
         try:
-            storage.put_path(path, key)
+            storage.put_path(path, key, meta=meta)
             rec["cos_key"] = key
             rec["cos_url"] = storage.sign_url(key, self.spec.archive_expires)
+            if style and not getattr(self, "_tags_unavailable", False):
+                # 标签是可选能力：账号没开通 cos:PutObjectTagging 时这里会失败，
+                # 只记一条警告，不影响出片（路径与元数据仍然带款号）。
+                try:
+                    storage.tag_object(key, {"style_no": style, "batch": self.spec.batch_id})
+                    rec["cos_tags"] = {"style_no": style}
+                except Exception as exc:  # noqa: BLE001
+                    rec["tag_warning"] = f"{type(exc).__name__}: {exc}"[:200]
+                    self._tags_unavailable = True   # 一批里只提示一次，避免每条都刷日志
+                    self.log(f"[{rec['id']}] 对象标签未写入（不影响出片，本批不再重试）：{exc}")
         except Exception as exc:  # noqa: BLE001 - 归档是附加动作，不能拖垮整批
             rec["archive_error"] = f"{type(exc).__name__}: {exc}"
             self.log(f"[{rec['id']}] 归档失败：{exc}")

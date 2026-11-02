@@ -43,13 +43,18 @@ class CosRestClient:
     def _path(self, key: str) -> str:
         return "/" + urllib.parse.quote(key.lstrip("/"), safe="/-_.~")
 
-    def _auth(self, method: str, key: str, expires: int = 3600) -> dict:
+    def _auth(self, method: str, key: str, expires: int = 3600,
+              params: dict | None = None) -> dict:
         start = int(time.time()) - 60
         end = int(time.time()) + int(expires)
         sign_time = f"{start};{end}"
         key_time = sign_time
+        names = sorted((params or {}).keys())
+        param_str = "&".join(
+            f"{name}={urllib.parse.quote(str((params or {})[name]), safe='')}" for name in names
+        )
         http_string = (
-            f"{method.lower()}\n{self._path(key)}\n\n"
+            f"{method.lower()}\n{self._path(key)}\n{param_str}\n"
             f"host={urllib.parse.quote(self.host, safe='')}\n"
         )
         string_to_sign = (
@@ -69,23 +74,23 @@ class CosRestClient:
             "q-sign-time": sign_time,
             "q-key-time": key_time,
             "q-header-list": "host",
-            "q-url-param-list": "",
+            "q-url-param-list": ";".join(names),
             "q-signature": signature,
         }
 
     def _authorization(self, method: str, key: str) -> str:
         return "&".join(f"{k}={v}" for k, v in self._auth(method, key).items())
 
-    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream",
+            headers: dict | None = None) -> str:
         url = f"https://{self.host}{self._path(key)}"
-        req = urllib.request.Request(
-            url, data=data, method="PUT",
-            headers={
-                "Host": self.host,
-                "Content-Type": content_type,
-                "Authorization": self._authorization("put", key),
-            },
-        )
+        merged = {
+            "Host": self.host,
+            "Content-Type": content_type,
+            "Authorization": self._authorization("put", key),
+        }
+        merged.update(headers or {})
+        req = urllib.request.Request(url, data=data, method="PUT", headers=merged)
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return str(resp.headers.get("ETag") or "")
@@ -95,10 +100,45 @@ class CosRestClient:
         except urllib.error.URLError as exc:
             raise StorageError(f"COS 上传 {key} 网络错误：{exc.reason}") from None
 
-    def put_file(self, key: str, path: str | Path, content_type: str = "") -> str:
+    def put_file(self, key: str, path: str | Path, content_type: str = "",
+                 headers: dict | None = None) -> str:
         src = Path(path)
         ctype = content_type or mimetypes.guess_type(src.name)[0] or "application/octet-stream"
-        return self.put(key, src.read_bytes(), ctype)
+        return self.put(key, src.read_bytes(), ctype, headers)
+
+    def put_tagging(self, key: str, tags: dict) -> None:
+        """给已存在的对象打标签（PUT ?tagging）。
+
+        需要 CAM 里的 cos:PutObjectTagging；没开通时 COS 返回
+        "No put tagging auth"，调用方应把它当成可选动作失败，不要影响出片。
+        """
+        items = "".join(
+            f"<Tag><Key>{urllib.parse.quote(str(k), safe='')}</Key>"
+            f"<Value>{urllib.parse.quote(str(v), safe='')}</Value></Tag>"
+            for k, v in tags.items()
+        )
+        body = f"<Tagging><TagSet>{items}</TagSet></Tagging>".encode("utf-8")
+        params = {"tagging": ""}
+        url = f"https://{self.host}{self._path(key)}?tagging"
+        req = urllib.request.Request(
+            url, data=body, method="PUT",
+            headers={
+                "Host": self.host,
+                "Content-Type": "application/xml",
+                "Content-MD5": __import__("base64").b64encode(
+                    __import__("hashlib").md5(body).digest()).decode(),
+                "Authorization": "&".join(
+                    f"{k}={v}" for k, v in self._auth("put", key, params=params).items()),
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60):
+                return
+        except urllib.error.HTTPError as exc:
+            message = exc.read().decode("utf-8", "replace")[:200]
+            raise StorageError(f"COS 打标签失败：HTTP {exc.code} {message}") from None
+        except urllib.error.URLError as exc:
+            raise StorageError(f"COS 打标签网络错误：{exc.reason}") from None
 
     def sign_url(self, key: str, expires: int = 7 * 24 * 3600) -> str:
         params = self._auth("get", key, expires)
@@ -133,6 +173,11 @@ class CosRestStorage:
     def provider(self) -> str:
         return "cos-rest"
 
+    def tag_object(self, key: str, tags: dict) -> None:
+        if not tags:
+            return
+        self.client.put_tagging(key.lstrip("/"), tags)
+
     def put_path(self, path: str | Path, key: str, *, content_type: str = "",
                  meta: dict | None = None) -> str:
         src = Path(path)
@@ -140,7 +185,13 @@ class CosRestStorage:
             raise StorageError(f"待上传文件不存在：{src}")
         if len(key.encode("utf-8")) > 1024:
             raise StorageError("对象 Key 超过 1024 字节")
-        self.client.put_file(key.lstrip("/"), src, content_type)
+        headers = {}
+        for name, value in (meta or {}).items():
+            text = str(value)
+            # COS 自定义头值必须是 ASCII：中文款号留在路径与标签里，元数据不强行塞
+            if text and text.isascii():
+                headers[f"x-cos-meta-{name}"] = text[:100]
+        self.client.put_file(key.lstrip("/"), src, content_type, headers or None)
         return key
 
     def put_bytes(self, data: bytes, key: str, *, content_type: str = "") -> str:

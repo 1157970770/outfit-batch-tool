@@ -28,12 +28,14 @@ class FakeClient:
         self.signed = []
         self.deleted = []
 
-    def put(self, key, data, content_type="application/octet-stream"):
+    def put(self, key, data, content_type="application/octet-stream", headers=None):
         self.puts.append((key, data, content_type))
+        self.last_headers = headers or {}
         return "etag"
 
-    def put_file(self, key, path, content_type=""):
+    def put_file(self, key, path, content_type="", headers=None):
         self.puts.append((key, Path(path).read_bytes(), content_type))
+        self.last_headers = headers or {}
         return "etag"
 
     def sign_url(self, key, expires=3600):

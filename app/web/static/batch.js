@@ -213,7 +213,7 @@
 
   /* ---------- 步骤 A：建批次 ---------- */
   function setFormFrozen(frozen) {
-    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution'].forEach((id) => {
+    ['batch-no', 'batch-style-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution'].forEach((id) => {
       const node = $(id);
       if (node) node.disabled = frozen;
     });
@@ -243,6 +243,7 @@
   }
   function fillBatchForm(batch) {
     $('batch-no').value = txt(batch.batch_no);
+    $('batch-style-no').value = txt(batch.style_no);
     $('batch-title').value = txt(batch.title);
     if (txt(batch.resolution)) $('batch-resolution').value = txt(batch.resolution);
     const promptId = txt(batch.prompt_id);
@@ -258,6 +259,7 @@
     // 收起状态下这一行就是「这个批次是什么」的全部信息
     $('batch-a-summary').textContent = [
       txt(batch.batch_no) || '未命名批次',
+      txt(batch.style_no) ? `款号 ${txt(batch.style_no)}` : '',
       txt(batch.title) || '',
       txt(batch.resolution) || '—',
       durationValue > 0 ? `输出 ${durationValue} 秒` : '输出跟随素材时长',
@@ -277,6 +279,7 @@
   }
   function resetBatchForm() {
     $('batch-no').value = '';
+    $('batch-style-no').value = '';
     $('batch-title').value = '';
     $('batch-prompt-body').value = '';
     $('batch-image-info').textContent = '';
@@ -324,7 +327,8 @@
     try {
       const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: await readFile(file) }) });
       btn.textContent = '正在创建批次…';
-      const payload = { batch_no: batchNo, title, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_id: uploaded.upload_id };
+      const styleNo = $('batch-style-no').value.trim();
+      const payload = { batch_no: batchNo, title, style_no: styleNo, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_id: uploaded.upload_id };
       const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
       if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
       b.current = data.batch;

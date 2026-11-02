@@ -689,7 +689,8 @@ def make_handler(app: WebApplication):
                     return self._error("批量数量较多，请确认后再提交。", 409)
                 job = app.jobs.create(user["username"], Path(meta["path"]), meta["name"], templates,
                                       prompt_id, str(data.get("resolution") or "480P"),
-                                      int(data.get("duration") or 5), str(data.get("prompt") or ""))
+                                      int(data.get("duration") or 5), str(data.get("prompt") or ""),
+                                      style_no=str(data.get("style_no") or ""))
                 return self._json({"ok": True, "job": job}, 201)
             except (ValueError, TemplateError) as exc:
                 return self._error(exc)
