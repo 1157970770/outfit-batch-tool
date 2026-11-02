@@ -735,8 +735,14 @@ class BatchManager:
                 slot = groups.setdefault(key, {
                     "key": key, "job_count": 0, "total": 0, "success": 0, "failed": 0,
                     "first_at": None, "last_at": None, "owners": set(),
+                    # 按通道计数：历史页要能只显示大批量，也要能把「未分组」里的试跑挑出来。
+                    "small_jobs": 0, "big_jobs": 0,
                 })
                 slot["job_count"] += 1
+                if str(job.get("lane") or "") == "small":
+                    slot["small_jobs"] += 1
+                else:
+                    slot["big_jobs"] += 1
                 slot["owners"].add(str(job.get("owner") or ""))
                 created = job.get("created_at") or 0
                 stamp = job.get("finished_at") or created
@@ -760,6 +766,7 @@ class BatchManager:
                     "key": key,
                     "batch_no": batch_no if key != UNGROUPED_KEY else "未分组",
                     "is_ungrouped": key == UNGROUPED_KEY,
+                    "small_jobs": slot["small_jobs"], "big_jobs": slot["big_jobs"],
                     "owner": owner_label,
                     "job_count": slot["job_count"], "total": slot["total"],
                     "success": slot["success"], "failed": slot["failed"],

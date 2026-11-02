@@ -397,7 +397,24 @@ def make_handler(app: WebApplication):
                 if all_jobs and user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
                 owner = query.get("owner", [""])[0].strip()
-                return self._json({"ok": True, "jobs": app.jobs.list_for(user["username"], all_jobs, owner)})
+                jobs = app.jobs.list_for(user["username"], all_jobs, owner)
+                # lane：small / big。试跑页的历史入口只要小批量，不必在浏览器里过滤全量。
+                lane = query.get("lane", [""])[0].strip().lower()
+                if lane in ("small", "big"):
+                    jobs = [job for job in jobs if str(job.get("lane") or "big") == lane]
+                total = len(jobs)
+                # limit：只在显式传时切片，老调用（不传）仍返回全量，行为不变。
+                try:
+                    limit = int(query.get("limit", ["0"])[0] or 0)
+                except ValueError:
+                    limit = 0
+                try:
+                    offset = max(0, int(query.get("offset", ["0"])[0] or 0))
+                except ValueError:
+                    offset = 0
+                if limit > 0:
+                    jobs = jobs[offset:offset + limit]
+                return self._json({"ok": True, "jobs": jobs, "total": total})
             if path == "/api/admin/status":
                 if not self._user(admin=True):
                     return

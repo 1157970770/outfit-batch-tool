@@ -48,9 +48,13 @@
       <section id="create-view" class="view active-view">
         <div class="console-head">
           <div><h1>小批量试跑</h1><p class="muted">一次最多 3 条，走快速通道，不与大批量排队。</p></div>
+          <div class="segmented segmented-sm console-tabs" id="create-tabs" role="group" aria-label="小批量页面">
+            <button type="button" data-pane="make" class="active">制作</button>
+            <button type="button" data-pane="history">历史</button>
+          </div>
         </div>
 
-        <div class="console-grid">
+        <div id="create-pane-make" class="console-grid">
           <article class="panel panel-media">
             <div class="panel-head"><span class="step">1</span><div><b>定妆图</b><small>JPG / PNG / WebP，≤ 20MB</small></div></div>
             <label id="drop-zone" class="drop-zone console-drop">
@@ -107,6 +111,12 @@
             <p id="create-error" class="error hidden"></p>
           </article>
         </div>
+
+        <section id="create-pane-history" class="panel create-history hidden">
+          <div class="panel-head"><span class="step">试</span><div><b>试跑历史</b><small>只列出小批量任务（≤3 条），点任意一条看详情与下载</small></div></div>
+          <div id="create-history-list" class="jobs-list small-history-list"></div>
+          <div class="batch-more"><button id="create-history-more" class="quiet hidden" type="button">加载更多</button></div>
+        </section>
       </section>
 
       <section id="batch-view" class="view">
@@ -250,9 +260,13 @@
       </section>
 
       <section id="history-view" class="view">
-        <div class="section-head"><div><h1 id="jobs-heading">历史任务</h1><p class="muted">按批次分组，展开看每条任务的状态和下载。没有批次号的老任务都在「未分组」里。</p></div><div class="top-actions"><select id="owner-filter" class="quiet hidden" aria-label="按账户筛选"><option value="">全部账户</option></select><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
+        <div class="section-head"><div><h1 id="jobs-heading">历史任务</h1><p class="muted">大批量按批次分组查看；小批量是独立列表，也可以直接到「小批量试跑 → 历史」里看。</p></div><div class="top-actions"><div class="segmented segmented-sm" id="history-scope" role="group" aria-label="历史范围"><button type="button" data-scope="all" class="active">全部</button><button type="button" data-scope="big">大批量</button><button type="button" data-scope="small">小批量</button></div><select id="owner-filter" class="quiet hidden" aria-label="按账户筛选"><option value="">全部账户</option></select><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
         <div id="history-groups" class="history-groups"></div>
         <div id="jobs-list" class="jobs-list hidden"><div class="empty">暂无任务。开始新建一个试试。</div></div>
+        <div id="history-small" class="hidden">
+          <div id="history-small-list" class="jobs-list small-history-list"></div>
+          <div class="batch-more"><button id="history-small-more" class="quiet hidden" type="button">加载更多</button></div>
+        </div>
         <article id="job-detail" class="card detail-card hidden"></article>
       </section>
 

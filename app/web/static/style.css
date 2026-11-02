@@ -435,6 +435,24 @@ textarea {
 .segmented-count button.active { background: var(--paper); color: var(--ink); box-shadow: var(--shadow); }
 .segmented-count button:disabled { color: #b9bec7; cursor: not-allowed; }
 
+/* 小尺寸分段：页面内的二级切换（制作/历史、历史范围），不跟主内容抢视觉 */
+.segmented-sm button {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  transition: background-color .12s, color .12s;
+}
+.segmented-sm button:hover { color: var(--ink-2); }
+.segmented-sm button.active { background: var(--paper); color: var(--ink); box-shadow: var(--shadow); }
+.segmented-sm button:disabled { color: #b9bec7; cursor: not-allowed; }
+
+.console-tabs { flex: none; align-self: flex-start; }
+
 /* ------------------------------------------------------------ 上传区 */
 
 .drop-zone {
@@ -534,6 +552,12 @@ textarea {
 }
 .submit-block .primary { min-width: 124px; }
 
+/* 小批量页的「历史」子页：面板内部滚动，页面本身仍然不滚 */
+.create-history { min-height: 320px; }
+.small-history-list { display: grid; gap: 8px; }
+.small-history-list::-webkit-scrollbar { width: 8px; }
+.small-history-list::-webkit-scrollbar-thumb { background: #d5d9e0; border-radius: 4px; }
+
 .error { margin: 8px 0 0; color: var(--red); font-size: 12.5px; }
 
 /* ------------------------------------------------------------ 单屏模式
@@ -571,6 +595,8 @@ textarea {
   #create-view.active-view { display: flex; flex: 1; flex-direction: column; min-height: 0; }
   #create-view .console-grid { flex: 1; min-height: 0; }
   #create-view .panel { overflow: hidden; }
+  #create-view .create-history { flex: 1; min-height: 0; overflow: hidden; }
+  #create-view .create-history .small-history-list { overflow: auto; min-height: 0; padding-right: 4px; }
 }
 
 /* ------------------------------------------------------------ 任务列表 */

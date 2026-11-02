@@ -1473,10 +1473,34 @@
   function groupSignature(group) {
     return `${num(group.job_count)}|${num(group.success)}|${num(group.failed)}|${num(group.last_at)}`;
   }
+  // 历史范围：全部 / 大批量 / 小批量。小批量是平铺列表（一轮 1–3 条，按批次分组反而多点一次），
+  // 大批量与全部仍走批次分组；分组数据里带了 small_jobs / big_jobs，用来剔除纯试跑的「未分组」。
+  let historyScope = 'all';
+  function setHistoryScope(scope, silent) {
+    historyScope = ['all', 'big', 'small'].includes(scope) ? scope : 'all';
+    document.querySelectorAll('#history-scope button').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.scope === historyScope);
+    });
+    if (!silent) refreshHistory();
+  }
+  document.querySelectorAll('#history-scope button').forEach(btn => {
+    btn.addEventListener('click', () => setHistoryScope(btn.dataset.scope));
+  });
+
   async function refreshHistory(openId = '') {
     if (!App.state.user) return;
     // 不在历史页时不发请求：切回历史页时 switchView 会再调一次。
     if (!$('history-view').classList.contains('active-view')) return;
+    if (historyScope === 'small') {
+      $('history-groups').classList.add('hidden');
+      $('jobs-list').classList.add('hidden');
+      $('history-small').classList.remove('hidden');
+      b.historyMode = 'small';
+      await App.smallHistory('history').reload(scopeParam());
+      if (openId) App.openJob(openId);
+      return;
+    }
+    $('history-small').classList.add('hidden');
     try {
       const data = await api(`/api/history/groups?scope=${scopeParam()}`);
       b.groups = Array.isArray(data.groups) ? data.groups : [];
@@ -1507,12 +1531,18 @@
   function renderGroups() {
     const root = $('history-groups');
     root.replaceChildren();
-    if (!b.groups.length) {
-      root.append(el('div', 'empty', '暂无任务记录。先去「小批量试跑」或「大批量生产」提交一次。'));
+    // 只看大批量时，把只有试跑记录的「未分组」整组隐掉。
+    const groups = historyScope === 'big'
+      ? b.groups.filter((group) => num(group.big_jobs, num(group.job_count)) > 0)
+      : b.groups;
+    if (!groups.length) {
+      root.append(el('div', 'empty', historyScope === 'big'
+        ? '还没有大批量任务。到「大批量生产」建一个批次试试。'
+        : '暂无任务记录。先去「小批量试跑」或「大批量生产」提交一次。'));
       return;
     }
     const fragment = document.createDocumentFragment();
-    for (const group of b.groups) fragment.append(groupCard(group));
+    for (const group of groups) fragment.append(groupCard(group));
     root.append(fragment);
   }
   function groupCard(group) {

@@ -191,12 +191,12 @@ web-data/
 | GET | `/api/templates` `/api/templates/<id>/preview` | 登录 | 模板列表 / 预览视频 |
 | GET | `/api/uploads/<id>` | 登录（限本人） | 回显定妆图 |
 | POST | `/api/uploads` | 登录 | 上传定妆图 |
-| GET/POST | `/api/jobs` | 登录 | 列表（`?scope=all` 仅 admin）/ 建任务 |
+| GET/POST | `/api/jobs` | 登录 | 列表（`?scope=all` 仅 admin；支持 `lane=small\|big`、`offset`、`limit`，返回 `total`）/ 建任务 |
 | GET | `/api/jobs/<id>` `/api/jobs/<id>/files/...` | 登录（限本人） | 详情 / 成片、报告 CSV、ZIP |
 | POST | `/api/jobs/<id>/cancel` `/retry` | 登录（限本人） | 取消 / 只重试失败项 |
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
 | GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、set-image、candidates、lock、produce、retry-failed、close、zip |
-| GET | `/api/history/groups[/<key>]` | 登录 | 历史按批次分组 / 组内条目 |
+| GET | `/api/history/groups[/<key>]` | 登录 | 历史按批次分组 / 组内条目；分组带 `small_jobs`/`big_jobs` 用于分离试跑 |
 | GET | `/api/admin/status` | admin | 服务状态、队列、额度、账号 |
 | GET | `/api/admin/usage` | admin | 按账户汇总 |
 | GET | `/api/admin/accounts/<name>/work[.csv]` | admin | 账户逐条明细 / 导出 |

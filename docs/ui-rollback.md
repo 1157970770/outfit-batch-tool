@@ -111,3 +111,11 @@ git checkout ui-baseline-20261102 -- app/web/static/
 ```
 
 同时把 `server/web.json` 的 `max_job_items` 改回 `20` 并重启服务。
+
+## 七、历史任务分离（2026-11-02 第三次）
+
+- 历史页顶部加「全部 / 大批量 / 小批量」分段：大批量仍是批次卡片，小批量改为平铺列表；
+- 小批量页标题右侧加「制作 / 历史」子页，只列 `lane=small` 的任务（每页 20 条）；
+- 后端只加了两处：`/api/jobs` 支持 `lane` 与 `offset/limit` 并返回 `total`；分组结果带 `small_jobs`/`big_jobs`；
+- 只回退这一次：`git checkout ui-history-split-20261102 -- app/web/static/ app/web/server.py app/web/batches.py`
+  （涉及后端，回退后需重启；仅回退界面可只 checkout `app/web/static/`）

@@ -325,6 +325,100 @@
     const logs = document.createElement('div'); logs.className = 'log-box'; logs.textContent = (job.log_tail || []).slice(-60).join('\n') || '任务日志将在这里显示。'; root.append(logs);
   }
 
+  // ------------------------------------------------------------ 小批量试跑历史
+  // 两处入口共用同一套渲染：小批量页的「历史」子页、历史页的「小批量」分段。
+  const SMALL_PAGE = 20;
+  function createSmallHistory(listId, moreId) {
+    const list = $(listId);
+    const more = $(moreId);
+    const st = { rows: [], total: 0, scope: 'mine', busy: false };
+
+    function card(job) {
+      const node = document.createElement('article');
+      node.className = 'job-card';
+      const left = document.createElement('div');
+      const title = document.createElement('div');
+      title.className = 'job-title';
+      title.textContent = `试跑 · ${job.total || 0} 条`;
+      const meta = document.createElement('div');
+      meta.className = 'job-meta';
+      const when = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : '';
+      const dur = job.duration === -1 ? '跟随场景' : `${job.duration} 秒`;
+      meta.textContent = [when, job.resolution, dur,
+        state.user && state.user.role === 'admin' ? job.owner : ''].filter(Boolean).join(' · ');
+      left.append(title, meta);
+      const actions = document.createElement('div');
+      actions.className = 'job-actions';
+      const badge = document.createElement('span');
+      badge.className = `status ${job.status}`;
+      badge.textContent = statusText[job.status] || job.status;
+      actions.append(badge);
+      node.append(left, actions);
+      node.addEventListener('click', () => {
+        if (!$('history-view').classList.contains('active-view')) switchView('history-view');
+        openJob(job.id);
+      });
+      return node;
+    }
+
+    function render() {
+      list.replaceChildren();
+      if (!st.rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = '还没有试跑记录。上传一张定妆图，试做 1 条就会出现在这里。';
+        list.append(empty);
+      } else {
+        const fragment = document.createDocumentFragment();
+        st.rows.forEach(job => fragment.append(card(job)));
+        list.append(fragment);
+      }
+      more.classList.toggle('hidden', !st.rows.length || st.rows.length >= st.total);
+      more.disabled = st.busy;
+      more.textContent = st.busy ? '加载中…' : '加载更多';
+    }
+
+    async function load(reset, scope) {
+      if (st.busy) return;
+      st.busy = true;
+      if (scope) st.scope = scope;
+      if (reset) st.rows = [];
+      render();
+      try {
+        const data = await api(`/api/jobs?scope=${st.scope}&lane=small&offset=${reset ? 0 : st.rows.length}&limit=${SMALL_PAGE}`);
+        const items = Array.isArray(data.jobs) ? data.jobs : [];
+        st.rows = reset ? items : st.rows.concat(items);
+        st.total = Number(data.total || st.rows.length);
+      } catch (err) { toast(err.message); }
+      finally { st.busy = false; render(); }
+    }
+
+    more.addEventListener('click', () => load(false));
+    return {
+      reload: (scope) => load(true, scope),
+      loadMore: () => load(false),
+    };
+  }
+  const smallHistories = {
+    create: createSmallHistory('create-history-list', 'create-history-more'),
+    history: createSmallHistory('history-small-list', 'history-small-more'),
+  };
+
+  let createPane = 'make';
+  function setCreatePane(pane) {
+    createPane = pane === 'history' ? 'history' : 'make';
+    document.querySelectorAll('#create-tabs button').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.pane === createPane);
+    });
+    $('create-pane-make').classList.toggle('hidden', createPane !== 'make');
+    $('create-pane-history').classList.toggle('hidden', createPane !== 'history');
+    $('create-view').classList.toggle('console-history', createPane === 'history');
+    if (createPane === 'history') smallHistories.create.reload('mine');
+  }
+  document.querySelectorAll('#create-tabs button').forEach(btn => {
+    btn.addEventListener('click', () => setCreatePane(btn.dataset.pane));
+  });
+
   function renderUsage(data) {
     const root = $('usage-table'); root.replaceChildren();
     const accounts = data.accounts || [];
@@ -443,7 +537,8 @@
     state.usageOwner = ''; state.usageRows = []; state.usageTotal = 0;
   });
   // 供 batch.js 复用：同一套 api 封装、共享 state、同一个详情面板。
-  window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText };
+  window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText,
+    smallHistory: (id) => smallHistories[id], setCreatePane };
   // Esc：先关任务详情，再关账户明细，符合"从最上层开始退"的直觉。
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;

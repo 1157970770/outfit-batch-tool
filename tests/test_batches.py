@@ -518,6 +518,11 @@ def main() -> int:
         assert "__ungrouped__" in keyed, rows
         assert keyed["__ungrouped__"]["is_ungrouped"] is True, keyed["__ungrouped__"]
         assert keyed["__ungrouped__"]["job_count"] == 1, keyed["__ungrouped__"]
+        # 通道计数：小批量试跑落 small，批次生产落 big，历史页据此分离
+        assert keyed["__ungrouped__"]["small_jobs"] == 1 and keyed["__ungrouped__"]["big_jobs"] == 0, keyed
+        assert keyed[batch_id]["big_jobs"] == 2 and keyed[batch_id]["small_jobs"] == 0, keyed
+        code, _, small_only = call(alice, base, "/api/jobs?lane=small&limit=50")
+        assert code == 200 and body(small_only)["total"] == 1, small_only
         assert rows[-1]["key"] == "__ungrouped__", "未分组固定排最后"
         code, _, hist = call(alice, base, f"/api/history/groups/{batch_id}?offset=0&limit=200")
         assert code == 200, (code, hist)

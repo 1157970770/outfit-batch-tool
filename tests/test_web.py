@@ -149,6 +149,14 @@ def main() -> int:
         code, _, all_jobs = call(admin, base, "/api/jobs?scope=all")
         assert code == 200 and len(json.loads(all_jobs)["jobs"]) == 1
 
+        # 历史分离：lane 过滤 + 分页字段，试跑页的历史入口靠它只取小批量
+        code, _, small_only = call(admin, base, "/api/jobs?scope=all&lane=small&limit=10")
+        small_payload = json.loads(small_only)
+        assert code == 200 and small_payload["total"] == 1, small_payload
+        assert all(job["lane"] == "small" for job in small_payload["jobs"]), small_payload
+        code, _, big_only = call(admin, base, "/api/jobs?scope=all&lane=big")
+        assert json.loads(big_only)["total"] == 0, big_only
+
         # 第二个账户用自己的 Key 独立跑一单：验证账户级 Key 端到端，而不是只认管理员
         code, _, bup = call(bob, base, "/api/uploads", "POST", {
             "filename": "bob.png", "data": "data:image/png;base64," + base64.b64encode(image.getvalue()).decode("ascii")})
