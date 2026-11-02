@@ -73,3 +73,6 @@ _state/
 
 # 例外：包初始化文件不是临时脚本（上面的 _*.py 会误伤 __init__.py）
 !app/web/__init__.py
+
+# 临时网络探测脚本（排查 npm 源用，与产品无关）
+probe-registry.mjs
