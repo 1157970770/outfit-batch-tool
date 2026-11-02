@@ -87,6 +87,17 @@ def truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "是"}
 
 
+def _positive_number(value) -> float | None:
+    """可选的正数配置：空值/非法/非正数一律视为"未配置"，交给上层兜底。"""
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _price_map(value) -> dict:
     if not isinstance(value, dict):
         return {}
@@ -145,6 +156,13 @@ def from_remote(remote: dict, output_root: str | Path) -> dict:
         "WAN_POLL_INTERVAL": float(wan.get("poll_interval") or 15),
         "WAN_POLL_TIMEOUT": int(wan.get("poll_timeout") or 1800),
         "WAN_MAX_CONCURRENCY": int(wan.get("max_concurrency") or 3),
+        # 限流口径（2026-11-02 起）：创建任务与轮询是**两个独立额度**，
+        # query_rpm 管 submit、query_rps 管 get_task；max_inflight 是同时在飞上限。
+        # 为 null 时用 wan_api.py 的兜底值（250 RPM / 15 RPS / 50 在飞）。
+        # query_qps 是历史字段，仅保留兼容，不再驱动限流。
+        "WAN_QUERY_RPM": _positive_number(wan.get("query_rpm")),
+        "WAN_QUERY_RPS": _positive_number(wan.get("query_rps")),
+        "WAN_MAX_INFLIGHT": _positive_number(wan.get("max_inflight")),
         "WAN_QUERY_QPS": float(wan.get("query_qps") or 10),
         "WAN_PRICE_PER_SECOND": _price_map(wan.get("price_per_second")),
         "NOTICE": str(remote.get("notice") or "").strip(),

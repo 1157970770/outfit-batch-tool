@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import base64
+import csv
 import html
 import io
 import json
 import mimetypes
 import os
+import sys
 import re
 import shutil
 import socket
@@ -50,7 +52,9 @@ def _local_hosts() -> set[str]:
         import subprocess
         out = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=3,
                              errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        hosts.update(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", out.stdout))
+        # 只取「IPv4 地址」那一行：直接把整段 ipconfig 里的四段数字都抓进来，
+        # 会把子网掩码（255.255.240.0）、0.0.0.0、广播地址一起当成“可访问地址”打印出去。
+        hosts.update(re.findall(r"IPv4[^:]*:\s*((?:\d{1,3}\.){3}\d{1,3})", out.stdout))
     except Exception:
         pass
     hosts.update(("0.0.0.0", "::"))
@@ -78,9 +82,13 @@ def _load_prompts() -> dict[str, dict]:
 class WebApplication:
     def __init__(self, settings: WebSettings):
         self.settings = settings
-        # 进程级限流单例：速率与在飞上限只在这里定一次，多个 job 并行不叠加。
+        # 单 Key，单份额度：进程级单例只在这里定一次，多个 job 并行不叠加。
         configure_globals(query_rpm=settings.config.get("WAN_QUERY_RPM"),
-                          max_inflight=settings.config.get("WAN_MAX_INFLIGHT"))
+                          query_rps=settings.config.get("WAN_QUERY_RPS"),
+                          max_inflight=settings.config.get("WAN_MAX_INFLIGHT"),
+                          small_inflight=settings.small_lane_inflight)
+        # 说明：两项都来自 config.json 的 wan.query_rpm / wan.max_inflight；
+        # 留空则退回代码兜底（250 RPM / 50 在飞）。
         self.prompts = _load_prompts()
         self.catalog = TemplateCatalog(settings.templates)
         self.catalog.tag_workbook_info = settings.tag_workbook_info or {}
@@ -182,6 +190,23 @@ def make_handler(app: WebApplication):
                     fh.write(line[:1500] + "\n")
             except OSError:
                 pass
+
+        def handle_one_request(self):
+            # 浏览器关标签页/切页会掐断正在传输的响应（视频预览尤其常见），
+            # 这种客户端断连属于正常现象：安静地放弃这一次请求即可，
+            # 不能让 traceback 刷屏，更不能让它有机会波及服务进程。
+            try:
+                super().handle_one_request()
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, TimeoutError):
+                self.close_connection = True
+
+        def handle_error(self, request, client_address):
+            # 线程内未接住的异常兜底：客户端断连静默，其余记一行日志而非整屏 traceback。
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, TimeoutError)):
+                self.close_connection = True
+                return
+            super().handle_error(request, client_address)
 
         def _headers(self, content_type="application/json; charset=utf-8", length=0, status=200,
                      extra=None):
@@ -290,6 +315,7 @@ def make_handler(app: WebApplication):
                                                "templates_count": len(app.catalog.items),
                                                "templates_error": app.settings.templates_error,
                                                "max_items": app.settings.max_items,
+                                               "small_lane_items": app.settings.small_lane_items,
                                                "max_batch_items": app.settings.max_batch_items,
                                                "max_batch_run_items": app.settings.max_batch_run_items,
                                                "produce_choices": [choice for choice in (20, 50, 100)
@@ -370,7 +396,8 @@ def make_handler(app: WebApplication):
                 all_jobs = query.get("scope", ["mine"])[0] == "all"
                 if all_jobs and user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
-                return self._json({"ok": True, "jobs": app.jobs.list_for(user["username"], all_jobs)})
+                owner = query.get("owner", [""])[0].strip()
+                return self._json({"ok": True, "jobs": app.jobs.list_for(user["username"], all_jobs, owner)})
             if path == "/api/admin/status":
                 if not self._user(admin=True):
                     return
@@ -378,12 +405,22 @@ def make_handler(app: WebApplication):
                 with app.jobs.lock:
                     queued_count = sum(j["status"] == "queued" for j in app.jobs.jobs.values())
                     active_count = len(app.jobs.active)
+                    small_active = sum(1 for slot in app.jobs.active.values()
+                                       if str(slot.get("lane") or "") == "small")
+                    big_active = active_count - small_active
                 return self._json({"ok": True, "version": WEB_VERSION,
                                    "templates": len(app.catalog.items), "queued": queued_count,
-                                   "active": active_count, "free_gb": round(usage.free / (1024**3), 1),
+                                   "active": active_count, "big_active": big_active,
+                                   "small_active": small_active,
+                                   "free_gb": round(usage.free / (1024**3), 1),
                                    "max_concurrency": app.settings.max_concurrency,
+                                   "max_active_per_user": app.settings.max_active_per_user,
+                                   "small_lane": {"items": app.settings.small_lane_items,
+                                                  "max_jobs": app.settings.max_active_small_jobs,
+                                                  "inflight": app.settings.small_lane_inflight},
                                    "limits": global_limits(),
-                                   "users": [{"username": n, "role": u.get("role", "user"), "enabled": u.get("enabled", True)}
+                                   "users": [{"username": n, "role": u.get("role", "user"),
+                                              "enabled": u.get("enabled", True)}
                                              for n, u in app.settings.users.items()]})
             if path == "/api/admin/template-health":
                 if not self._user(admin=True):
@@ -401,11 +438,25 @@ def make_handler(app: WebApplication):
                     "ready_ratio": round(source_ready / workbook_rows, 4) if workbook_rows else 0,
                     "manifest_warning": str(info.get("manifest_warning") or ""),
                 })
+            if path == "/api/admin/usage":
+                if not self._user(admin=True):
+                    return
+                query = urllib.parse.parse_qs(parsed.query)
+                return self._admin_usage(query)
+            if path.startswith("/api/admin/accounts/"):
+                if not self._user(admin=True):
+                    return
+                parts = path.strip("/").split("/")
+                if len(parts) == 5 and parts[4] in ("work", "work.csv"):
+                    owner = urllib.parse.unquote(parts[3])
+                    query = urllib.parse.parse_qs(parsed.query)
+                    return self._account_work(owner, query, csv_mode=parts[4].endswith(".csv"))
             if path == "/api/admin/users":
                 if not self._user(admin=True):
                     return
                 return self._json({"ok": True, "users": [{"username": n, "role": u.get("role", "user"),
-                                   "enabled": u.get("enabled", True)} for n, u in app.settings.users.items()]})
+                                   "enabled": u.get("enabled", True)}
+                                  for n, u in app.settings.users.items()]})
             return self._error("页面或接口不存在。", 404)
 
         def do_POST(self):
@@ -722,7 +773,8 @@ def make_handler(app: WebApplication):
             all_users = scope == "all"
             if all_users and user.get("role") != "admin":
                 return self._error("此操作需要管理员权限。", 403)
-            return self._json({"ok": True, "batches": app.batches.list_for(user, all_users)})
+            owner = str((query.get("owner", [""])[0] or "")).strip()
+            return self._json({"ok": True, "batches": app.batches.list_for(user, all_users, owner)})
 
         def _batch_detail(self, batch_id, query, user):
             item_state = query.get("item_state", [""])[0]
@@ -745,7 +797,9 @@ def make_handler(app: WebApplication):
             all_users = scope == "all"
             if all_users and user.get("role") != "admin":
                 return self._error("此操作需要管理员权限。", 403)
-            return self._json({"ok": True, "groups": app.batches.history_groups(user, all_users)})
+            owner = str((query.get("owner", [""])[0] or "")).strip()
+            return self._json({"ok": True,
+                               "groups": app.batches.history_groups(user, all_users, owner)})
 
         def _history_items(self, key, query, user):
             try:
@@ -753,11 +807,90 @@ def make_handler(app: WebApplication):
                 limit = int(query.get("limit", ["200"])[0] or 200)
             except (TypeError, ValueError):
                 return self._error("分页参数无效。", 400)
+            owner = str((query.get("owner", [""])[0] or "")).strip()
             try:
-                result = app.batches.history_items(key, user, offset, limit)
+                result = app.batches.history_items(key, user, offset, limit, owner)
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, **result})
+
+        @staticmethod
+        def _day(value):
+            """YYYY-MM-DD → 当天 0 点时间戳；非法输入按"不限"处理。"""
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                return time.mktime(time.strptime(text, "%Y-%m-%d"))
+            except ValueError:
+                return None
+
+        def _admin_usage(self, query):
+            owner = str((query.get("owner", [""])[0] or "")).strip()
+            start = self._day(query.get("from", [""])[0])
+            end = self._day(query.get("to", [""])[0])
+            if end is not None:
+                end += 86400          # 含结束当天
+            data = app.jobs.usage_for(start, end, owner)
+            data.update({"ok": True, "owner": owner,
+                         "from": query.get("from", [""])[0],
+                         "to": query.get("to", [""])[0]})
+            return self._json(data)
+
+        def _account_work(self, owner, query, csv_mode=False):
+            """某账户的逐条工作明细：哪个视频、什么时候、多少计费秒、多少钱。"""
+            start = self._day(query.get("from", [""])[0])
+            end = self._day(query.get("to", [""])[0])
+            if end is not None:
+                end += 86400          # 含结束当天
+            status = str((query.get("status", [""])[0] or "")).strip()
+            if status not in {"", "success", "failed", "invalid", "expired", "canceled", "running"}:
+                status = ""
+            try:
+                offset = int(query.get("offset", ["0"])[0] or 0)
+                limit = int(query.get("limit", ["100"])[0] or 100)
+            except (TypeError, ValueError):
+                return self._error("分页参数无效。", 400)
+            data = app.jobs.work_for(owner, start, end, status, offset, limit, page=not csv_mode)
+            with app.batches.mutex:
+                for item in data["items"]:
+                    ref = str(item.get("batch_ref") or "")
+                    batch = app.batches.batches.get(ref) if ref else None
+                    item["batch_no"] = str((batch or {}).get("batch_no") or "")
+            if not csv_mode:
+                data.update({"ok": True, "status": status,
+                             "from": query.get("from", [""])[0],
+                             "to": query.get("to", [""])[0]})
+                return self._json(data)
+            return self._send_account_csv(owner, data)
+
+        def _send_account_csv(self, owner, data):
+            labels = {"success": "成功", "failed": "失败", "invalid": "无效",
+                      "expired": "过期", "canceled": "已取消", "running": "进行中"}
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            cost_labels = {"record": "实测", "derived": "按当前单价回算", "missing": ""}
+            writer.writerow(["时间", "批次号", "模板ID", "模板名称", "状态",
+                             "计费秒", "预估金额(元)", "金额来源", "分辨率", "输出时长(秒)", "任务ID"])
+            for item in data["items"]:
+                created = float(item.get("created_at") or 0)
+                writer.writerow([
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created)) if created else "",
+                    item.get("batch_no") or "",
+                    item.get("template_id") or "",
+                    item.get("template_name") or "",
+                    labels.get(str(item.get("status")), str(item.get("status") or "")),
+                    item.get("billable_seconds") if item.get("billable_seconds") is not None else "",
+                    item.get("estimated_cost") if item.get("estimated_cost") is not None else "",
+                    cost_labels.get(str(item.get("cost_source")), ""),
+                    item.get("resolution") or "",
+                    item.get("duration") if item.get("duration") is not None else "",
+                    item.get("job_id") or "",
+                ])
+            # BOM 让 Excel 直接认出 UTF-8，避免中文乱码
+            raw = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+            return self._send_bytes(raw, "text/csv; charset=utf-8",
+                                    f"account-{owner}-work.csv")
 
         def _admin_add_user(self, data):
             username = str(data.get("username") or "").strip()
@@ -942,6 +1075,13 @@ def make_handler(app: WebApplication):
                 mime += "; charset=utf-8"
             return self._send_file(target, mime, target.name, attachment=False)
 
+        def _send_bytes(self, raw: bytes, mime: str, filename: str):
+            quoted = urllib.parse.quote(filename)
+            self._headers(mime, len(raw), 200,
+                          {"Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"})
+            if self.command != "HEAD":
+                self.wfile.write(raw)
+
         def _send_file(self, path: Path, mime: str, filename: str, inline=False, attachment=True):
             size = path.stat().st_size
             start, end, status = 0, max(0, size - 1), 200
@@ -1003,8 +1143,25 @@ def serve(host: str | None = None, port: int | None = None) -> int:
         return 2
     server.daemon_threads = True
     server.allow_reuse_address = True
-    addresses = sorted(a for a in _local_hosts() if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", a)
-                       and not a.startswith(("127.", "169.254.")))
+    def _rank(ip: str) -> tuple[int, str]:
+        """把最可能是「办公/家庭局域网」的地址排前面，虚拟网卡靠后。
+
+        192.168.x 与 10.x 通常是真实局域网；172.16/12 常被 WSL/Hyper-V 占用，
+        100.64/10 是 Tailscale 之类的 CGNAT；这些仍打印，只是排在后面。
+        """
+        if ip.startswith("192.168."):
+            return (0, ip)
+        if ip.startswith("10."):
+            return (1, ip)
+        if re.match(r"100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.", ip):
+            return (3, ip)
+        if re.match(r"172\.(1[6-9]|2\d|3[01])\.", ip):
+            return (4, ip)
+        return (2, ip)
+
+    addresses = sorted((a for a in _local_hosts() if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", a)
+                        and not a.startswith(("127.", "169.254.", "0.", "255."))),
+                       key=_rank)
     print(f"换装批量生产器 网页版 v{WEB_VERSION}")
     print(f"本机访问：http://127.0.0.1:{bind_port}")
     for address in addresses:

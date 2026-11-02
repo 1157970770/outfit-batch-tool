@@ -11,13 +11,16 @@
     "default_ratio": "adaptive",
     "poll_interval": 15,
     "poll_timeout": 1800,
-    "max_concurrency": 3,
+    "max_concurrency": 100,
     "query_qps": 10,
     "price_per_second": {
       "480P": null,
       "720P": null,
       "1080P": null
-    }
+    },
+    "query_rpm": 250,
+    "max_inflight": 100,
+    "query_rps": 15
   },
   "rh_api_key": "",
   "manifest_url": "",

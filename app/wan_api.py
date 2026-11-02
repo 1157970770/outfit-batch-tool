@@ -697,12 +697,14 @@ def _join(base: str, suffix: str) -> str:
 class DashScopeProvider:
     name = PROVIDER_DASHSCOPE
 
-    def __init__(self, cfg: WanConfig, limiter: "_RateLimiter"):
+    def __init__(self, cfg: WanConfig, limiter: "_RateLimiter",
+                 query_limiter: "_RateLimiter | None" = None):
         self.cfg = cfg
-        self.limiter = limiter
+        self.limiter = limiter          # 创建任务：300 RPM 口径
+        self.query_limiter = query_limiter or limiter   # 轮询：20 RPS 口径
 
     def submit(self, body: dict) -> SubmitResult:
-        # 提交与查询同桶：50 条提交约 12 秒，不会把查询预算挤掉。
+        # 创建任务走提交桶，和轮询额度分开，避免互相挤占。
         self.limiter.acquire()
         url = _join(self.cfg.base_url, SUBMIT_SUFFIX)
         data = _request_json(
@@ -724,7 +726,7 @@ class DashScopeProvider:
         )
 
     def get_task(self, task_id: str) -> TaskResult:
-        self.limiter.acquire()
+        self.query_limiter.acquire()
         url = _join(self.cfg.base_url, TASK_SUFFIX + urllib.parse.quote(task_id, safe=""))
         data = _request_json("GET", url, self.cfg.api_key, timeout=45)
         output = data.get("output") or {}
@@ -750,9 +752,11 @@ class DashScopeProvider:
 class RunningHubProvider:
     name = PROVIDER_RUNNINGHUB
 
-    def __init__(self, cfg: WanConfig, limiter: "_RateLimiter"):
+    def __init__(self, cfg: WanConfig, limiter: "_RateLimiter",
+                 query_limiter: "_RateLimiter | None" = None):
         self.cfg = cfg
         self.limiter = limiter
+        self.query_limiter = query_limiter or limiter
 
     def submit(self, body: dict) -> SubmitResult:
         self.limiter.acquire()
@@ -773,7 +777,7 @@ class RunningHubProvider:
         )
 
     def get_task(self, task_id: str) -> TaskResult:
-        self.limiter.acquire()
+        self.query_limiter.acquire()
         url = _join(self.cfg.base_url, RH_QUERY_PATH)
         data = _request_json("POST", url, self.cfg.api_key, {"taskId": task_id}, timeout=45)
         status = _RH_STATUS.get(str(data.get("status") or "").upper(), STATUS_UNKNOWN)
@@ -794,16 +798,16 @@ class RunningHubProvider:
 # ---------------------------------------------------------------------------
 # 限流与在飞额度（进程级单例）
 # ---------------------------------------------------------------------------
-# 三层解耦，三者都必须**进程级**：
+# 三层解耦，三者都必须是**进程级**：
 #   线程数     BatchSpec.concurrency        只是工作线程，不构成 API 压力
 #   在飞任务   global_inflight() 信号量     真正同时在跑的云端任务数（submit → wait 全程）
 #   请求速率   global_limiter() 令牌桶      提交与查询共用一个桶
-# 旧实现每个 BatchRunner 各持一个限流器/信号量，两个 job 并行时速率与在飞数直接翻倍
-# （10 QPS × 2 = 1200 RPM，超出官方 300 RPM 三倍），所以必须收成单例。
+# 现实是**一把 Key 给所有账户共用**，额度天然只有一份；按账户拆桶不会多出额度，
+# 只会让统计口径变复杂。所以这里保持全局单例。
 
 DEFAULT_QUERY_RPM = 250.0        # 官方 RPM 300 的 83%
 DEFAULT_MAX_INFLIGHT = 50        # 同时运行的云端任务上限（跨 job）
-SUBMIT_MAX_CONCURRENCY = 50      # 单 job 线程上限，配置写更大也不再放大
+SUBMIT_MAX_CONCURRENCY = 100     # 单 job 线程上限，配置写更大也不再放大（与 100 条档对齐）
 
 
 def _env_number(name: str, default: float) -> float:
@@ -847,23 +851,39 @@ class _RateLimiter:
 
 
 _GLOBAL_LOCK = threading.Lock()
-_GLOBAL_LIMITER: _RateLimiter | None = None
+_GLOBAL_LIMITER: _RateLimiter | None = None          # 创建任务：RPM 口径
+_GLOBAL_QUERY_LIMITER: _RateLimiter | None = None    # 轮询：RPS 口径（官方 20 RPS）
 _GLOBAL_INFLIGHT: threading.Semaphore | None = None
+# 快速通道（≤N 条的小批量）专用在飞池：与大批量完全隔离，避免小任务排在
+# 几十个大任务后面。池子大小由 web.json 的 small_lane_inflight 决定。
+_GLOBAL_SMALL_INFLIGHT: threading.Semaphore | None = None
 _GLOBAL_RPM: float = _env_number("WAN_QUERY_RPM", DEFAULT_QUERY_RPM)
+_GLOBAL_QUERY_RPS: float = _env_number("WAN_QUERY_RPS", 15.0)
 _GLOBAL_INFLIGHT_MAX: int = int(_env_number("WAN_MAX_INFLIGHT", DEFAULT_MAX_INFLIGHT))
+_GLOBAL_SMALL_MAX: int = int(_env_number("WAN_SMALL_INFLIGHT", 12))
 
 
 def configure_globals(*, query_rpm: float | None = None,
-                      max_inflight: int | None = None) -> None:
+                      query_rps: float | None = None,
+                      max_inflight: int | None = None,
+                      small_inflight: int | None = None) -> None:
     """按配置初始化进程级单例；只在启动时调用一次，运行中不重建。"""
-    global _GLOBAL_RPM, _GLOBAL_INFLIGHT_MAX, _GLOBAL_LIMITER, _GLOBAL_INFLIGHT
+    global _GLOBAL_RPM, _GLOBAL_QUERY_RPS, _GLOBAL_INFLIGHT_MAX
+    global _GLOBAL_LIMITER, _GLOBAL_QUERY_LIMITER, _GLOBAL_INFLIGHT
+    global _GLOBAL_SMALL_MAX, _GLOBAL_SMALL_INFLIGHT
     with _GLOBAL_LOCK:
         if query_rpm and float(query_rpm) > 0:
             _GLOBAL_RPM = float(query_rpm)
             _GLOBAL_LIMITER = _RateLimiter(rpm=_GLOBAL_RPM)
+        if query_rps and float(query_rps) > 0:
+            _GLOBAL_QUERY_RPS = float(query_rps)
+            _GLOBAL_QUERY_LIMITER = _RateLimiter(qps=_GLOBAL_QUERY_RPS)
         if max_inflight and int(max_inflight) > 0:
             _GLOBAL_INFLIGHT_MAX = int(max_inflight)
             _GLOBAL_INFLIGHT = threading.Semaphore(_GLOBAL_INFLIGHT_MAX)
+        if small_inflight and int(small_inflight) > 0:
+            _GLOBAL_SMALL_MAX = int(small_inflight)
+            _GLOBAL_SMALL_INFLIGHT = threading.Semaphore(_GLOBAL_SMALL_MAX)
 
 
 def global_limiter() -> _RateLimiter:
@@ -875,6 +895,15 @@ def global_limiter() -> _RateLimiter:
         return _GLOBAL_LIMITER
 
 
+def global_query_limiter() -> _RateLimiter:
+    """轮询专用请求桶（RPS 口径），与创建任务的 RPM 桶互不挤占。"""
+    global _GLOBAL_QUERY_LIMITER
+    with _GLOBAL_LOCK:
+        if _GLOBAL_QUERY_LIMITER is None:
+            _GLOBAL_QUERY_LIMITER = _RateLimiter(qps=_GLOBAL_QUERY_RPS)
+        return _GLOBAL_QUERY_LIMITER
+
+
 def global_inflight() -> threading.Semaphore:
     """全进程共用的在飞任务额度（跨 job 分配，例如两个 job 各分 25）。"""
     global _GLOBAL_INFLIGHT
@@ -884,10 +913,21 @@ def global_inflight() -> threading.Semaphore:
         return _GLOBAL_INFLIGHT
 
 
+def global_small_inflight() -> threading.Semaphore:
+    """快速通道专用在飞额度（小批量 ≤N 条），与大批量池互不挤占。"""
+    global _GLOBAL_SMALL_INFLIGHT
+    with _GLOBAL_LOCK:
+        if _GLOBAL_SMALL_INFLIGHT is None:
+            _GLOBAL_SMALL_INFLIGHT = threading.Semaphore(_GLOBAL_SMALL_MAX)
+        return _GLOBAL_SMALL_INFLIGHT
+
+
 def global_limits() -> dict:
     """当前进程级上限，供 /api/admin/status 与排障查看。"""
     with _GLOBAL_LOCK:
-        return {"query_rpm": _GLOBAL_RPM, "max_inflight": _GLOBAL_INFLIGHT_MAX}
+        return {"query_rpm": _GLOBAL_RPM, "query_rps": _GLOBAL_QUERY_RPS,
+                "max_inflight": _GLOBAL_INFLIGHT_MAX,
+                "small_max_inflight": _GLOBAL_SMALL_MAX}
 
 
 
@@ -901,13 +941,14 @@ class WanClient:
     def __init__(self, cfg: WanConfig):
         cfg.validate()
         self.cfg = cfg
-        # 进程级单例：多个 job 并行时共用同一个速率桶与在飞额度，不会把 250 RPM 变成 N×。
+        # 进程级单例：所有 job 共用同一把 Key 的速率桶与在飞额度，不会按 job 数翻倍。
         self.limiter = global_limiter()
+        self.query_limiter = global_query_limiter()
         self.inflight = global_inflight()
         self.provider = (
-            DashScopeProvider(cfg, self.limiter)
+            DashScopeProvider(cfg, self.limiter, self.query_limiter)
             if cfg.provider == PROVIDER_DASHSCOPE
-            else RunningHubProvider(cfg, self.limiter)
+            else RunningHubProvider(cfg, self.limiter, self.query_limiter)
         )
 
     # ---- 构造 ----
@@ -969,7 +1010,8 @@ class WanClient:
             except WanError as exc:
                 if exc.category in ("network", "server", "throttle"):
                     if exc.category == "throttle":
-                        self.limiter.penalize(5.0)
+                        # 轮询被限流：只惩罚轮询桶，不影响创建任务。
+                        self.query_limiter.penalize(5.0)
                     network_failures += 1
                     if network_failures >= 5:
                         # 保留 task_id 交给上层记为 running，不要误判为失败

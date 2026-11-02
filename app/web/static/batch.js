@@ -5,8 +5,9 @@
  * 口径说明：
  * - `duration` 就是输出秒数，本页固定传 7。后端 web 层与 wan_api 已统一为
  *   `duration_ok()`（-1 或 2–30），7 合法且是 POST /api/batches 的默认值。
- * - 金额一律优先用后端返回的 cost_estimate.options[i].amount（candidates / produce / 批次详情都带）；
- *   没有 cost_estimate 时才用本地常量兜底，并在提示里标明是本地估算。
+ * - 本页不展示任何金额/费用信息；花费统一在「管理 → 账户用量」里按账户核算。
+ *   生产按钮的档位仍由后端 cost_estimate.options[i].count 决定（配置改了上限也能跟上），
+ *   只是不再读取 amount。
  */
 (() => {
   'use strict';
@@ -18,9 +19,6 @@
   const BATCH_DURATION_PARAM = 7;    // duration = 输出秒数，本页固定 7
   const OUTPUT_SECONDS = BATCH_DURATION_PARAM;
   const PRODUCE_STEPS = [20, 50, 100];
-  // 本地兜底单价，与后端 settings.DEFAULT_PRICE_PER_SECOND 对齐，仅在后端没给 cost_estimate 时用
-  const PRICE_PER_SECOND = { '480P': 0.3, '720P': 0.6, '1080P': 1.2 };
-  const BILLABLE_SECONDS = 8.45;
   // 候选分页：每页条数 = 实测容量（列数 × 能完整放下的行数），**保底 50**。
   // 候选区现在与右列等高（见 batch.css），实测 1920×880 候选网格约 654px 高 · 6 列 × 14 行 = 84 条/页，
   // 1920×990 是 6 × 16 = 96 条/页 —— 一页正好填满整块区域，不再有「分页条下面空 280px」的观感。
@@ -40,7 +38,6 @@
     batches: [], listLoaded: false,
     current: null, items: [],
     candidates: [], selected: new Set(), candTotal: 0, candReady: 0,
-    estimate: null,
     candTagFilter: new Set(), onlySelected: false, candPage: 1, candPageItems: [], candPageBackup: 0,
     // 每页条数由 candCapacity() 实测写入（列数 × 行数，保底 CAND_PAGE_MIN），页面尺寸变了就重算
     candPageSize: CAND_PAGE_MIN, candObserver: null,
@@ -67,11 +64,6 @@
     const n = Number(ts);
     return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toLocaleString() : '—';
   }
-  function fmtMoney(amount) {
-    if (!Number.isFinite(amount)) return '';
-    const rounded = Math.round(amount * 10) / 10;
-    return `¥${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}`;
-  }
   // 档位与上限以 /api/bootstrap 的 service 为准（max_batch_items / max_batch_run_items / produce_choices），
   // 这里的常量只在服务端没给时兜底。
   function serviceLimits() {
@@ -85,44 +77,17 @@
       maxRunItems: num(svc.max_batch_run_items, PRODUCE_STEPS[PRODUCE_STEPS.length - 1]) || PRODUCE_STEPS[PRODUCE_STEPS.length - 1],
     };
   }
-  function localEstimate(count, resolution) {
-    const price = PRICE_PER_SECOND[String(resolution || '720P').toUpperCase()];
-    if (!Number.isFinite(price)) return null;
-    return count * BILLABLE_SECONDS * price;
-  }
-  // 生产按钮上的金额：优先后端 cost_estimate.options（candidates / produce 都带），
-  // 没有时（例如重开一个已锁定批次、后端还是旧版）用本地常量兜底并标明来源。
-  function produceOptions(batch) {
-    // 批次详情里的是「按当前 pending 条目」算的，比候选那次（按筛选结果）更贴近接下来这批，优先用。
-    const est = (batch && batch.cost_estimate) || b.estimate;
+  // 生产按钮的档位：优先后端 cost_estimate.options 的 count（配置改了单次上限也能跟上），
+  // 没有时就退回本地三档。本页不展示金额，只取档位。
+  function produceCounts(batch) {
+    const est = batch && batch.cost_estimate;
     if (est && Array.isArray(est.options) && est.options.length) {
-      const unit = est.unit_price === null || est.unit_price === undefined ? null : Number(est.unit_price);
-      const options = est.options
+      const counts = est.options
         .filter((option) => num(option.count) > 0)
-        .map((option) => {
-          const raw = option.amount;
-          const amount = raw === null || raw === undefined ? null : (Number.isFinite(Number(raw)) ? Number(raw) : null);
-          return { count: num(option.count), amount };
-        });
-      return {
-        source: 'server',
-        unit: Number.isFinite(unit) ? unit : null,
-        priceSource: txt(est.price_source),
-        note: txt(est.note),
-        resolution: txt(est.resolution) || txt(batch && batch.resolution),
-        options,
-      };
+        .map((option) => num(option.count));
+      if (counts.length) return { source: 'server', counts };
     }
-    const resolution = txt(batch && batch.resolution) || '720P';
-    const price = PRICE_PER_SECOND[resolution.toUpperCase()];
-    return {
-      source: 'local',
-      unit: Number.isFinite(price) ? price : null,
-      priceSource: 'local',
-      note: '',
-      resolution,
-      options: serviceLimits().choices.map((count) => ({ count, amount: localEstimate(count, resolution) })),
-    };
+    return { source: 'local', counts: serviceLimits().choices };
   }
   function readFile(file) {
     return new Promise((resolve, reject) => {
@@ -134,7 +99,15 @@
   }
   function scopeParam() {
     const user = App.state.user;
-    return user && user.role === 'admin' && App.state.showAll ? 'all' : 'mine';
+    if (!(user && user.role === 'admin' && App.state.showAll)) return 'mine';
+    // 管理员"查看全部"时再叠加账户维度；普通账号永远只能看到自己。
+    const owner = App.state.ownerFilter ? `&owner=${encodeURIComponent(App.state.ownerFilter)}` : '';
+    return `all${owner}`;
+  }
+  function ownerParam() {
+    const user = App.state.user;
+    return user && user.role === 'admin' && App.state.ownerFilter
+      ? `&owner=${encodeURIComponent(App.state.ownerFilter)}` : '';
   }
   function openJobDetail(jobId) {
     if (!jobId) return;
@@ -505,7 +478,6 @@
     b.candPageItems = [];
     b.candPageBackup = 0;
     b.candTotal = 0; b.candReady = 0;
-    b.estimate = null;
     if ($('batch-only-selected')) $('batch-only-selected').checked = false;
     clearPreview();
     renderCandChips();
@@ -536,7 +508,6 @@
       // filtered_total 是「筛选命中总数」（可能大于本次返回条数），total 只是这一批的条数。
       b.candTotal = num(data.filtered_total, num(data.total, b.candidates.length));
       b.candReady = num(data.ready_count, b.candidates.filter((item) => item.ready).length);
-      b.estimate = data.cost_estimate || null;
       // 默认不选中任何项：分页后「已选 480」与第一页可见的 50 张极易混淆，
       // 用户若误以为 480 是本页数量，锁定后连点几次「生产 100」会意外产生数千元费用。
       // 想全做就点一次「全选全部 N 条」，多一步换来不会误操作。
@@ -1144,36 +1115,19 @@
 
     const actions = $('batch-produce-actions');
     actions.replaceChildren();
-    const plan = produceOptions(batch);
-    const amountByCount = new Map(plan.options.map((option) => [option.count, option.amount]));
-    // 服务端给了 options 就按它的档位渲染（配置可能把单次上限调到小于 100），否则用本地三档。
+    const plan = produceCounts(batch);
+    // 服务端给了档位就按它的渲染（配置可能把单次上限调到小于 100），否则用本地三档。
     const limits = serviceLimits();
-    const counts = plan.source === 'server' && plan.options.length ? plan.options.map((option) => option.count) : limits.choices;
-    const maxCount = counts.length ? Math.max(...counts) : limits.maxRunItems;
+    const counts = plan.source === 'server' && plan.counts.length ? plan.counts : limits.choices;
     for (const count of counts) {
-      const amount = amountByCount.has(count) ? amountByCount.get(count) : localEstimate(count, batch.resolution);
       const btn = el('button', 'primary batch-produce-btn');
       btn.type = 'button';
-      btn.textContent = amount === null || amount === undefined
-        ? `生产 ${count} 条（金额待确认）`
-        : `生产 ${count} 条（约 ${fmtMoney(amount)}）`;
+      btn.textContent = `生产 ${count} 条`;
       btn.disabled = b.busy || !!activeId || closed || pending === 0;
       btn.title = activeId ? '当前批次还有任务在跑，跑完再点下一批'
-        : closed ? '批次已关闭' : '点下去会立刻提交真实计费任务，不可撤回';
-      btn.addEventListener('click', () => produce(count, batch, amount));
+        : closed ? '批次已关闭' : '点下去会立刻提交，不可撤回';
+      btn.addEventListener('click', () => produce(count, batch));
       actions.append(btn);
-    }
-
-    const priceHint = $('batch-price-hint');
-    const localCount = plan.options.filter((option) => option.amount === null).length;
-    if (plan.source === 'server' && plan.unit === null) {
-      priceHint.textContent = `服务端未配置这个画质的单价，金额无法预估；提交前请确认条数（单次最多 ${maxCount} 条）。`;
-    } else if (plan.source === 'server') {
-      // price_source: config = 服务端配置了该画质单价，default = 阿里云官方公开价兜底
-      const origin = plan.priceSource === 'config' ? '按服务端配置单价估算' : '按官方公开价估算';
-      priceHint.textContent = `${origin}：${plan.note || '按模板时长 + 输出 7 秒估算'}（单价 ${plan.unit} 元/秒${localCount ? '，部分档位金额待确认' : ''}），实际以云端账单为准。`;
-    } else {
-      priceHint.textContent = `服务端没有返回金额估算，下面按本地常量 ${plan.unit ?? '—'} 元/秒 × 单条 ${BILLABLE_SECONDS} 秒估算，实际以云端账单为准；单次最多 ${maxCount} 条。`;
     }
 
     // 失败条目给一个重试入口（接口 #9），否则 failed 条目在页面上就是死路。
@@ -1195,7 +1149,7 @@
 
   async function retryFailed(batch, count) {
     if (b.busy || !batch || !batch.id) return;
-    if (!confirm(`重试失败的 ${count} 条？\n\n会再次产生费用，且不能撤回。`)) return;
+    if (!confirm(`重试失败的 ${count} 条？\n\n提交后不能撤回。`)) return;
     b.busy = true;
     renderProduce(batch);
     try {
@@ -1216,11 +1170,9 @@
     }
   }
 
-  async function produce(count, batch, estimate) {
+  async function produce(count, batch) {
     if (b.busy || !batch || !batch.id) return;
-    const known = estimate !== null && estimate !== undefined && Number.isFinite(Number(estimate));
-    const amountText = known ? `，预估费用约 ${fmtMoney(Number(estimate))}` : '，服务端未提供金额预估';
-    if (!confirm(`将立刻提交 ${count} 条生产任务${amountText}。\n\n提交后不能撤回，费用会真实产生。是否继续？`)) return;
+    if (!confirm(`将立刻提交 ${count} 条生产任务。\n\n提交后不能撤回。是否继续？`)) return;
     b.busy = true;
     renderProduce(batch);
     $('batch-produce-error').classList.add('hidden');
@@ -1231,10 +1183,7 @@
       });
       const taken = num(data.taken, count);
       const blocked = Array.isArray(data.blocked) ? data.blocked.length : 0;
-      const actual = data.cost_estimate && data.cost_estimate.amount !== null && data.cost_estimate.amount !== undefined
-        ? Number(data.cost_estimate.amount) : null;
       const message = [taken < count ? `本批只剩 ${taken} 条，已全部提交。` : `已提交 ${taken} 条，正在生产。`];
-      if (Number.isFinite(actual)) message.push(`预估 ${fmtMoney(actual)}`);
       if (blocked) message.push(`${blocked} 条模板已不可用，已标为失败`);
       toast(message.join(' '));
       b.busy = false;
@@ -1578,6 +1527,8 @@
     const titleWrap = el('div', 'history-group-title');
     titleWrap.append(el('b', null, isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次')));
     const parts = [`${num(group.job_count)} 个任务`, `成功 ${num(group.success)}`, `失败 ${num(group.failed)}`];
+    // 管理员看全部用户时，分组标题要能区分是谁的任务（多人混组时后端给"多人"）。
+    if (App.state.user && App.state.user.role === 'admin' && group.owner) parts.unshift(`账户 ${group.owner}`);
     titleWrap.append(el('small', null, `${parts.join(' · ')} · ${fmtTime(group.first_at)} → ${fmtTime(group.last_at)}`));
     const side = el('div', 'history-group-side');
     if (num(group.failed)) side.append(el('span', 'status failed', `失败 ${num(group.failed)}`));
@@ -1616,7 +1567,7 @@
   async function loadGroupDetail(key, silent) {
     const body = groupBody(key);
     try {
-      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=0&limit=${HISTORY_PAGE}`);
+      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=0&limit=${HISTORY_PAGE}${ownerParam()}`);
       b.groupDetails.set(key, {
         items: Array.isArray(data.items) ? data.items : [],
         total: num(data.total, (data.items || []).length),
@@ -1630,7 +1581,7 @@
   }
   async function loadMoreGroup(key, detail) {
     try {
-      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=${detail.items.length}&limit=${HISTORY_PAGE}`);
+      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=${detail.items.length}&limit=${HISTORY_PAGE}${ownerParam()}`);
       const more = Array.isArray(data.items) ? data.items : [];
       detail.items = detail.items.concat(more);
       detail.total = num(data.total, detail.items.length);

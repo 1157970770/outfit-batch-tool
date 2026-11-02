@@ -102,6 +102,7 @@ def main() -> int:
         assert code == 200, code
         code, _, boot = call(alice, base, "/api/bootstrap")
         assert code == 200 and json.loads(boot)["service"]["templates_count"] == 1
+        assert json.loads(boot)["service"]["small_lane_items"] == 3
         prompt_options = json.loads(boot)["prompts"]
         assert not any(p["title"] == "服装定妆" for p in prompt_options), prompt_options
         prompt_option = prompt_options[0]
@@ -130,6 +131,7 @@ def main() -> int:
                 break
             time.sleep(0.25)
         assert job and job["status"] == "succeeded", job
+        assert job["lane"] == "small", job          # 1 条试跑走快速通道
         assert job["records"][0]["status"] == "success", job
         assert "out_dir" not in (job.get("summary") or {}), job
         with urllib.request.urlopen(f"http://127.0.0.1:{mock_port}/stats", timeout=5) as response:
@@ -146,6 +148,29 @@ def main() -> int:
         assert code == 200
         code, _, all_jobs = call(admin, base, "/api/jobs?scope=all")
         assert code == 200 and len(json.loads(all_jobs)["jobs"]) == 1
+
+        # 第二个账户用自己的 Key 独立跑一单：验证账户级 Key 端到端，而不是只认管理员
+        code, _, bup = call(bob, base, "/api/uploads", "POST", {
+            "filename": "bob.png", "data": "data:image/png;base64," + base64.b64encode(image.getvalue()).decode("ascii")})
+        assert code == 201, (code, bup)
+        code, _, bcreated = call(bob, base, "/api/jobs", "POST", {
+            "upload_id": json.loads(bup)["upload_id"], "selection": "selected",
+            "template_id": "001", "count": 1, "prompt_id": prompt_id, "prompt": custom_prompt,
+            "resolution": "480P", "duration": 5})
+        assert code == 201, (code, bcreated)
+        bjob_id = json.loads(bcreated)["job"]["id"]
+        deadline = time.time() + 40
+        bjob = None
+        while time.time() < deadline:
+            code, _, raw = call(bob, base, f"/api/jobs/{bjob_id}")
+            bjob = json.loads(raw)["job"]
+            if bjob["status"] in {"succeeded", "partial", "failed", "canceled"}:
+                break
+            time.sleep(0.25)
+        assert bjob and bjob["status"] == "succeeded", bjob
+        # 管理员按账户筛选：只能看到 bob 的 1 条
+        code, _, only_bob = call(admin, base, "/api/jobs?scope=all&owner=bob")
+        assert code == 200 and len(json.loads(only_bob)["jobs"]) == 1, only_bob
         code, _, users = call(admin, base, "/api/admin/users")
         assert code == 200 and all("hash" not in u for u in json.loads(users)["users"])
         code, _, added = call(admin, base, "/api/admin/users", "POST", {"username": "newuser", "password": "newuser-pass-123", "role": "user"})
@@ -169,7 +194,44 @@ def main() -> int:
         assert code == 200 and not any(u["username"] == "newuser" for u in json.loads(users)["users"])
         code, _, _ = call(admin, base, "/api/admin/users/newuser", "DELETE")
         assert code == 404, code                      # 删过的账号再删 404
-        print("OK 网页上传 → mock 生成 → 进度 → 下载 → 用户隔离 → 管理员账号管理（含删除）")
+
+        # ---- 按账户统计与逐条明细（全站一把 Key，归属靠 owner） ----
+        code, _, usage = call(admin, base, "/api/admin/usage")
+        assert code == 200, code
+        usage_body = json.loads(usage)
+        usage_rows = {row["owner"]: row for row in usage_body["accounts"]}
+        assert usage_rows["alice"]["success"] == 1, usage_rows["alice"]
+        assert usage_rows["bob"]["success"] == 1, usage_rows["bob"]
+        assert usage_body["totals"]["success"] == 2, usage_body["totals"]
+        assert usage_body["totals"]["items"] == 2, usage_body["totals"]
+        # 单价为 null 时必须走兜底价，否则账户花费永远是 0
+        assert usage_rows["alice"]["estimated_cost"] > 0, usage_rows["alice"]
+        assert usage_body["totals"]["estimated_cost"] > 0, usage_body["totals"]
+
+        # 逐条明细：哪个账户跑了哪个视频、多少计费秒、多少钱
+        code, _, work = call(admin, base, "/api/admin/accounts/alice/work")
+        assert code == 200, work
+        work_data = json.loads(work)
+        assert work_data["total"] == 1, work_data
+        item = work_data["items"][0]
+        assert item["template_id"] == "001" and item["template_name"] == "测试场景", item
+        assert item["status"] == "success" and item["estimated_cost"], item
+        assert item["cost_source"] == "record", item
+        assert work_data["total_cost"] > 0, work_data
+        code, _, csv_raw = call(admin, base, "/api/admin/accounts/alice/work.csv")
+        assert code == 200, code
+        assert "模板ID".encode("utf-8") in csv_raw and b"001" in csv_raw, csv_raw[:200]
+
+        # 历史任务没有落金额时，按当前单价回算（cost_source=derived）
+        record = app.jobs.jobs[job_id]["records"][0]
+        original_cost = record["estimated_cost"]
+        record["estimated_cost"] = None
+        code, _, derived = call(admin, base, "/api/admin/accounts/alice/work?status=success")
+        derived_item = json.loads(derived)["items"][0]
+        assert derived_item["cost_source"] == "derived" and derived_item["estimated_cost"] > 0, derived_item
+        record["estimated_cost"] = original_cost
+
+        print("OK 网页上传 → mock 生成 → 下载 → 用户隔离 → 账号管理 → 按账户用量与逐条明细")
         return 0
     finally:
         if server:

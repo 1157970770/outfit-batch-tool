@@ -45,8 +45,10 @@ from http.server import ThreadingHTTPServer  # noqa: E402
 from openpyxl import Workbook  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from app.wan_api import WanClient, WanConfig, _RateLimiter, global_inflight, global_limiter  # noqa: E402
+from app.wan_api import (WanClient, WanConfig, _RateLimiter, global_inflight, global_limiter,  # noqa: E402
+                         global_query_limiter, global_small_inflight)
 from app.web.auth import make_password  # noqa: E402
+from app.web.jobs import JobManager  # noqa: E402
 from app.web.server import WebApplication, make_handler  # noqa: E402
 from app.web.settings import load_settings  # noqa: E402
 
@@ -193,8 +195,25 @@ def main() -> int:
     assert global_limiter() is global_limiter(), "请求速率桶必须是进程级单例"
     assert global_inflight() is global_inflight(), "在飞额度必须是进程级单例"
     cfg = WanConfig(api_key="mock-key-123456", base_url="http://127.0.0.1:1/api/v1", model="wan3.0-video")
-    assert WanClient(cfg).limiter is WanClient(cfg).limiter, "两个 job 必须共用同一个桶"
-    print("  ✓ 限流器/在飞额度是进程级单例（不再每 job 一个）")
+    assert WanClient(cfg).limiter is WanClient(cfg).limiter, "所有 job 共用同一个提交桶"
+    assert WanClient(cfg).query_limiter is WanClient(cfg).query_limiter, "所有 job 共用同一个轮询桶"
+    assert WanClient(cfg).query_limiter is not WanClient(cfg).limiter, "提交与轮询不得共桶"
+    assert WanClient(cfg).inflight is WanClient(cfg).inflight, "所有 job 共用同一份在飞额度"
+    assert global_small_inflight() is global_small_inflight(), "快速通道在飞池必须稳定复用"
+    assert global_small_inflight() is not global_inflight(), "快速通道必须与大批量池隔离"
+    # 创建任务与轮询是两个额度：RPM 桶只管提交，RPS 桶只管查询
+    assert global_query_limiter() is global_query_limiter(), "轮询桶必须稳定复用"
+    assert global_query_limiter() is not global_limiter(), "轮询桶不得与创建任务共桶"
+    assert abs(global_query_limiter().interval - 1 / 15.0) < 1e-9, global_query_limiter().interval
+    print("  ✓ 创建任务与轮询分桶；快速通道另有独立在飞池")
+
+    # 快速通道的两个独立计数：小批量不占大批量的 job 槽位，也不占每用户大批量额度
+    assert JobManager._lane_allowed("small", "alice", {"alice": 1}, {}, 1, 0, 4, 4, 1) is True
+    assert JobManager._lane_allowed("small", "alice", {}, {"alice": 1}, 0, 1, 4, 4, 1) is False
+    assert JobManager._lane_allowed("small", "bob", {}, {}, 4, 4, 4, 4, 1) is False
+    assert JobManager._lane_allowed("big", "bob", {}, {}, 4, 0, 4, 4, 1) is False
+    assert JobManager._lane_allowed("big", "bob", {}, {}, 0, 4, 4, 4, 1) is True
+    print("  ✓ 快速通道计数独立：小批量可与本人/他人的大批量并行")
 
     tmp = tempdir("batchtest-")
     mock_port = free_port()
@@ -235,6 +254,8 @@ def main() -> int:
         assert info["untagged_skipped"] == 2, info
         # 并发配置不再被钳到 3
         assert settings.max_concurrency == 20, settings.max_concurrency
+        assert settings.small_lane_items == 3, settings.small_lane_items
+        assert settings.max_active_small_jobs == 4 and settings.small_lane_inflight == 12
         assert settings.max_batch_items == 500 and settings.max_batch_run_items == 100
         # 单价兜底三档齐全（config 全 null 时用公开价目表兜底）
         assert settings.unit_price("480P") == (0.3, "default"), settings.unit_price("480P")

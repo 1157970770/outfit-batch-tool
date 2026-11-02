@@ -12,7 +12,10 @@ from pathlib import Path
 from app import config as appconfig
 
 # 单 job 线程上限（与 wan_api.SUBMIT_MAX_CONCURRENCY 一致）：配置写更大也不放大。
-MAX_CONCURRENCY_CAP = 50
+# 2026-11-02 从 50 提到 100，与「大批量」单次 100 条档对齐，避免单 job 被线程数卡住。
+MAX_CONCURRENCY_CAP = 100
+# 同时在跑的任务数上限（跨账户）。每账户自己的额度由 Key 分桶控制，这里只是主机级闸门。
+MAX_ACTIVE_JOBS_CAP = 20
 # 批次清单上限与单次生产档位上限（v2：只允许 20/50/100 三档）。
 MAX_BATCH_ITEMS_CAP = 500
 MAX_BATCH_RUN_ITEMS_CAP = 100
@@ -44,7 +47,43 @@ class WebSettings:
 
     @property
     def max_active_jobs(self) -> int:
-        return max(1, min(3, int(self.web.get("max_active_jobs", 2))))
+        return max(1, min(MAX_ACTIVE_JOBS_CAP, int(self.web.get("max_active_jobs", 2))))
+
+    @property
+    def max_active_per_user(self) -> int:
+        """每账户同时跑几个「大批量」job；小批量走快速通道，不受这个限制。"""
+        try:
+            value = int(self.web.get("max_active_per_user", 1))
+        except (TypeError, ValueError):
+            value = 1
+        return max(1, min(MAX_ACTIVE_JOBS_CAP, value))
+
+    @property
+    def small_lane_items(self) -> int:
+        """条数 ≤ 该值的 job 走快速通道，不跟大批量抢 job 槽位与在飞名额。"""
+        try:
+            value = int(self.web.get("small_lane_items", 3))
+        except (TypeError, ValueError):
+            value = 3
+        return max(1, min(20, value))
+
+    @property
+    def max_active_small_jobs(self) -> int:
+        """快速通道同时跑几个小 job（全站）。"""
+        try:
+            value = int(self.web.get("max_active_small_jobs", 4))
+        except (TypeError, ValueError):
+            value = 4
+        return max(1, min(MAX_ACTIVE_JOBS_CAP, value))
+
+    @property
+    def small_lane_inflight(self) -> int:
+        """预留给快速通道的在飞名额，独立于大批量的在飞池。"""
+        try:
+            value = int(self.web.get("small_lane_inflight", 12))
+        except (TypeError, ValueError):
+            value = 12
+        return max(1, min(50, value))
 
     @property
     def max_items(self) -> int:
@@ -90,6 +129,20 @@ class WebSettings:
         fallback = DEFAULT_PRICE_PER_SECOND.get(key)
         return (fallback, "default") if fallback else (None, "missing")
 
+    def price_map(self) -> dict[str, float]:
+        """传给引擎的单价表。
+
+        引擎的 estimate_cost 只认传入的映射、自己不兜底；以前直接把
+        config 里全 null 的 price_per_second 传下去，导致每条记录的
+        estimated_cost 都是 None，账户花费统计永远是 0。这里统一兜底。
+        """
+        prices: dict[str, float] = {}
+        for key in DEFAULT_PRICE_PER_SECOND:
+            value, _source = self.unit_price(key)
+            if value:
+                prices[key] = float(value)
+        return prices
+
 
 
 def _read_json(path: Path) -> dict:
@@ -123,6 +176,7 @@ def load_settings(*, base_dir: str | Path | None = None,
     output_dir = data_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = appconfig.from_remote(remote, output_dir)
+    # 全站只有一把 Key：缺了就直接启动失败，不要等到用户点生产才报错。
     if not appconfig.wan_configured(cfg):
         raise RuntimeError(f"{api_path} 中没有可用的 wan.api_key/model 配置")
 

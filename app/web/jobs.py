@@ -13,7 +13,7 @@ from pathlib import Path
 
 from app.core import BatchRunner, BatchSpec, unique_batch_dir
 from app.runtime import build_storages
-from app.wan_api import global_inflight
+from app.wan_api import global_inflight, global_small_inflight
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _SECRET_PATTERNS = [
@@ -57,10 +57,11 @@ class JobManager:
         self.jobs: dict[str, dict] = {}
         self.active: dict[str, dict] = {}
         self.stop_event = threading.Event()
-        # 进程级在飞额度（单例）：跨 job 共享，覆盖 submit → wait 全程。
-        # 原来这里是 max(1, min(3, ...)) 的每实例信号量，两个 job 并行即在飞数翻倍。
+        # 全局在飞额度（单例）：全部账户共用一把 Key，额度也只有一份，跨 job 共享。
         self.inflight = global_inflight()
         self.submit_slots = self.inflight      # 兼容旧字段名
+        # 快速通道：小批量（≤small_lane_items）专用在飞池，不跟大批量排队。
+        self.small_inflight = global_small_inflight()
         self._load_jobs()
         self.dispatcher = threading.Thread(target=self._dispatch, name="web-job-dispatch", daemon=True)
         self.dispatcher.start()
@@ -109,6 +110,8 @@ class JobManager:
             raise ValueError(f"一次最多生成 {max_items} 条")
         if resolution not in ("480P", "720P") or not duration_ok(duration):
             raise ValueError("生成参数无效，请刷新页面后重试")
+        # 快速通道：3 条及以下的小批量独立排队，可与本人的大批量并行。
+        lane = "small" if len(templates) <= self.settings.small_lane_items else "big"
         job_id = uuid.uuid4().hex[:12]
         now = time.time()
         safe_owner = _SAFE.sub("-", owner)[:20] or "user"
@@ -124,6 +127,8 @@ class JobManager:
             "out_dir": "", "log_tail": [], "cancel_requested": False,
             # 批次归属：批次生产时指向 BatchManager 的 id，试跑/老 job 为空。
             "batch_ref": str(batch_ref or ""),
+            # small = 快速通道（≤small_lane_items 条）；big = 走大批量队列。
+            "lane": lane,
         }
         with self.changed:
             if sum(1 for item in self.jobs.values() if item.get("status") == "queued") >= 50:
@@ -133,32 +138,79 @@ class JobManager:
             self.changed.notify_all()
         return self.public(job)
 
+    @staticmethod
+    def _lane(job: dict) -> str:
+        """small = 快速通道（小批量）；big = 大批量。老 job 没这个字段，按 big 处理。"""
+        return "small" if str(job.get("lane") or "") == "small" else "big"
+
+    def _active_counts(self) -> tuple[dict[str, int], dict[str, int]]:
+        """分别统计大批量/小批量在各账户下的在跑 job 数，互不占用额度。"""
+        big: dict[str, int] = {}
+        small: dict[str, int] = {}
+        for item in self.active.values():
+            owner = str(item.get("owner") or "")
+            if self._lane(item) == "small":
+                small[owner] = small.get(owner, 0) + 1
+            else:
+                big[owner] = big.get(owner, 0) + 1
+        return big, small
+
+    @staticmethod
+    def _lane_allowed(lane: str, owner: str,
+                      big_owner: dict[str, int], small_owner: dict[str, int],
+                      big_n: int, small_n: int,
+                      max_big: int, max_small: int, per_user_big: int,
+                      per_user_small: int = 1) -> bool:
+        """两条通道各自独立计数：小批量不占大批量的 job 槽位与每用户额度。"""
+        if lane == "small":
+            return small_n < max_small and small_owner.get(owner, 0) < per_user_small
+        return big_n < max_big and big_owner.get(owner, 0) < per_user_big
+
     def _dispatch(self) -> None:
-        max_active = self.settings.max_active_jobs
+        max_big = self.settings.max_active_jobs
+        max_small = self.settings.max_active_small_jobs
+        per_user_big = self.settings.max_active_per_user
         while not self.stop_event.is_set():
             with self.changed:
-                self.changed.wait_for(lambda: self.stop_event.is_set() or self._has_dispatchable(max_active), timeout=1.0)
+                self.changed.wait_for(
+                    lambda: self.stop_event.is_set()
+                    or self._has_dispatchable(max_big, max_small, per_user_big), timeout=1.0)
                 if self.stop_event.is_set():
                     return
-                active_owners = {item["owner"] for item in self.active.values()}
-                queued = sorted((j for j in self.jobs.values() if j.get("status") == "queued"),
-                                key=lambda j: j.get("created_at", 0))
+                big_owner, small_owner = self._active_counts()
+                big_n, small_n = sum(big_owner.values()), sum(small_owner.values())
+                # 小批量优先：即使它比大批量晚提交，也先放行。
+                queued = sorted(
+                    (j for j in self.jobs.values() if j.get("status") == "queued"),
+                    key=lambda j: (self._lane(j) != "small", j.get("created_at", 0)))
                 for job in queued:
-                    if len(self.active) >= max_active:
-                        break
-                    if job["owner"] in active_owners:
+                    lane = self._lane(job)
+                    owner = str(job.get("owner") or "")
+                    if not self._lane_allowed(lane, owner, big_owner, small_owner,
+                                              big_n, small_n, max_big, max_small, per_user_big):
                         continue
-                    slot = {"owner": job["owner"], "runner": None}
-                    self.active[job["id"]] = slot
-                    active_owners.add(job["owner"])
+                    self.active[job["id"]] = {"owner": owner, "lane": lane, "runner": None}
+                    if lane == "small":
+                        small_owner[owner] = small_owner.get(owner, 0) + 1
+                        small_n += 1
+                    else:
+                        big_owner[owner] = big_owner.get(owner, 0) + 1
+                        big_n += 1
                     threading.Thread(target=self._run_job, args=(job["id"],),
                                      name=f"web-job-{job['id']}", daemon=True).start()
 
-    def _has_dispatchable(self, max_active: int) -> bool:
-        if len(self.active) >= max_active:
-            return False
-        owners = {item["owner"] for item in self.active.values()}
-        return any(j.get("status") == "queued" and j.get("owner") not in owners for j in self.jobs.values())
+    def _has_dispatchable(self, max_big: int, max_small: int, per_user_big: int) -> bool:
+        big_owner, small_owner = self._active_counts()
+        big_n, small_n = sum(big_owner.values()), sum(small_owner.values())
+        for job in self.jobs.values():
+            if job.get("status") != "queued":
+                continue
+            lane = self._lane(job)
+            owner = str(job.get("owner") or "")
+            if self._lane_allowed(lane, owner, big_owner, small_owner,
+                                  big_n, small_n, max_big, max_small, per_user_big):
+                return True
+        return False
 
     def _append_log(self, job_id: str, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -220,8 +272,11 @@ class JobManager:
                 expect_seconds=float(job["duration"]) if job["duration"] > 0 else 0,
                 storage=output_store, template_storage=template_store,
                 source_prefix=str(cfg.get("COS_SOURCE_PREFIX") or ""),
-                price_per_second=cfg.get("WAN_PRICE_PER_SECOND") or {},
-                inflight_semaphore=self.inflight,
+                # 单价必须带兜底：引擎不兜底，传全 null 会让每条记录的费用变成 None。
+                price_per_second=self.settings.price_map(),
+                # 快速通道用自己的在飞池，3 条小任务不会被大批量的几十条挡住。
+                inflight_semaphore=(self.small_inflight if job.get("lane") == "small"
+                                    else self.inflight),
             )
             runner = BatchRunner(spec, on_event=lambda e: self._on_event(job_id, e),
                                  log=lambda m: self._append_log(job_id, m))
@@ -307,18 +362,193 @@ class JobManager:
             job = self.jobs.get(job_id)
             return self.public(job) if job else None
 
-    def list_for(self, username: str, admin: bool = False) -> list[dict]:
+    def list_for(self, username: str, admin: bool = False, owner: str = "") -> list[dict]:
+        """owner 只对管理员生效：按账户筛选，不传则沿用原口径（mine / all）。"""
+        filter_owner = str(owner or "") if admin else ""
         with self.lock:
-            items = [j for j in self.jobs.values() if admin or j.get("owner") == username]
+            items = [j for j in self.jobs.values()
+                     if (admin or j.get("owner") == username)
+                     and (not filter_owner or j.get("owner") == filter_owner)]
             items.sort(key=lambda j: j.get("created_at", 0), reverse=True)
             return [self.public(j) for j in items]
+
+    def _record_cost(self, rec: dict, job: dict) -> tuple[float, str]:
+        """单条记录的费用：优先用生成时落下的金额，否则按当前单价回算。
+
+        历史任务（单价还是 null 时生成的）记录里 estimated_cost 是 None；不回算的话，
+        管理端的"花了多少钱"对老数据全是空白。回算只发生在读取时，不改任务文件，
+        并标记 cost_source=derived，便于区分"实测落账"与"事后估算"。
+        """
+        raw = rec.get("estimated_cost")
+        if raw not in (None, ""):
+            try:
+                return float(raw), "record"
+            except (TypeError, ValueError):
+                pass
+        try:
+            seconds = float(rec.get("billable_seconds") or 0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        price, _source = self.settings.unit_price(str(job.get("resolution") or ""))
+        if seconds > 0 and price:
+            return seconds * float(price), "derived"
+        return 0.0, "missing"
+
+    def usage_for(self, start: float | None = None, end: float | None = None,
+                  owner: str = "") -> dict:
+        """按账户汇总工作量：任务数、条数、成功/失败、计费秒、预估金额、最近活跃。
+
+        口径说明：
+          · 条数以 job.records 为准（进行中的 job 也有记录）；
+          · 金额是「计费秒 × 单价」的估算，真实账单以阿里云为准；
+          · 含零使用量的账户，方便管理员看出"谁还没开始用"。
+        """
+        failed_states = {"failed", "invalid", "expired", "canceled"}
+
+        def blank(name: str, role: str = "user", enabled: bool = True) -> dict:
+            return {"owner": name, "role": role, "enabled": enabled,
+                    "jobs": 0, "items": 0, "success": 0, "failed": 0, "unfinished": 0,
+                    "billable_seconds": 0.0, "estimated_cost": 0.0, "last_at": 0.0}
+
+        rows: dict[str, dict] = {}
+        for name, record in (self.settings.users or {}).items():
+            rows[str(name)] = blank(str(name), str(record.get("role", "user")),
+                                    bool(record.get("enabled", True)))
+        with self.lock:
+            for job in self.jobs.values():
+                name = str(job.get("owner") or "未知")
+                if owner and name != owner:
+                    continue
+                created = float(job.get("created_at") or 0)
+                if start and created < start:
+                    continue
+                if end and created >= end:
+                    continue
+                row = rows.setdefault(name, blank(name))
+                row["jobs"] += 1
+                if job.get("status") in {"queued", "running"}:
+                    row["unfinished"] += 1
+                for rec in job.get("records") or []:
+                    status = str(rec.get("status") or "")
+                    row["items"] += 1
+                    if status == "success":
+                        row["success"] += 1
+                    elif status in failed_states:
+                        row["failed"] += 1
+                    elif status == "running":
+                        row["unfinished"] += 1
+                    try:
+                        row["billable_seconds"] += float(rec.get("billable_seconds") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    cost_value, _cost_source = self._record_cost(rec, job)
+                    row["estimated_cost"] += cost_value
+                row["last_at"] = max(row["last_at"], created,
+                                     float(job.get("finished_at") or 0))
+
+        for row in rows.values():
+            row["success_rate"] = round(row["success"] / row["items"], 4) if row["items"] else 0.0
+            row["billable_seconds"] = round(row["billable_seconds"], 2)
+            row["estimated_cost"] = round(row["estimated_cost"], 2)
+
+        accounts = sorted(rows.values(),
+                          key=lambda r: (-r["estimated_cost"], -r["items"], r["owner"]))
+        totals = {key: 0 for key in ("jobs", "items", "success", "failed", "unfinished")}
+        for row in accounts:
+            for key in totals:
+                totals[key] += int(row[key])
+        totals["billable_seconds"] = round(sum(row["billable_seconds"] for row in accounts), 2)
+        totals["estimated_cost"] = round(sum(row["estimated_cost"] for row in accounts), 2)
+        totals["accounts"] = len(accounts)
+        return {"accounts": accounts, "totals": totals}
+
+    def work_for(self, owner: str, start: float | None = None, end: float | None = None,
+                 status: str = "", offset: int = 0, limit: int = 100,
+                 page: bool = True) -> dict:
+        """某账户跑了哪些视频、各花了多少：按「记录」逐条展开，供管理端对账。
+
+        · 一条记录 = 一个模板（视频）的一次生成，带模板 ID 与名称；
+        · 金额与计费秒来自该记录的 usage，不是事后估算；
+        · total_cost / total_billable_seconds 是**筛选结果全量**的合计，不是当前页。
+        """
+        offset = max(0, int(offset or 0))
+        limit = max(1, min(500, int(limit or 100)))
+        target = str(owner or "")
+        rows: list[dict] = []
+        with self.lock:
+            for job in self.jobs.values():
+                if str(job.get("owner") or "") != target:
+                    continue
+                created = float(job.get("created_at") or 0)
+                if start and created < start:
+                    continue
+                if end and created >= end:
+                    continue
+                names = {str(tpl.get("id")): str(tpl.get("name") or "")
+                         for tpl in job.get("templates") or [] if isinstance(tpl, dict)}
+                for rec in job.get("records") or []:
+                    rec_status = str(rec.get("status") or "")
+                    if status and rec_status != status:
+                        continue
+                    template_id = str(rec.get("id"))
+                    cost_value, cost_source = self._record_cost(rec, job)
+                    rows.append({
+                        "created_at": created,
+                        "finished_at": job.get("finished_at"),
+                        "job_id": str(job.get("id")),
+                        "batch_id": str(job.get("batch_id") or ""),
+                        "batch_ref": str(job.get("batch_ref") or ""),
+                        "template_id": template_id,
+                        "template_name": names.get(template_id, ""),
+                        "status": rec_status,
+                        "seconds": rec.get("seconds"),
+                        "billable_seconds": rec.get("billable_seconds"),
+                        "estimated_cost": round(cost_value, 4) if cost_source != "missing" else None,
+                        "cost_source": cost_source,
+                        "resolution": job.get("resolution"),
+                        "duration": job.get("duration"),
+                    })
+        rows.sort(key=lambda row: (row["created_at"], row["template_id"]), reverse=True)
+        billable = 0.0
+        cost = 0.0
+        success = failed = unfinished = 0
+        for row in rows:
+            status = row.get("status")
+            if status == "success":
+                success += 1
+            elif status in {"failed", "invalid", "expired", "canceled"}:
+                failed += 1
+            elif status == "running":
+                unfinished += 1
+            try:
+                billable += float(row.get("billable_seconds") or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                cost += float(row.get("estimated_cost") or 0)
+            except (TypeError, ValueError):
+                pass
+        return {
+            "owner": target,
+            "total": len(rows),
+            "success": success,
+            "failed": failed,
+            "unfinished": unfinished,
+            "offset": offset,
+            "limit": limit,
+            # page=False 供 CSV 导出：一次给全量，不受分页上限影响。
+            "items": rows[offset:offset + limit] if page else rows,
+            "total_billable_seconds": round(billable, 2),
+            "total_cost": round(cost, 2),
+        }
 
     def public(self, job: dict) -> dict:
         with self.lock:
             safe = {k: job.get(k) for k in (
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
                 "batch_id", "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
-                "duration", "total", "done", "message", "log_tail", "cancel_requested")}
+                "duration", "total", "done", "message", "log_tail", "cancel_requested",
+                "lane")}
             safe["batch_ref"] = str(safe.get("batch_ref") or "")
             if safe.get("message"):
                 safe["message"] = _redact(safe["message"])
@@ -366,5 +596,6 @@ class JobManager:
 
 
 def app_api_key(cfg: dict) -> str:
+    """全站唯一的 API Key：从 config.json 读取，所有账户共用同一把。"""
     from app.config import active_api_key
     return active_api_key(cfg)

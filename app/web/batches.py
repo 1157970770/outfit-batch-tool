@@ -660,11 +660,14 @@ class BatchManager:
             return {"id": target}
 
     # ------------------------------------------------------------------ #6 列表
-    def list_for(self, user: dict, all_users: bool = False) -> list[dict]:
+    def list_for(self, user: dict, all_users: bool = False, owner: str = "") -> list[dict]:
+        filter_owner = str(owner or "") if all_users else ""
         with self.mutex:
             rows = []
             for batch in self.batches.values():
                 if not all_users and batch.get("owner") != user.get("username"):
+                    continue
+                if filter_owner and batch.get("owner") != filter_owner:
                     continue
                 self._reconcile(batch)
                 rows.append(self.public(batch))
@@ -712,24 +715,29 @@ class BatchManager:
         return zip_path
 
     # ------------------------------------------------------------------ #11 历史分组
-    def history_groups(self, user: dict, all_users: bool = False) -> list[dict]:
+    def history_groups(self, user: dict, all_users: bool = False, owner: str = "") -> list[dict]:
         """按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务 + 批次已删除）统一进 __ungrouped__。
 
         归属只认「批次文件还在不在」：job.batch_ref 不回写（历史数据只读），批次一旦被删除，
         它名下的 job 会自动落回 __ungrouped__，不会留下一个点不开的空分组。
+        owner 仅对管理员生效：只看某个账户的历史。
         """
+        filter_owner = str(owner or "") if all_users else ""
         with self.mutex:
             groups: dict[str, dict] = {}
             for job in self.jobs.jobs.values() if self.jobs else ():
                 if not all_users and job.get("owner") != user.get("username"):
                     continue
+                if filter_owner and job.get("owner") != filter_owner:
+                    continue
                 ref = str(job.get("batch_ref") or "")
                 key = ref if ref and ref in self.batches else UNGROUPED_KEY
                 slot = groups.setdefault(key, {
                     "key": key, "job_count": 0, "total": 0, "success": 0, "failed": 0,
-                    "first_at": None, "last_at": None,
+                    "first_at": None, "last_at": None, "owners": set(),
                 })
                 slot["job_count"] += 1
+                slot["owners"].add(str(job.get("owner") or ""))
                 created = job.get("created_at") or 0
                 stamp = job.get("finished_at") or created
                 slot["first_at"] = created if slot["first_at"] is None else min(slot["first_at"], created)
@@ -745,10 +753,14 @@ class BatchManager:
             for key, slot in groups.items():
                 batch = self.batches.get(key) if key != UNGROUPED_KEY else None
                 batch_no = str((batch or {}).get("batch_no") or "")
+                # 管理员看全部时，分组卡片要能看出这批是谁跑的；多人混在一起就标"多人"。
+                owners = {name for name in slot.get("owners", set()) if name}
+                owner_label = next(iter(owners)) if len(owners) == 1 else ("多人" if owners else "")
                 rows.append({
                     "key": key,
                     "batch_no": batch_no if key != UNGROUPED_KEY else "未分组",
                     "is_ungrouped": key == UNGROUPED_KEY,
+                    "owner": owner_label,
                     "job_count": slot["job_count"], "total": slot["total"],
                     "success": slot["success"], "failed": slot["failed"],
                     "first_at": slot["first_at"], "last_at": slot["last_at"] or 0,
@@ -756,9 +768,11 @@ class BatchManager:
             rows.sort(key=lambda row: (row["is_ungrouped"], -(row["last_at"] or 0)))
             return rows
 
-    def history_items(self, key: str, user: dict, offset: int = 0, limit: int = 200) -> dict:
+    def history_items(self, key: str, user: dict, offset: int = 0, limit: int = 200,
+                      owner: str = "") -> dict:
         offset = max(0, int(offset or 0))
         limit = max(1, min(500, int(limit or 200)))
+        owner = str(owner or "") if user.get("role") == "admin" else ""
         with self.mutex:
             if key != UNGROUPED_KEY:
                 batch = self.batches.get(str(key))
@@ -779,8 +793,10 @@ class BatchManager:
                 jobs = mine
             rows = []
             for job in sorted(jobs, key=lambda item: item.get("created_at") or 0):
-                owner = job.get("owner")
-                if user.get("role") != "admin" and owner != user.get("username"):
+                job_owner = job.get("owner")
+                if user.get("role") != "admin" and job_owner != user.get("username"):
+                    continue
+                if owner and job_owner != owner:
                     continue
                 names = {str(tpl.get("id")): str(tpl.get("name") or "")
                          for tpl in job.get("templates") or [] if isinstance(tpl, dict)}
