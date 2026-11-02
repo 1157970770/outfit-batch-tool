@@ -5,16 +5,17 @@
  */
 
 /* ---------- 步骤条 ---------- */
-.batch-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;list-style:none;margin:0 0 18px;padding:0}
-.batch-step{display:flex;align-items:center;gap:9px;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--paper);color:var(--muted);font-size:12px}
+.batch-steps{display:grid;grid-template-columns:repeat(4,minmax(0,220px));justify-content:start;gap:8px;list-style:none;margin:0 0 18px;padding:0}
+.batch-step{display:flex;align-items:center;gap:9px;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--muted);font-size:12px}
 .batch-step-no{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue);font-size:11px;font-weight:800}
 .batch-step b{display:block;font-size:13px;color:var(--ink)}
 .batch-step small{display:block;font-size:11px;color:var(--muted);margin-top:1px}
-.batch-step.is-active{border-color:color-mix(in srgb,var(--blue) 55%,white);background:color-mix(in srgb,var(--blue) 6%,white);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 12%,transparent)}
+.batch-step.is-active{border-color:color-mix(in srgb,var(--blue) 55%,white);background:color-mix(in srgb,var(--blue) 6%,white);box-shadow:none}
 .batch-step.is-done .batch-step-no{background:var(--green);color:var(--paper)}
 
 /* ---------- 批次列表 ---------- */
 .batch-list{display:grid;gap:11px}
+.batch-list > .empty{max-width:600px}
 .batch-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;margin:0;padding:15px 17px}
 .batch-card-main{min-width:0}
 .batch-card-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -115,8 +116,8 @@
 .batch-cand-pager .quiet{min-height:28px;padding:3px 12px;font-size:12px}
 .batch-page-info{min-width:0;font-size:12px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .batch-cand-pager .quiet:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-.batch-preview{position:sticky;top:84px;align-self:start;display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--bg) 55%,white)}
-.batch-preview .template-preview,.batch-preview-video{display:block;width:100%;height:clamp(320px,72vh,760px);max-height:none;margin:0 auto;aspect-ratio:auto;background:color-mix(in srgb,var(--ink) 7%,var(--paper));border-radius:10px;object-fit:contain}
+.batch-preview{position:sticky;top:84px;align-self:start;display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--bg) 55%,white)}
+.batch-preview .template-preview,.batch-preview-video{display:block;width:100%;height:clamp(320px,72vh,760px);max-height:none;margin:0 auto;aspect-ratio:auto;background:color-mix(in srgb,var(--ink) 7%,var(--paper));border-radius:6px;object-fit:contain}
 .batch-preview-video.is-empty{background:color-mix(in srgb,var(--ink) 8%,white)}
 .batch-preview-name{font-size:12px;line-height:1.4;margin:0;overflow-wrap:anywhere}
 .batch-preview-note{font-size:11px;line-height:1.45;margin:0;color:var(--amber)}
@@ -131,7 +132,7 @@
 .batch-lock-info{display:flex;align-items:baseline;gap:8px;min-width:0}
 .batch-lock-bar b{flex:none;font-size:13px;white-space:nowrap}
 .batch-lock-info p{min-width:0;margin:0;font-size:11px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.batch-lock-bar .primary{flex:none;min-height:32px;padding:5px 20px;font-size:13px;border-radius:9px}
+.batch-lock-bar .primary{flex:none;min-height:32px;padding:5px 20px;font-size:13px;border-radius:6px}
 .batch-lock-bar .error{flex:1 1 100%;margin:0;font-size:11px}
 @media(min-width:901px){
   /* 右列（播放器）是两栏里的**高个子**，它决定整行高度，候选区再拉伸贴齐它。
@@ -158,14 +159,14 @@
 /* 定妆图一格放大成竖图卡：minmax 拉宽到 260px 保证缩略图有地方放 */
 .batch-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
 .batch-summary-grid .batch-summary-image{grid-column:span 1;min-width:220px}
-.batch-summary-cell{min-width:0;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-summary-cell{min-width:0;padding:10px 12px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
 .batch-summary-cell small{display:block;font-size:11px;color:var(--muted)}
 .batch-summary-cell b{display:block;margin-top:3px;font-size:13px;font-weight:700;overflow-wrap:anywhere}
 .batch-summary-hint{font-size:12px;margin:12px 0 0}
 .batch-image-link{display:block;margin-top:3px;line-height:0}
 .batch-image-thumb{width:100%;max-width:150px;max-height:200px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
 /* 提示词块：完整展示，编辑时换成 textarea */
-.batch-prompt-block{margin-top:10px;padding:12px 14px;border-radius:10px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-prompt-block{margin-top:10px;padding:12px 14px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
 .batch-prompt-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between}
 .batch-prompt-head small{font-size:11px;color:var(--muted)}
 .batch-prompt-text{margin:8px 0 0;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit}
@@ -244,15 +245,13 @@
 .history-group-foot{font-size:12px;margin:10px 0 0}
 
 /* ---------- 宽屏工作区：加宽 + 压缩页头，保证候选一屏可见 ----------
-   .hero 是营销横幅，打开批次后它占掉的 130px 正好是 3 行候选，所以在「已进入某个批次」时
-   只对大批量页隐藏；批次列表页仍保留（tab 和 h2 已足够表明位置）。 */
+   2026-11 改版去掉了页面顶部的营销横幅，页头只剩标题，这一页因此多出约 130px 给候选区。 */
 :root{--batch-workspace-w:1680px}
 /* 只有大批量页收起本机提示；底部留白与 JS 的 CAND_BOTTOM_GAP 同为 12px。 */
 .shell:has(#batch-view.active-view){margin-bottom:12px}
 .shell:has(#batch-view.active-view) > footer{display:none}
 @media(min-width:1024px){
   .shell:has(#batch-view.active-view){width:min(100% - 36px,var(--batch-workspace-w));margin-top:22px}
-  .shell:has(#batch-view.active-view):has(#batch-work:not(.hidden)) .hero{display:none}
   .shell:has(#batch-view.active-view) .tabs{margin-bottom:10px}
   body:has(#batch-view.active-view) .topbar{padding:0 max(18px,calc((100vw - var(--batch-workspace-w)) / 2))}
   #batch-view .section-head{margin-bottom:10px}

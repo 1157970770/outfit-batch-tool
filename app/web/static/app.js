@@ -14,7 +14,7 @@
   }
   function toast(text) { const el = $('toast'); el.textContent = text; el.classList.remove('hidden'); clearTimeout(el._timer); el._timer = setTimeout(() => el.classList.add('hidden'), 3200); }
   function showLogin() { $('app-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); state.user = null; state.showAll = false; clearInterval(state.timer); }
-  function showApp() { $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); }
+  function showApp() { $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
   // 管理员"查看全部"时的账户维度：scope=all 再加 owner 过滤，普通账号永远只看自己。
   function scopeQuery() {
     if (!(state.user && state.user.role === 'admin' && state.showAll)) return 'mine';
@@ -34,7 +34,26 @@
     select.value = current;
     if (select.value !== current) state.ownerFilter = '';
   }
-  function switchView(id) { document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === id)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active-view', v.id === id)); if (id === 'history-view') refreshJobs(); if (id === 'admin-view') refreshAdmin(); if (id === 'batch-view' && window.BatchUI) window.BatchUI.enter(); }
+  const VIEW_KEY = 'outfit.view';
+  function switchView(id) {
+    document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === id));
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('active-view', v.id === id));
+    try { localStorage.setItem(VIEW_KEY, id); } catch (_) { /* 隐私模式下存不了，忽略 */ }
+    if (id === 'history-view') refreshJobs();
+    if (id === 'admin-view') refreshAdmin();
+    if (id === 'batch-view' && window.BatchUI) window.BatchUI.enter();
+  }
+  // 回到上次看的页：只在 create/history/admin 之间恢复。
+  // 批次页有自己的状态机（进入即加载批次），刷新时自动跳过去容易让人以为"上次的任务还在"。
+  function restoreView() {
+    let saved = '';
+    try { saved = localStorage.getItem(VIEW_KEY) || ''; } catch (_) { return; }
+    if (!['create-view', 'history-view', 'admin-view'].includes(saved)) return;
+    const tab = document.querySelector(`.tab[data-view="${saved}"]`);
+    if (!tab || tab.classList.contains('hidden')) return;
+    if (!document.getElementById(saved)) return;
+    switchView(saved);
+  }
   document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
 
   $('login-form').addEventListener('submit', async (event) => {
@@ -273,7 +292,11 @@
   function renderDetail(job) {
     state.detailStatus = job.status;
     const root = $('job-detail'); root.classList.remove('hidden'); root.replaceChildren();
-    const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.batch_id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = job.message || statusText[job.status]; left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status; head.append(left, badge); root.append(head);
+    const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.batch_id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = job.message || statusText[job.status]; left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status;
+    const side = document.createElement('div'); side.className = 'job-actions';
+    const close = document.createElement('button'); close.className = 'quiet btn-sm'; close.type = 'button'; close.textContent = '关闭';
+    close.addEventListener('click', () => { root.classList.add('hidden'); state.selectedJob = null; state.detailStatus = null; });
+    side.append(badge, close); head.append(left, side); root.append(head);
     const meta = document.createElement('p'); meta.className = 'job-meta'; meta.textContent = `${job.done || 0} / ${job.total || 0} 条完成 · ${job.resolution} · ${job.duration === -1 ? '跟随场景时长' : `${job.duration} 秒`}${job.lane === 'small' ? ' · 快速通道' : ''}`; root.append(meta);
     if (job.status === 'succeeded' || job.status === 'partial') { const dl = document.createElement('a'); dl.className = 'link-btn'; dl.href = job.download_all; dl.textContent = '下载已完成视频和报告（ZIP）'; root.append(dl); const first = (job.records || []).find(r => r.status === 'success' && r.download_url); if (first) { const player = document.createElement('video'); player.controls = true; player.preload = 'metadata'; player.className = 'preview-video'; player.src = first.download_url; root.append(player); } }
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled'].includes(r.status)).length;
@@ -402,6 +425,16 @@
   });
   // 供 batch.js 复用：同一套 api 封装、共享 state、同一个详情面板。
   window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText };
+  // Esc：先关任务详情，再关账户明细，符合"从最上层开始退"的直觉。
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    const detail = $('job-detail');
+    if (detail && !detail.classList.contains('hidden')) {
+      detail.classList.add('hidden'); state.selectedJob = null; state.detailStatus = null; return;
+    }
+    const account = $('account-detail');
+    if (account && !account.classList.contains('hidden')) $('account-close').click();
+  });
   async function init() { try { const data = await api('/api/me'); state.user = data.user; await bootstrap(); } catch (_) { showLogin(); } }
   init();
 })();

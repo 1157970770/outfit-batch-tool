@@ -138,5 +138,6 @@ python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分
 | [docs/project-summary-20261102.md](docs/project-summary-20261102.md) | v0.6.0 现状、参数表、运维与风险 |
 | [docs/account-usage-and-quota.md](docs/account-usage-and-quota.md) | 单 Key 共用与账户用量监控口径 |
 | [docs/web-lan.md](docs/web-lan.md) | 局域网部署与访问 |
+| [docs/ui-rollback.md](docs/ui-rollback.md) | 界面改版的基线与回滚步骤 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
 | [README.md](README.md) | 对外说明与快速开始 |
