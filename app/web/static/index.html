@@ -41,6 +41,7 @@
         <button class="tab" data-view="batch-view">大批量生产</button>
         <button class="tab" data-view="history-view">历史任务</button>
         <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
+        <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
 
       <div id="notice" class="notice hidden"></div>
@@ -100,7 +101,7 @@
           </article>
 
           <article class="panel panel-prompt">
-            <div class="panel-head"><span class="step">3</span><div><b>提示词</b><small>选模板，可按需要微调</small></div></div>
+            <div class="panel-head"><span class="step">3</span><div><b>提示词</b><small>选模板，可按需要微调</small></div><button id="copy-prompt" class="quiet btn-sm" type="button" title="复制到剪贴板，方便粘贴到 RunningHub">复制提示词</button></div>
             <label class="field">提示词模板<select id="prompt-select"></select></label>
             <label class="field prompt-field">本次提示词<textarea id="prompt-body" maxlength="4000" spellcheck="false"></textarea></label>
             <div class="prompt-meta"><span>修改只影响本次任务</span><span id="prompt-length">0 / 4000</span></div>

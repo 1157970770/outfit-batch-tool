@@ -36,7 +36,7 @@
   }
   const VIEW_KEY = 'outfit.view';
   function switchView(id) {
-    document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === id));
+    document.querySelectorAll('.tab[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === id));
     document.querySelectorAll('.view').forEach(v => v.classList.toggle('active-view', v.id === id));
     try { localStorage.setItem(VIEW_KEY, id); } catch (_) { /* 隐私模式下存不了，忽略 */ }
     if (id === 'history-view') refreshJobs();
@@ -54,7 +54,7 @@
     if (!document.getElementById(saved)) return;
     switchView(saved);
   }
-  document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
+  document.querySelectorAll('.tab[data-view]').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
 
   $('login-form').addEventListener('submit', async (event) => {
     event.preventDefault(); $('login-error').classList.add('hidden');
@@ -247,6 +247,30 @@
     const url = URL.createObjectURL(file); $('image-preview').src = url; $('image-preview').classList.remove('hidden'); $('drop-copy').classList.add('hidden');
     $('image-info').textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB`;
   }
+  // 复制提示词：http 局域网不是安全上下文，navigator.clipboard 可能不可用，退回到 execCommand。
+  $('copy-prompt').addEventListener('click', async () => {
+    const text = $('prompt-body').value.trim();
+    if (!text) { toast('提示词是空的。'); return; }
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+        document.body.append(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        if (!copied) throw new Error('浏览器不允许复制');
+      }
+      toast('提示词已复制，可直接粘贴到 RunningHub。');
+    } catch (err) {
+      toast(`复制失败：${err.message}`);
+    }
+  });
+
   $('submit-btn').addEventListener('click', async () => {
     const file = fileInput.files[0]; if (!file) return showCreateError('请先上传服装图片。');
     const selection = document.querySelector('input[name="selection"]:checked').value; const count = selectedCount();

@@ -260,6 +260,10 @@ textarea {
 .tab:hover { color: var(--ink); }
 .tab.active { color: var(--ink); border-bottom-color: var(--ink); }
 
+/* 外链标签：打开 RunningHub 等站外工具，不参与视图切换 */
+.tab-link { display: inline-flex; align-items: center; gap: 4px; text-decoration: none; }
+.tab-link:hover { border-bottom-color: var(--line-strong); }
+
 .view { display: none; }
 .view.active-view { display: block; }
 
@@ -376,6 +380,7 @@ textarea {
 }
 .panel-head b { display: block; font-size: 13.5px; font-weight: 650; }
 .panel-head small { display: block; margin-top: 1px; color: var(--muted); font-size: 11.5px; }
+.panel-head .quiet { flex: none; margin-left: auto; }
 
 .panel .field { margin: 9px 0; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
