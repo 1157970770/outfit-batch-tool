@@ -8,10 +8,10 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css">
-  <link rel="stylesheet" href="/static/tag.css?v=20261103f">
+  <link rel="stylesheet" href="/static/tag.css?v=20261103g">
   <script defer src="/static/app.js"></script>
   <script defer src="/static/batch.js"></script>
-  <script defer src="/static/tag.js?v=20261103f"></script>
+  <script defer src="/static/tag.js?v=20261103g"></script>
 </head>
 <body>
   <main id="login-view" class="login-wrap">
@@ -398,6 +398,11 @@
                 </label>
               </div>
               <div id="tag-editor-groups" class="tag-editor-groups"></div>
+              <div class="tag-editor-rating">
+                <b class="tag-editor-rating-label">评分</b>
+                <span id="tag-editor-rating" class="tag-editor-rating-stars"></span>
+                <span id="tag-editor-rating-note" class="muted"></span>
+              </div>
               <div class="tag-editor-foot">
                 <button id="tag-save" class="primary btn-sm" type="button">保存标签</button>
                 <button id="tag-clear-tags" class="quiet btn-sm" type="button">取消勾选</button>

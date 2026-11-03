@@ -69,7 +69,7 @@
         starEl.title = rating === star ? `清除评分（${video.id}）` : `评为 ${star} 星（${video.id}）`;
         starEl.addEventListener('click', (event) => {
           event.stopPropagation();  // 别触发行点击 → 预览
-          rateVideo(video, rating === star ? 0 : star);
+          rateVideos([video], rating === star ? 0 : star);
         });
       }
       cell.append(starEl);
@@ -77,12 +77,12 @@
     return cell;
   }
 
-  async function rateVideo(video, value) {
+  async function rateVideos(videos, value) {
     const table = $('tag-table');
     const top = table.scrollTop;  // 保存后整表重绘，把滚动位置还回去
-    const data = await post('/api/tags/videos/rating', { ids: [video.id], rating: value });
+    const data = await post('/api/tags/videos/rating', { ids: videos.map(v => v.id), rating: value });
     table.scrollTop = top;
-    if (data) toast(value ? `${video.id} 已评 ${value} 星` : `${video.id} 已清除评分`);
+    if (data) toast(value ? `已评 ${value} 星（${videos.length} 条）` : `已清除评分（${videos.length} 条）`);
   }
 
   function activeLibrary() {
@@ -558,6 +558,8 @@
       root.append(group);
     }
 
+    renderEditorRating(rows);
+
     const allDeprecated = rows.every(row => row.deprecated);
     const many = rows.length > 1;
     const deprecateBtn = $('tag-deprecate-btn');
@@ -569,8 +571,37 @@
     updateEditorHint(rows);
   }
 
-  function updateEditorHint(rows) {
-    const hint = $('tag-editor-hint');
+  /* 编辑面板的大号打分组件：与行内小星星同一套接口，单条/批量都作用到当前编辑对象 */
+  function renderEditorRating(rows) {
+    const box = $('tag-editor-rating');
+    const note = $('tag-editor-rating-note');
+    box.replaceChildren();
+    if (!rows || !rows.length) { if (note) note.textContent = ''; return; }
+    const ratings = rows.map(row => Number(row.rating || 0));
+    const uniform = ratings.every(r => r === ratings[0]) ? ratings[0] : -1;
+    if (uniform < 0) { if (note) note.textContent = '选中视频评分不一致'; }
+    else if (note) note.textContent = uniform ? `当前 ${uniform} 星` : '未打分';
+    for (let star = 1; star <= RATING_MAX; star++) {
+      const starEl = document.createElement('button');
+      starEl.type = 'button';
+      starEl.textContent = '★';
+      starEl.className = 'rating-star rating-star-lg' + (uniform >= star ? ' is-on' : '');
+      if (star < RATING_MIN) {
+        starEl.disabled = true;
+        starEl.classList.add('is-locked');
+        starEl.title = '评分从 3 星起';
+      } else {
+        starEl.title = uniform === star ? `清除评分（${rows.length} 条）` : `评为 ${star} 星（${rows.length} 条）`;
+        starEl.addEventListener('click', (event) => {
+          event.stopPropagation();
+          rateVideos(rows, uniform === star ? 0 : star);
+        });
+      }
+      box.append(starEl);
+    }
+  }
+
+  function updateEditorHint(rows) {    const hint = $('tag-editor-hint');
     const chosen = [...state.pending];
     if (!rows || !rows.length) { hint.textContent = ''; return; }
     if (state.mode === 'replace') {

@@ -144,6 +144,22 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .rating-star:hover:not(:disabled) { transform: scale(1.2); }
 .rating-star:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; border-radius: 2px; }
 
+/* 编辑面板的大号打分组件 */
+.tag-editor-rating {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fafbfd;
+  margin-top: 10px;
+}
+.tag-editor-rating-label { font-size: 13px; color: var(--ink-2); }
+.tag-editor-rating-stars { display: flex; align-items: center; gap: 6px; }
+.tag-editor-rating .rating-star-lg { font-size: 30px; }
+.tag-editor-rating .muted { font-size: 12px; }
+
 /* 行内「弃 / 恢」：和右下角大按钮同一套语义，只是省去先选中那一步 */
 .tag-row-act { display: flex; align-items: center; justify-content: center; }
 .tag-mini {
