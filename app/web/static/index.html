@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="/static/batch.css">
   <link rel="stylesheet" href="/static/tag.css?v=20261103j">
   <script defer src="/static/app.js"></script>
-  <script defer src="/static/batch.js"></script>
+  <script defer src="/static/batch.js?v=20261103j"></script>
   <script defer src="/static/tag.js?v=20261103j"></script>
 </head>
 <body>
@@ -201,7 +201,7 @@
               <div id="batch-tag-groups" class="tag-filter-groups"></div>
               <div class="tag-filter-footer">
                 <button id="batch-clear-tags" class="quiet" type="button">清除筛选</button>
-                <span class="muted batch-tag-hint">改完标签点工具条的「刷新候选」重新匹配。</span>
+                <span class="muted batch-tag-hint">改完标签筛选会自动重新匹配候选。</span>
               </div>
             </div>
             <div class="batch-cand-toolbar">
@@ -211,7 +211,6 @@
               </div>
               <div class="batch-toolbar-actions">
                 <button id="batch-tag-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="batch-tag-card">标签筛选</button>
-                <button id="batch-candidates-btn" class="quiet" type="button">刷新候选</button>
                 <button id="batch-select-page" class="quiet" type="button">全选本页</button>
                 <button id="batch-invert" class="quiet" type="button">反选本页</button>
                 <button id="batch-select-all" class="quiet" type="button">全选全部 0 条</button>

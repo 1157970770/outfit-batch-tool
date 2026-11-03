@@ -440,7 +440,7 @@
         input.checked = (b.tagFilters[category] || []).includes(tag);
         input.addEventListener('change', () => {
           b.tagFilters = collectBatchTagFilters();
-          $('batch-tag-summary').textContent = '筛选条件已改变，点「刷新候选」重新匹配。';
+          scheduleCandidatesRefresh();
         });
         label.append(input, el('span', null, tag));
         wrap.append(label);
@@ -509,9 +509,9 @@
     const batch = b.current;
     if (!batch || !batch.id) return;
     await refreshStyleUsed(batch);   // 先查该款号已用模板，候选行才能挂「已用」标记
-    const btn = $('batch-candidates-btn');
+    const btn = $('batch-candidates-btn');   // 按钮已移除，保留空值兜底以兼容旧调用点
     b.tagFilters = collectBatchTagFilters();
-    btn.disabled = true; btn.textContent = '正在筛选…';
+    if (btn) { btn.disabled = true; btn.textContent = '正在筛选…'; }
     $('batch-tag-summary').textContent = '正在匹配候选…';
     try {
       const data = await api(`/api/batches/${encodeURIComponent(batch.id)}/candidates`, {
@@ -558,8 +558,15 @@
       showCandNote(err.message);
       toast(err.message);
     } finally {
-      btn.disabled = false; btn.textContent = '刷新候选';
+      if (btn) { btn.disabled = false; btn.textContent = '刷新候选'; }
     }
+  }
+
+  /* 标签筛选改动后自动重匹配：300ms 去抖，连点多个标签只发一次请求 */
+  let candRefreshTimer = null;
+  function scheduleCandidatesRefresh() {
+    clearTimeout(candRefreshTimer);
+    candRefreshTimer = setTimeout(() => { fetchCandidates().catch(() => {}); }, 300);
   }
 
   /* 当前筛选命中的候选（只受标签快筛影响，不受「只看已选」影响）。
@@ -647,7 +654,7 @@
     grid.replaceChildren(fragment);
     if (!visible.length) {
       grid.append(el('div', 'empty batch-cand-empty',
-        b.candidates.length ? '当前过滤条件下没有候选，清掉「只看已选」或标签定位试试。' : '还没有候选，选好标签后点「刷新候选」。'));
+        b.candidates.length ? '当前过滤条件下没有候选，清掉「只看已选」或标签定位试试。' : '还没有候选，选好标签后会自动匹配。'));
     }
     renderCandPager(visible.length, pageCount, start, slice.length, size);
     updateBatchCounts();
@@ -1725,12 +1732,11 @@
       updateBatchPromptCount();
     });
     $('batch-prompt-body').addEventListener('input', updateBatchPromptCount);
-    $('batch-candidates-btn').addEventListener('click', fetchCandidates);
     $('batch-tag-toggle').addEventListener('click', toggleTagPanel);
     $('batch-clear-tags').addEventListener('click', () => {
       document.querySelectorAll('#batch-tag-groups .batch-tag-input').forEach((input) => { input.checked = false; });
       b.tagFilters = {};
-      $('batch-tag-summary').textContent = '已清除筛选，点「刷新候选」重新匹配。';
+      scheduleCandidatesRefresh();
     });
     // 三个全选按钮 —— 已选集合跨页累计，「本页」的改动绝不碰其它页。
     // 全选本页：只加当前页的已就绪候选
