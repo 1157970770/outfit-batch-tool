@@ -311,24 +311,27 @@
     const url = URL.createObjectURL(file); $('image-preview').src = url; $('image-preview').classList.remove('hidden'); $('drop-copy').classList.add('hidden');
     $('image-info').textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB`;
   }
-  // 复制提示词：http 局域网不是安全上下文，navigator.clipboard 可能不可用，退回到 execCommand。
+  // 局域网 http 不是安全上下文，navigator.clipboard 不可用，统一退回 execCommand。
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+    document.body.append(area);
+    area.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } finally { area.remove(); }
+    if (!copied) throw new Error('浏览器不允许复制，请手动选中文本');
+  }
   $('copy-prompt').addEventListener('click', async () => {
     const text = $('prompt-body').value.trim();
     if (!text) { toast('提示词是空的。'); return; }
     try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const area = document.createElement('textarea');
-        area.value = text;
-        area.setAttribute('readonly', '');
-        area.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
-        document.body.append(area);
-        area.select();
-        const copied = document.execCommand('copy');
-        area.remove();
-        if (!copied) throw new Error('浏览器不允许复制');
-      }
+      await copyText(text);
       toast('提示词已复制，可直接粘贴到 RunningHub。');
     } catch (err) {
       toast(`复制失败：${err.message}`);
@@ -694,7 +697,7 @@
   });
   $('archive-copy-btn').addEventListener('click', async () => {
     const text = state.archiveLinks.map(link => `${link.key}\n${link.url}`).join('\n\n');
-    try { await navigator.clipboard.writeText(text); toast(`已复制 ${state.archiveLinks.length} 条链接。`); }
+    try { await copyText(text); toast(`已复制 ${state.archiveLinks.length} 条链接。`); }
     catch (_) { toast('复制失败，请手动选择链接文本。'); }
   });
 
