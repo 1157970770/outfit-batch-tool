@@ -77,9 +77,26 @@ class TemplateError(ValueError):
     pass
 
 
+def _store_upload_state(video: dict, tags: list[str]) -> str:
+    """与 template_catalog.save_xlsx 的状态列口径一致，便于导出后回读。"""
+    if video.get("missing"):
+        return "文件不存在"
+    if video.get("changed"):
+        return "文件已变化"
+    if video.get("deprecated"):
+        return "已弃用"
+    if video.get("uploaded"):
+        return "已上传"
+    if not tags:
+        return "废弃"
+    return "待上传"
+
+
 class TemplateCatalog:
     def __init__(self, templates: list[dict]):
         self.items = [dict(item) for item in templates]
+        self.retired_by_id: dict[str, dict] = {}
+        self.untagged_by_id: dict[str, dict] = {}
         self._reindex()
         self.tag_categories = list(TAG_CATEGORIES)
         self.tag_values: dict[str, list[str]] = {category: [] for category in TAG_CATEGORIES}
@@ -296,6 +313,131 @@ class TemplateCatalog:
         except OSError:
             return None
         return len(files - listed)
+
+    # ------------------------------------------------------------------ 标签真源
+    def attach_tag_store(self, store) -> dict:
+        """以服务端 JSON 真源重建候选集（口径与 attach_tag_workbook 完全一致）。
+
+        约定不变：**没打标签的行不进候选集**；`deprecated`（显式弃用）也不进，但单独存进
+        `retired_by_id` 供标签页预览/恢复。云端地址仍按「文件名/相对路径/指纹 + 大小一致」补，
+        **绝不按模板 ID 匹配**。
+        """
+        categories = store.categories()
+        source_index, fp_index = self._build_source_index()
+        manifest_count = len(self.items)
+        rows: list[dict] = []
+        retired: dict[str, dict] = {}
+        untagged_rows: dict[str, dict] = {}
+        untagged = 0
+        deprecated = 0
+        for video in store.rows(include_deprecated=True):
+            template_id = _normalize_id(video.get("id"))
+            tags = [tag for tag in (video.get("tags") or []) if tag in categories]
+            size = _as_float(video.get("size_mb"))
+            row = {
+                "id": template_id,
+                "name": str(video.get("name") or f"场景 {template_id}"),
+                "filename": str(video.get("name") or ""),
+                "shot": "",
+                "relative_path": str(video.get("relative_path") or "").replace("\\", "/"),
+                "tags": tags,
+                "tag_categories": {tag: categories[tag] for tag in tags},
+                "upload_state": _store_upload_state(video, tags),
+                "duration": _as_float(video.get("duration")),
+                "size_mb": size,
+                "deprecated": bool(video.get("deprecated")),
+                "deprecated_at": video.get("deprecated_at"),
+                "deprecated_by": str(video.get("deprecated_by") or ""),
+                "deprecated_reason": str(video.get("deprecated_reason") or ""),
+                "missing": bool(video.get("missing")),
+                "changed": bool(video.get("changed")),
+                "touched_at": video.get("touched_at"),
+                "touched_by": str(video.get("touched_by") or ""),
+                "_keys": {_basename(row_path) for row_path in
+                          (str(video.get("relative_path") or ""), str(video.get("name") or ""))} - {""},
+                "_size": size,
+                "_fingerprint": str(video.get("fingerprint") or "").strip().lower(),
+            }
+            source = self._pick_source(row, source_index, fp_index)
+            row["url"] = str((source or {}).get("url") or "")
+            row["key"] = str((source or {}).get("key") or "")
+            for field in ("_keys", "_size", "_fingerprint"):
+                row.pop(field, None)
+            if row["deprecated"]:
+                retired[template_id] = row
+                deprecated += 1
+                continue
+            if not tags:
+                # 未打标素材：不进候选集，但标签页要能列出来补标签
+                untagged_rows[template_id] = row
+                untagged += 1
+                continue
+            rows.append(row)
+
+        ready = sum(1 for row in rows if row.get("url") or row.get("key"))
+        self.items = rows
+        self.retired_by_id = retired
+        self.untagged_by_id = untagged_rows
+        self._reindex()
+        self._collect_tag_values()
+        self.tag_workbook_info = {
+            "path": str(getattr(store, "path", "") or ""),
+            "source": "store",
+            "workbook_rows": len(rows),
+            "matched_templates": len(rows),
+            "source_ready_templates": ready,
+            "manifest_entries": manifest_count,
+            "manifest_unmatched": manifest_count - ready,
+            "untagged_skipped": untagged,
+            "deprecated_skipped": deprecated,
+            "unlisted_files": None,
+            "store_revision": int(getattr(store, "revision", 0) or 0),
+            "all_untagged": not rows,
+        }
+        return dict(self.tag_workbook_info)
+
+    def resolve(self, template_id: str, *, include_retired: bool = False) -> dict:
+        """取模板；include_retired=True 时已弃用/未打标的也能取到（标签页预览用）。"""
+        key = _normalize_id(template_id)
+        item = self.by_id.get(key)
+        if item:
+            return item
+        if include_retired:
+            for bucket in (self.retired_by_id, self.untagged_by_id):
+                row = bucket.get(key)
+                if row:
+                    return row
+        raise TemplateError("找不到该视频场景")
+
+    def public_tags(self) -> list[dict]:
+        """标签页专用：在用 + 已弃用全量，带弃用信息与 ready。"""
+        def payload(item: dict) -> dict:
+            return {
+                "id": str(item.get("id", "")),
+                "name": str(item.get("name") or ""),
+                "filename": str(item.get("filename") or ""),
+                "relative_path": str(item.get("relative_path") or ""),
+                "tags": list(item.get("tags", [])),
+                "tag_categories": dict(item.get("tag_categories", {})),
+                "deprecated": bool(item.get("deprecated")),
+                "deprecated_at": item.get("deprecated_at"),
+                "deprecated_by": str(item.get("deprecated_by") or ""),
+                "ready": bool(item.get("url") or item.get("key")),
+                "upload_state": str(item.get("upload_state") or ""),
+                "duration": item.get("duration"),
+                "size_mb": item.get("size_mb"),
+                "missing": bool(item.get("missing")),
+                "changed": bool(item.get("changed")),
+                "touched_at": item.get("touched_at"),
+                "touched_by": str(item.get("touched_by") or ""),
+            }
+
+        rows = [payload(item) for item in self.items]
+        retired = sorted((payload(item) for item in self.retired_by_id.values()),
+                         key=lambda row: int(row["id"]) if row["id"].isdigit() else 0)
+        untagged = sorted((payload(item) for item in self.untagged_by_id.values()),
+                          key=lambda row: int(row["id"]) if row["id"].isdigit() else 0)
+        return rows + untagged + retired
 
     # ------------------------------------------------------------------ 查询
     def public(self) -> list[dict]:

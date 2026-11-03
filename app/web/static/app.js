@@ -70,13 +70,14 @@
     if (id === 'history-view') refreshJobs();
     if (id === 'admin-view') refreshAdmin();
     if (id === 'batch-view' && window.BatchUI) window.BatchUI.enter();
+    if (id === 'tag-view' && window.TagUI) window.TagUI.enter();
   }
   // 回到上次看的页：只在 create/history/admin 之间恢复。
   // 批次页有自己的状态机（进入即加载批次），刷新时自动跳过去容易让人以为"上次的任务还在"。
   function restoreView() {
     let saved = '';
     try { saved = localStorage.getItem(VIEW_KEY) || ''; } catch (_) { return; }
-    if (!['create-view', 'history-view', 'admin-view'].includes(saved)) return;
+    if (!['create-view', 'history-view', 'admin-view', 'tag-view'].includes(saved)) return;
     const tab = document.querySelector(`.tab[data-view="${saved}"]`);
     if (!tab || tab.classList.contains('hidden')) return;
     if (!document.getElementById(saved)) return;
@@ -700,7 +701,9 @@
   // 供 batch.js 复用：同一套 api 封装、共享 state、同一个详情面板。
   window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText,
     smallHistory: (id) => smallHistories[id], setCreatePane,
-    collectTagSlots, fillTagSlots, tagSummaryText, TAG_LABELS };
+    collectTagSlots, fillTagSlots, tagSummaryText, TAG_LABELS,
+    // 标签页改完标签/弃用后要刷新小批量页的模板下拉，否则仍能选到已弃用的场景
+    reloadTemplates: loadTemplates };
   // Esc：先关任务详情，再关账户明细，符合"从最上层开始退"的直觉。
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;

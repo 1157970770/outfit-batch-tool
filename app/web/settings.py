@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app import config as appconfig
@@ -39,6 +39,14 @@ class WebSettings:
     templates_error: str = ""
     tag_workbook_path: Path | None = None
     tag_workbook_info: dict | None = None
+    # ---- 标签真源（web-data/template_tags.json，网页与桌面打标器共用）----
+    tag_store_path: Path | None = None
+    tag_store: object | None = None          # tools.template_store.TemplateStore
+    tag_store_error: str = ""
+    tag_source: str = "none"                 # "store" | "xlsx" | "none"
+    manifest_items: list[dict] = field(default_factory=list)
+    manifest_warning: str = ""
+    manifest_pulled_at: float = 0.0
 
     @property
     def users(self) -> dict:
@@ -157,6 +165,19 @@ def _read_json(path: Path) -> dict:
     return data
 
 
+def resolve_tag_store_path(web: dict, base: Path, data_dir: Path, *,
+                           use_default: bool = True) -> Path | None:
+    """标签真源路径：OUTFIT_TAG_STORE → web.json → data_root/template_tags.json。
+
+    网页服务与 `--import-tags` 必须用同一套规则，否则迁移到 A 文件、服务读 B 文件。
+    """
+    raw = os.getenv("OUTFIT_TAG_STORE") or web.get("tag_store")
+    if raw:
+        path = Path(str(raw)).expanduser()
+        return path if path.is_absolute() else Path(base) / path
+    return (Path(data_dir) / "template_tags.json") if use_default else None
+
+
 def load_settings(*, base_dir: str | Path | None = None,
                   web_file: str | Path | None = None,
                   api_file: str | Path | None = None,
@@ -206,10 +227,30 @@ def load_settings(*, base_dir: str | Path | None = None,
     elif load_templates:
         manifest_error = "服务端没有配置模板清单"
 
-    # 生产清单 = 本机标签工作簿；manifest 只是"哪些视频已上传云端"的索引，
-    # 它缺失或与工作簿不同源都不应阻断标签筛选。
+    # 模板集来源优先级：服务端标签真源（store）> 本机标签工作簿（xlsx，回滚通道）> 纯 manifest。
+    # manifest 始终只是"哪些视频已上传云端"的索引，用来补 url/key，不决定标签。
+    tag_store_path = (resolve_tag_store_path(web, base, data_dir, use_default=use_runtime_defaults)
+                      if load_templates else None)
+    tag_store = None
+    tag_source = "none"
+    tag_store_error = ""
+    if load_templates and tag_store_path is not None and Path(tag_store_path).is_file():
+        try:
+            from tools.template_store import TemplateStore
+            from app.web.templates import TemplateCatalog
+            tag_store = TemplateStore.load(tag_store_path)
+            catalog = TemplateCatalog(manifest_items)
+            tag_workbook_info = catalog.attach_tag_store(tag_store)
+            if manifest_error:
+                tag_workbook_info["manifest_warning"] = f"云端模板索引不可用（{manifest_error}），本次仅按本地生产清单筛选"
+            templates = catalog.items
+            tag_source = "store"
+        except Exception as exc:
+            tag_store = None
+            tag_store_error = f"标签真源加载失败：{exc}"
+
     has_workbook = load_templates and tag_workbook_path is not None and Path(tag_workbook_path).is_file()
-    if has_workbook:
+    if tag_store is None and has_workbook:
         try:
             from app.web.templates import TemplateCatalog
             catalog = TemplateCatalog(manifest_items)
@@ -217,11 +258,19 @@ def load_settings(*, base_dir: str | Path | None = None,
             if manifest_error:
                 tag_workbook_info["manifest_warning"] = f"云端模板索引不可用（{manifest_error}），本次仅按本地生产清单筛选"
             templates = catalog.items
+            tag_source = "xlsx"
         except Exception as exc:
             templates = []
             templates_error = f"标签清单加载失败：{exc}"
-    elif load_templates:
+    elif tag_store is None and load_templates:
         templates = manifest_items
         templates_error = "" if manifest_items else (manifest_error or "服务端没有配置模板清单")
+    if tag_source == "store" and tag_store_error:
+        templates_error = ""  # 已回退到有效来源，不把旧错误顶到前台
     return WebSettings(base, web_path, api_path, data_dir, cfg, web, templates,
-                       templates_error, tag_workbook_path, tag_workbook_info)
+                       templates_error, tag_workbook_path, tag_workbook_info,
+                       tag_store_path=tag_store_path, tag_store=tag_store,
+                       tag_store_error=tag_store_error, tag_source=tag_source,
+                       manifest_items=manifest_items,
+                       manifest_warning=(f"云端模板索引不可用（{manifest_error}）" if manifest_error else ""),
+                       manifest_pulled_at=0.0)

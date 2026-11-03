@@ -39,9 +39,14 @@ Windows 上解释器通常是 `%USERPROFILE%\.dsh\dsh-runtimes\dsh-primary-runti
 app/web/server.py      路由 / 鉴权 / 静态文件 / CSV·ZIP 下载   ← 唯一 HTTP 入口
    ├─ auth.py          密码哈希、HMAC 会话、登录限流
    ├─ settings.py      读 server/*.json → WebSettings（配额、单价、上限）
-   ├─ templates.py     TemplateCatalog（标签 xlsx + manifest 索引）
+   ├─ templates.py     TemplateCatalog（标签真源 / xlsx + manifest 索引）
+   ├─ tag_api.py       标签页接口：打标 / 弃用 / 标签库维护（普通用户可写）
    ├─ jobs.py          JobManager（队列、调度、事件、用量统计）
    └─ batches.py       BatchManager（草稿 → 筛选 → 锁定 → 多轮生产 → 关闭）
+          │
+          ▼
+tools/template_store.py  标签唯一真源（JSON）：原子写 + 跨进程锁 + revision 乐观锁
+tools/template_catalog.py xlsx 导入导出、扫描、指纹、标签校验（网页与桌面共用）
           │
           ▼
 app/core.py            BatchRunner：线程池，逐条 提交/轮询/下载，回调事件
@@ -70,6 +75,10 @@ app/storage.py         COS / 本地存储适配
 4. **权限按 owner 隔离**：普通账号只见自己的任务/批次/历史；管理员可 `?scope=all` 或按 `owner` 筛选。
 5. **金额只在管理端出现**：试跑页、大批量页、任务操作一律不显示费用；
    计费秒 / 预估金额 / CSV 只在「管理 → 账户用量」。
+6. **标签只有一个真源**：`web-data/template_tags.json`。xlsx 只用于导入/导出
+   （`run_web.py --import-tags / --export-tags`），不要再把它当真源写。
+   「弃用」是软删除：不删本机视频、不删 COS 对象、不重建 manifest，随时可恢复；
+   「标签为空」是未打标，两者都不进候选集但语义不同。
 
 ## 5. 配置与数据放在哪
 
@@ -80,6 +89,7 @@ app/storage.py         COS / 本地存储适配
 | `server/*.example.json` | 上述两者的模板 | ✅ |
 | `web-data/jobs/<id>.json` | 任务状态与逐条记录 | ❌ |
 | `web-data/batches/<id>.json` | 批次与条目 | ❌ |
+| `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与桌面打标器共用；`.bak` 是上一版 | ❌ |
 | `web-data/{uploads,output,logs}/` | 定妆图、成片、任务日志 | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 

@@ -405,6 +405,8 @@ def save_xlsx(project: dict, destination: str | Path) -> Path:
             state = "文件不存在"
         elif row.get("changed"):
             state = "文件已变化"
+        elif row.get("deprecated"):
+            state = "已弃用"  # 网页/桌面显式弃用：与“标签为空”的被动废弃区分开，可恢复原标签
         elif row.get("uploaded"):
             state = "已上传"
         elif not row.get("tags"):
@@ -502,6 +504,9 @@ def load_xlsx(source: str | Path) -> dict:
                        "size_mb": get("大小(MB)", 0), "fingerprint": str(get("文件指纹", "")),
                        "tags": normalize_tags(raw_tags, tags), "missing": get("状态") == "文件不存在",
                        "changed": get("状态") == "文件已变化",
+                       # 显式弃用与“空标签的被动废弃”分开：老清单只写了“废弃”，
+                       # 所以「废弃 + 有标签」也按显式弃用回读，避免丢掉可恢复性。
+                       "deprecated": get("状态") == "已弃用" or (get("状态") == "废弃" and bool(raw_tags)),
                        "uploaded": get("状态") == "已上传",
                        "source_dir": str(get("来源目录", "") or ""),
                        "original_name": str(get("原始文件名", "") or "")})

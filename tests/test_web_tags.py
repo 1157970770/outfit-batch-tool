@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from openpyxl import Workbook  # noqa: E402
 from app.web.settings import load_settings  # noqa: E402
 from app.web.templates import TemplateCatalog, TemplateError  # noqa: E402
+from tools.template_store import TemplateStore  # noqa: E402
 
 TAG_DICT = [("近景", "景别"), ("中远景", "景别"), ("适合秋冬", "适合季节"), ("适合春夏", "适合季节")]
 
@@ -170,6 +171,42 @@ def main() -> int:
         assert "没有可用行" in str(exc)
     else:
         raise AssertionError("全部行都是废弃素材时必须明确报错")
+
+
+    # ---------- 真源（store）与 xlsx 两种来源必须同口径 ----------
+    tmp4 = tempdir("webtags-store-")
+    workbook4 = tmp4 / "清单.xlsx"
+    write_workbook(workbook4, rows)
+    store_path = tmp4 / "template_tags.json"
+    store = TemplateStore.load(store_path, create_empty=True)
+    store.import_from_xlsx(workbook4)
+
+    from_store = TemplateCatalog([]).attach_tag_store(store)
+    from_xlsx = TemplateCatalog([]).attach_tag_workbook(workbook4)
+    for key in ("workbook_rows", "source_ready_templates", "untagged_skipped"):
+        assert from_store[key] == from_xlsx[key], (key, from_store, from_xlsx)
+
+    store_catalog = TemplateCatalog([])
+    store_catalog.attach_tag_store(store)
+    xlsx_catalog = TemplateCatalog([])
+    xlsx_catalog.attach_tag_workbook(workbook4)
+    assert [item["id"] for item in store_catalog.items] == [item["id"] for item in xlsx_catalog.items]
+    filters = {"景别": ["近景"], "适合季节": ["适合秋冬"]}
+    assert ([item["id"] for item in store_catalog.filter_items(filters)]
+            == [item["id"] for item in xlsx_catalog.filter_items(filters)])
+    # 未打标行在 store 模式下也不能进候选集
+    assert "004" not in {item["id"] for item in store_catalog.items}
+    # 弃用后从候选集消失，但行本身保留（可恢复）
+    store.deprecate(["001"], True, user="test")
+    again = TemplateCatalog([])
+    info = again.attach_tag_store(store)
+    assert "001" not in {item["id"] for item in again.items}
+    assert info["deprecated_skipped"] == 1, info
+    assert store.row("001")["tags"], "弃用必须保留标签"
+    store.deprecate(["001"], False, user="test")
+    back = TemplateCatalog([])
+    back.attach_tag_store(store)
+    assert "001" in {item["id"] for item in back.items}
 
     print("OK 工作簿为生产清单、废弃行静默排除、云端索引仅按文件名+大小补地址、AND/OR 与防错配")
     return 0

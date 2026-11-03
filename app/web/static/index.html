@@ -8,8 +8,10 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css">
+  <link rel="stylesheet" href="/static/tag.css">
   <script defer src="/static/app.js"></script>
   <script defer src="/static/batch.js"></script>
+  <script defer src="/static/tag.js"></script>
 </head>
 <body>
   <main id="login-view" class="login-wrap">
@@ -41,6 +43,7 @@
         <button class="tab" data-view="batch-view">大批量生产</button>
         <button class="tab" data-view="history-view">历史任务</button>
         <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
+        <button id="tag-tab" class="tab" data-view="tag-view">标签</button>
         <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
 
@@ -292,6 +295,122 @@
           <div class="batch-more"><button id="history-small-more" class="quiet hidden" type="button">加载更多</button></div>
         </div>
         <article id="job-detail" class="card detail-card hidden"></article>
+      </section>
+
+      <section id="tag-view" class="view">
+        <div class="section-head">
+          <div><h1>视频标签</h1><p class="muted">给视频打标签、批量改标签、标记弃用。弃用的视频不再出现在小批量/大批量候选里，随时可恢复；不会删除云端对象或本机文件。</p></div>
+          <div class="top-actions">
+            <span id="tag-rev" class="tag-rev muted">未加载</span>
+            <button id="tag-refresh" class="quiet" type="button">刷新</button>
+            <button id="tag-library-btn" class="quiet" type="button">标签库管理</button>
+          </div>
+        </div>
+
+        <div class="tag-toolbar">
+          <input id="tag-search" class="tag-search" maxlength="60" autocomplete="off" placeholder="搜索 模板ID / 文件名 / 相对路径">
+          <label class="field tag-compact">状态<select id="tag-status">
+            <option value="active" selected>在用</option>
+            <option value="deprecated">已弃用</option>
+            <option value="untagged">未打标</option>
+            <option value="all">全部</option>
+          </select></label>
+          <label class="field tag-compact">排序<select id="tag-sort">
+            <option value="id" selected>按模板ID</option>
+            <option value="size">按大小</option>
+            <option value="tags">按标签数</option>
+            <option value="updated">按最近修改</option>
+          </select></label>
+          <label class="batch-toggle"><input id="tag-only-ready" type="checkbox"><span>只看已上传</span></label>
+          <button id="tag-filter-toggle" class="quiet btn-sm" type="button" aria-expanded="false">标签筛选</button>
+          <span id="tag-summary" class="muted"></span>
+        </div>
+
+        <fieldset id="tagf-card" class="tag-filter-card hidden">
+          <p class="filter-hint">同类别任一命中，不同类别需同时满足。</p>
+          <div id="tagf-groups" class="tag-filter-groups"></div>
+          <div class="tag-filter-footer"><button id="tagf-clear" class="quiet btn-sm" type="button">清除</button><span id="tagf-summary" class="muted"></span></div>
+        </fieldset>
+        <div id="tag-chips" class="batch-chips"></div>
+
+        <div class="tag-layout">
+          <div class="tag-main">
+            <div class="batch-cand-toolbar">
+              <div class="batch-toolbar-info"><span id="tag-count" class="batch-count">0 条</span></div>
+              <div class="batch-toolbar-actions">
+                <button id="tag-select-page" class="quiet" type="button">全选本页</button>
+                <button id="tag-invert" class="quiet" type="button">反选本页</button>
+                <button id="tag-select-all" class="quiet" type="button">全选筛选结果</button>
+                <button id="tag-clear-sel" class="quiet" type="button">清空选择</button>
+              </div>
+            </div>
+            <div id="tag-table" class="tag-table" role="grid" aria-label="视频标签列表"></div>
+            <div class="batch-cand-foot">
+              <div id="tag-pager" class="batch-cand-pager">
+                <button id="tag-page-prev" class="quiet" type="button">‹ 上一页</button>
+                <span id="tag-page-info" class="batch-page-info" role="status" aria-live="polite">第 1 / 1 页</span>
+                <button id="tag-page-next" class="quiet" type="button">下一页 ›</button>
+                <label class="field tag-compact">每页<select id="tag-page-size">
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                </select></label>
+              </div>
+              <div id="tag-bulk" class="tag-bulk hidden">
+                <b id="tag-bulk-count">已选 0 条</b>
+                <button id="tag-bulk-deprecate" class="quiet btn-sm" type="button">批量弃用</button>
+                <button id="tag-bulk-restore" class="quiet btn-sm" type="button">批量恢复</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="tag-preview-col">
+            <aside class="batch-preview">
+              <video id="tag-preview-video" class="template-preview batch-preview-video" controls preload="metadata" playsinline></video>
+              <p id="tag-preview-name" class="batch-preview-name muted">点左侧任意一行，在这里预览并改标签。</p>
+              <p id="tag-preview-note" class="batch-preview-note hidden"></p>
+            </aside>
+          </div>
+
+          <div class="tag-editor-col">
+            <p id="tag-editor-empty" class="tag-editor-empty muted">点左侧文件卡片开始打标；勾选多条可批量编辑。</p>
+            <div id="tag-editor" class="tag-editor hidden">
+              <div class="tag-editor-head">
+                <b id="tag-editor-title">编辑标签</b>
+                <label id="tag-mode-wrap" class="tag-mode-wrap hidden">方式
+                  <select id="tag-mode" aria-label="批量打标方式">
+                    <option value="replace">覆盖</option>
+                    <option value="add">追加</option>
+                    <option value="remove">移除</option>
+                  </select>
+                </label>
+              </div>
+              <div id="tag-editor-groups" class="tag-editor-groups"></div>
+              <div class="tag-editor-foot">
+                <button id="tag-save" class="primary btn-sm" type="button">保存标签</button>
+                <button id="tag-clear-tags" class="quiet btn-sm" type="button">取消勾选</button>
+                <button id="tag-deprecate-btn" class="quiet btn-sm" type="button">弃用</button>
+                <button id="tag-restore-btn" class="quiet btn-sm hidden" type="button">恢复</button>
+              </div>
+              <p id="tag-editor-hint" class="muted"></p>
+            </div>
+          </div>
+        </div>
+
+        <aside id="tag-drawer" class="tag-drawer hidden" aria-label="标签库管理">
+          <div class="tag-drawer-head">
+            <h3>标签库</h3>
+            <button id="tag-drawer-close" class="quiet btn-sm" type="button">关闭</button>
+          </div>
+          <form id="tag-lib-create" class="tag-lib-create">
+            <input id="tag-lib-name" maxlength="64" autocomplete="off" placeholder="新标签名称" required>
+            <select id="tag-lib-cat" aria-label="标签分类"></select>
+            <button class="primary btn-sm" type="submit">新建</button>
+          </form>
+          <p id="tag-lib-error" class="error hidden"></p>
+          <div id="tag-lib-list" class="tag-lib-list"></div>
+          <p class="muted tag-lib-note">合并/删除会先显示「影响 N 条视频」，确认后立即生效且不可撤销；每次操作都会记录操作人。</p>
+        </aside>
       </section>
 
       <section id="admin-view" class="view">

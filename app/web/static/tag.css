@@ -1,0 +1,244 @@
+/* 标签页专用样式：只写新增的容器与列表，
+   筛选器 / 候选工具条 / 分页 / 右侧播放器 / 标签 chips 全部复用 tag-filter.css 与 batch.css。 */
+
+.tag-rev { font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.tag-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 10px 0 8px;
+}
+
+.tag-search { flex: 1 1 240px; min-height: 32px; min-width: 160px; }
+
+.tag-compact { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.tag-compact select { min-height: 32px; }
+.tag-compact > span { display: none; }
+
+/* 标签页是表格+预览的重工作区，宽屏上用满宽度，避免左右两片空白 */
+body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
+
+.tag-layout {
+  display: grid;
+  /* 三栏：文件列表（吃掉剩余宽度）· 预览 · 编辑 */
+  grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 440px) clamp(300px, 23vw, 420px);
+  gap: 14px;
+  align-items: stretch;
+  /* 三列统一高度：占满首屏可视区，列内各自滚动；预览随整行一起长高 */
+  height: calc(100vh - 300px);
+  min-height: 460px;
+}
+
+.tag-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tag-main .batch-cand-toolbar,
+.tag-main .batch-cand-foot { flex: none; }
+
+.tag-preview-col,
+.tag-editor-col {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---------- 列表 ---------- */
+.tag-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  overflow: auto;
+}
+
+.tag-row {
+  display: grid;
+  /* 文件名固定窄列（超长省略 + title），标签拿剩余宽度并允许换行，保证全部可见 */
+  grid-template-columns: 26px 54px 132px minmax(0, 1fr) 76px 68px;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.tag-row:last-child { border-bottom: 0; }
+.tag-row.is-head {
+  position: sticky; top: 0; z-index: 1;
+  background: #f8fafc;
+  font-weight: 600; color: var(--ink-2);
+  cursor: default;
+}
+.tag-row.is-picked { background: color-mix(in srgb, var(--blue) 6%, #fff); }
+.tag-row.is-deprecated { opacity: .62; }
+.tag-row.is-deprecated .tag-row-name { text-decoration: line-through; }
+.tag-row:hover:not(.is-head) { background: #f8fafc; }
+
+.tag-row > * { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tag-row-id { font-family: var(--font-mono); color: var(--muted); }
+.tag-row-name { font-weight: 500; }
+/* 标签列是唯一允许换行的列：多了就换行，不截断、不折叠 */
+.tag-row-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  overflow: visible;
+  white-space: normal;
+}
+.tag-row-tags .chip { font-size: 11px; padding: 1px 6px; max-width: 100%; white-space: nowrap; }
+.tag-row-state { color: var(--muted); font-size: 11.5px; }
+.tag-row-state.is-ok { color: var(--green); }
+.tag-row-state.is-off { color: var(--red); }
+
+.tag-empty { padding: 40px 16px; text-align: center; color: var(--muted); }
+
+/* ---------- 底部批量条 ---------- */
+.tag-bulk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tag-bulk b { font-size: 13px; }
+
+/* ---------- 中间预览 ---------- */
+/* 播放器跟着整列拉伸：列有多高，预览区就有多高，不再固定 46vh */
+.tag-preview-col .batch-preview {
+  position: static;
+  top: auto;
+  align-self: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+.tag-preview-col .batch-preview-video {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: auto;
+  max-height: none;
+}
+.tag-preview-col .batch-preview-name,
+.tag-preview-col .batch-preview-note { flex: none; }
+
+.tag-editor-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 12.5px;
+}
+
+.tag-editor {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  padding: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tag-editor-head,
+.tag-editor-foot,
+.tag-editor-hint { flex: none; }
+
+.tag-editor-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; flex-wrap: wrap;
+}
+.tag-editor-head b { font-size: 13px; }
+
+/* 单条编辑不显示方式（默认覆盖就够了）；批量时才出现这个紧凑下拉 */
+.tag-mode-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tag-mode-wrap select { min-height: 26px; padding: 0 6px; font-size: 12px; }
+
+.tag-editor-groups {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  /* 右列固定占满列高，标签多时只有这一块滚动，底部按钮永远可见 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.tag-editor-group > b {
+  display: block; font-size: 12px; color: var(--muted); font-weight: 600;
+  margin-bottom: 4px;
+}
+.tag-editor-options { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.tag-option {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  padding: 2px 9px; font-size: 12px; cursor: pointer;
+  background: var(--paper);
+}
+.tag-option input { margin: 0; }
+.tag-option.is-on { border-color: var(--blue); color: var(--blue); background: #eff5ff; }
+
+.tag-editor-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tag-editor-hint { margin: 0; font-size: 12px; }
+
+/* ---------- 标签库抽屉 ---------- */
+.tag-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: min(430px, 94vw);
+  overflow: auto;
+  padding: 14px 16px 24px;
+  border-left: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: -10px 0 28px rgba(16, 24, 40, .12);
+  z-index: 45;
+}
+
+.tag-drawer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.tag-drawer-head h3 { margin: 0; font-size: 15px; }
+
+.tag-lib-create { display: grid; grid-template-columns: minmax(0, 1fr) 96px auto; gap: 6px; margin-bottom: 10px; }
+.tag-lib-create input, .tag-lib-create select { min-height: 32px; }
+
+.tag-lib-list { display: grid; gap: 2px; margin: 10px 0; }
+.tag-lib-group-title {
+  font-size: 12px; color: var(--muted); font-weight: 600;
+  margin: 10px 0 2px; padding-bottom: 2px; border-bottom: 1px solid var(--line);
+}
+
+.tag-lib-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 92px auto;
+  gap: 6px; align-items: center; padding: 3px 0;
+}
+.tag-lib-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-lib-name em { font-style: normal; color: var(--muted); font-size: 11.5px; margin-left: 6px; }
+.tag-lib-row select { min-height: 28px; font-size: 12px; }
+.tag-lib-actions { display: flex; gap: 2px; }
+.tag-lib-actions button { padding: 2px 6px; font-size: 11.5px; }
+
+.tag-lib-note { font-size: 12px; }
+
+/* 窄屏放不下三栏：改成上下排（列表 → 预览 → 编辑），高度交回页面自然滚动 */
+@media (max-width: 1200px) {
+  .tag-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
+  .tag-table { flex: none; min-height: 320px; max-height: 60vh; }
+  .tag-preview-col .batch-preview { flex: none; }
+  .tag-preview-col .batch-preview-video { flex: none; height: auto; max-height: 56vh; }
+  .tag-editor { flex: none; }
+  .tag-editor-groups { flex: none; max-height: 60vh; }
+  .tag-drawer { width: 100vw; }
+}

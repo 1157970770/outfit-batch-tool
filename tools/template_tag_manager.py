@@ -3,6 +3,8 @@
 """本机视频打标工具：只读本地文件、管理自由标签并导出 XLSX，不联网。"""
 from __future__ import annotations
 
+import copy
+import os
 import sys
 import time
 from pathlib import Path
@@ -28,6 +30,24 @@ from tools.template_catalog import (  # noqa: E402
     save_state, save_tag_library, scan_folder,
     save_xlsx, load_xlsx, set_video_tags,
 )
+
+
+def open_store():
+    """网页与桌面共用的标签真源；未配置（OUTFIT_TAG_STORE）时返回 None，退回纯本机模式。"""
+    path = (os.getenv("OUTFIT_TAG_STORE") or "").strip()
+    if not path:
+        return None
+    try:
+        from tools.template_store import TemplateStore
+        return TemplateStore.load(path)
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 - 真源损坏不能让打标器打不开，退回本机标签库
+        return None
+
+
+def _username() -> str:
+    return (os.getenv("USERNAME") or os.getenv("USER") or "desktop").strip() or "desktop"
 
 
 class TagLibraryDialog(QDialog):
@@ -283,8 +303,18 @@ class TagManager(QMainWindow):
         self.project: dict | None = None
         self.xlsx_path: Path | None = None
         self.batch_mode = False
-        self.tag_library = load_tag_library()
-        self.tag_categories = load_tag_categories()
+        # 真源模式（网页与桌面共用 web-data/template_tags.json）：
+        # store 存在时，标签库与保存都走它；xlsx 降级为导出副本。
+        self.store = open_store()
+        self.store_revision = self.store.revision if self.store else 0
+        self.base_project: dict | None = None
+        if self.store is not None and self.store.library()["tags"]:
+            library = self.store.library()
+            self.tag_library = list(library["tags"])
+            self.tag_categories = dict(library["categories"])
+        else:
+            self.tag_library = load_tag_library()
+            self.tag_categories = load_tag_categories()
         state = load_state()
         self.recent = state.get("recent") if isinstance(state.get("recent"), list) else []
         self._build_ui()
@@ -292,6 +322,8 @@ class TagManager(QMainWindow):
         self._refresh_recent_menu()
         self.status.setText(f"先选择本机视频文件夹，或打开已有标签 Excel。当前标签库 {len(self.tag_library)} 个标签，可直接新建。")
         self._restore_last_session()
+        if self.store is not None and not self.store_revision:
+            self.store_revision = self.store.revision
         self.autosave_timer = QTimer(self)
         self.autosave_timer.setInterval(20000)
         self.autosave_timer.timeout.connect(self.save_working_state)
@@ -305,7 +337,7 @@ class TagManager(QMainWindow):
         self.open_btn = QPushButton("打开标签 Excel…")
         self.save_btn = QPushButton("保存标签 Excel")
         self.export_btn = QPushButton("另存为 Excel…")
-        self.remove_btn = QPushButton("移除选中行")
+        self.remove_btn = QPushButton("标记弃用")
         self.quick_tag_btn = QPushButton("＋ 新建标签")
         self.new_btn.clicked.connect(self.choose_folder)
         self.open_btn.clicked.connect(self.open_xlsx)
@@ -621,6 +653,16 @@ class TagManager(QMainWindow):
         self.recent = state.get("recent") if isinstance(state.get("recent"), list) else self.recent
         self._refresh_recent_menu()
         project = state.get("last_project")
+        if self.store is not None:
+            # 真源优先：标签/弃用/路径以 store 为准；state.json 里本机多扫到的行仍然保留
+            stored = self.store.to_project()
+            if stored.get("videos"):
+                if isinstance(project, dict) and project.get("videos"):
+                    known = {str(row.get("id")) for row in stored["videos"]}
+                    stored["videos"] += [row for row in project["videos"]
+                                         if str(row.get("id")) not in known]
+                project = stored
+                self.store_revision = self.store.revision
         if not isinstance(project, dict):
             return False
         return self._restore_project(project, str(state.get("last_xlsx") or ""), startup=True)
@@ -667,10 +709,11 @@ class TagManager(QMainWindow):
             self.tag_categories.setdefault(tag, infer_tag_category(tag))
         project["tags"] = tags
         project["tag_categories"] = normalize_tag_categories(tags, self.tag_categories)
-        try:
-            save_tag_library(self.tag_library, categories=self.tag_categories)
-        except OSError:
-            pass
+        if self.store is None:
+            try:
+                save_tag_library(self.tag_library, categories=self.tag_categories)
+            except OSError:
+                pass
         self._update_library_label()
         return project
 
@@ -717,6 +760,8 @@ class TagManager(QMainWindow):
             return "文件不存在"
         if row_data.get("changed"):
             return "文件已变化"
+        if row_data.get("deprecated"):
+            return "已弃用"
         return "已打标" if row_data.get("tags") else "未打标"
 
     def _video_path(self, video: dict) -> Path:
@@ -1117,9 +1162,22 @@ class TagManager(QMainWindow):
         if not ok or not category:
             return
         try:
-            name = add_library_tag(self.tag_library, value)
-            self.tag_categories[name] = category
-            save_tag_library(self.tag_library, categories=self.tag_categories)
+            if self.store is not None:
+                from tools.template_store import StoreError
+                try:
+                    self.store.library_create(value.strip(), category, user=_username())
+                except StoreError as exc:
+                    raise CatalogError(str(exc)) from None
+                self.store_revision = self.store.revision
+                library = self.store.library()
+                self.tag_library = list(library["tags"])
+                self.tag_categories = dict(library["categories"])
+                name = next((tag for tag in self.tag_library
+                             if tag.casefold() == value.strip().casefold()), value.strip())
+            else:
+                name = add_library_tag(self.tag_library, value)
+                self.tag_categories[name] = category
+                save_tag_library(self.tag_library, categories=self.tag_categories)
             self._update_library_label()
             if self.project:
                 add_tag(self.project, name)
@@ -1177,10 +1235,13 @@ class TagManager(QMainWindow):
                     if mapped in keep and mapped not in mapped_tags:
                         mapped_tags.append(mapped)
                 row["tags"] = mapped_tags
-        try:
-            save_tag_library(self.tag_library, categories=self.tag_categories)
-        except OSError as exc:
-            QMessageBox.warning(self, "标签库保存失败", str(exc))
+        if self.store is not None:
+            self._apply_library_to_store(added, removed, merge_map, dialog_categories)
+        else:
+            try:
+                save_tag_library(self.tag_library, categories=self.tag_categories)
+            except OSError as exc:
+                QMessageBox.warning(self, "标签库保存失败", str(exc))
         self._update_library_label()
         if self.project:
             self._refresh()
@@ -1200,21 +1261,39 @@ class TagManager(QMainWindow):
         self.manage_tags()
 
     def remove_selected(self):
+        """把选中行标记为弃用（软删除）：不删行、不删本机文件、不删云端对象，可恢复。"""
         if not self.project:
             return
         paths = set(self._selected_paths())
         if not paths:
             return
-        answer = QMessageBox.question(self, "移除视频", f"从当前标签清单移除 {len(paths)} 条视频？\n不会删除本机原视频文件。")
+        rows = [row for row in self.project.get("videos", []) if str(row.get("id", "")) in paths]
+        all_deprecated = bool(rows) and all(row.get("deprecated") for row in rows)
+        action = "恢复" if all_deprecated else "弃用"
+        answer = QMessageBox.question(
+            self, f"标记{action}",
+            f"把 {len(paths)} 条视频标记为「{action}」？\n\n"
+            + ("恢复后会重新回到候选清单。\n" if all_deprecated else
+               "弃用后不再出现在小批量/大批量候选里；不会删除本机原视频，也不会删除云端对象，可随时恢复。\n"))
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.project["videos"] = [row for row in self.project["videos"] if str(row.get("id", "")) not in paths]
+        now = time.time()
+        for row in rows:
+            row["deprecated"] = not all_deprecated
+            row["deprecated_at"] = 0.0 if all_deprecated else now
+            row["deprecated_by"] = "" if all_deprecated else _username()
+            row["deprecated_reason"] = "" if all_deprecated else "桌面端标记"
         self._refresh()
         self.save_working_state()
-        self.status.setText(f"已从清单移除 {len(paths)} 条；本机视频文件不会被删除。")
+        hint = "（网页刷新后同步可见；点保存/导出会立即写入真源）" if self.store is not None else ""
+        self.status.setText(f"已{action} {len(paths)} 条{hint}。")
 
     def save_current(self):
         if not self.project:
+            return
+        if self.store is not None:
+            # 真源模式：主写 store；有 xlsx_path 时顺带更新那份交接副本
+            self._save_to(self.xlsx_path)
             return
         if self.xlsx_path is None:
             return self.export_xlsx()
@@ -1231,15 +1310,112 @@ class TagManager(QMainWindow):
         self.xlsx_path = Path(path)
         self._save_to(self.xlsx_path)
 
-    def _save_to(self, path: Path):
+    def _save_to(self, path: Path | None):
         try:
             note = self._rename_before_save()
-            save_xlsx(self.project, path)
+            if self.store is not None and not self._sync_store():
+                return
+            if path is not None:
+                save_xlsx(self.project, path)
             self.save_working_state()
             extra = f"（本次改名 {note}）" if note else ""
-            self.status.setText(f"已保存标签清单：{path}{extra}。这份 Excel 可独立保存、查看或交接。")
+            if self.store is not None:
+                where = f"网页标签真源 r{self.store_revision}"
+                if path is not None:
+                    where += f"，并导出 {path}"
+                self.status.setText(f"已保存到{where}{extra}。网页刷新后即可看到。")
+            else:
+                self.status.setText(f"已保存标签清单：{path}{extra}。这份 Excel 可独立保存、查看或交接。")
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
+
+    # ------------------------------------------------------------------ 真源同步
+    def _sync_store(self) -> bool:
+        """把本次改动按行差异写进网页真源；冲突时让用户选择重载，绝不静默覆盖。"""
+        from tools.template_store import RevisionConflict, StoreError
+        base = self.base_project or {"videos": [], "tags": [], "tag_categories": {}}
+        try:
+            result = self.store.apply_project_diff(base, self.project, user=_username(),
+                                                   revision=self.store_revision)
+        except RevisionConflict as exc:
+            answer = QMessageBox.question(
+                self, "标签已被其他人更新",
+                f"网页端刚保存过（当前 r{exc.revision}，你基于 r{self.store_revision}）。\n\n"
+                "是 = 重新载入最新数据（本次未保存的改动会丢失）\n否 = 放弃这次保存",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._load_from_store()
+            return False
+        except StoreError as exc:
+            QMessageBox.warning(self, "写入网页标签真源失败", str(exc))
+            return False
+        self.store_revision = int(result.get("revision") or self.store.revision)
+        self.base_project = copy.deepcopy(self.project)
+        self._sync_tags_from_store()
+        return True
+
+    def _sync_tags_from_store(self) -> None:
+        """标签库与每行标签以真源为准，避免两边各记一份。"""
+        library = self.store.library()
+        self.tag_library = list(library["tags"])
+        self.tag_categories = dict(library["categories"])
+        if self.project:
+            index = {str(row.get("id")): row for row in self.store.rows(include_deprecated=True)}
+            for row in self.project.get("videos", []):
+                source = index.get(str(row.get("id")))
+                if not source:
+                    continue
+                row["tags"] = list(source.get("tags") or [])
+                row["deprecated"] = bool(source.get("deprecated"))
+                row["deprecated_at"] = source.get("deprecated_at") or 0
+                row["deprecated_by"] = source.get("deprecated_by") or ""
+            tags = list(self.project.get("tags") or [])
+            for tag in self.tag_library:
+                if tag not in tags:
+                    tags.append(tag)
+            self.project["tags"] = tags
+            self.project["tag_categories"] = normalize_tag_categories(tags, self.tag_categories)
+        self._update_library_label()
+
+    def _load_from_store(self) -> None:
+        self.store.refresh_if_changed()
+        project = self.store.to_project()
+        if not project.get("videos"):
+            QMessageBox.information(self, "暂无数据", "网页标签真源里还没有视频。")
+            return
+        self.project = project
+        self.base_project = copy.deepcopy(project)
+        self.store_revision = self.store.revision
+        self._sync_tags_from_store()
+        self._refresh()
+        self._select_first()
+        self.save_working_state()
+        self.status.setText(f"已从网页标签真源重新载入（r{self.store_revision}）。")
+
+    def _apply_library_to_store(self, added, removed, merge_map, categories) -> None:
+        """标签库的增删改合并逐条落到真源；单条失败不阻断其余操作。"""
+        from tools.template_store import StoreError
+
+        def safe(action):
+            try:
+                action()
+            except StoreError:
+                pass
+
+        for source, target in (merge_map or {}).items():
+            safe(lambda s=source, t=target: self.store.library_merge(s, t, user=_username()))
+        for tag in removed:
+            if tag in (merge_map or {}):
+                continue
+            safe(lambda t=tag: self.store.library_delete(t, user=_username()))
+        for tag in added:
+            safe(lambda t=tag: self.store.library_create(t, categories.get(t, "场景"), user=_username()))
+        current = self.store.categories()
+        for tag, category in categories.items():
+            if current.get(tag) != category:
+                safe(lambda t=tag, c=category: self.store.library_set_category(t, c, user=_username()))
+        self.store_revision = self.store.revision
+        self._sync_tags_from_store()
 
     def _rename_before_save(self):
         """保存前把当前文件夹里「已打标、未上传、还是原名」的视频按顺延编号改名。"""

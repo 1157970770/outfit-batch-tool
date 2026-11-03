@@ -90,8 +90,22 @@ class WebApplication:
         # 说明：两项都来自 config.json 的 wan.query_rpm / wan.max_inflight；
         # 留空则退回代码兜底（250 RPM / 50 在飞）。
         self.prompts = _load_prompts()
-        self.catalog = TemplateCatalog(settings.templates)
-        self.catalog.tag_workbook_info = settings.tag_workbook_info or {}
+        # 标签真源（web-data/template_tags.json）与候选集：
+        # `_template_store` 是 COS 存储对象，这里的是 `tag_store`，两者别混。
+        self.tag_store = getattr(settings, "tag_store", None)
+        self.manifest_items = list(getattr(settings, "manifest_items", []) or [])
+        self.manifest_warning = str(getattr(settings, "manifest_warning", "") or "")
+        self.manifest_pulled_at = float(getattr(settings, "manifest_pulled_at", 0) or time.time())
+        self.catalog_lock = threading.RLock()
+        if self.tag_store is not None:
+            # 真源模式：必须重新 attach 一次，才能拿到被排除在候选集之外的
+            # 弃用行（retired_by_id）与未打标行（untagged_by_id）——标签页要展示它们。
+            self.catalog = TemplateCatalog(self.manifest_items)
+            self.catalog.attach_tag_store(self.tag_store)
+        else:
+            self.catalog = TemplateCatalog(settings.templates)
+        self.catalog.tag_workbook_info = (settings.tag_workbook_info
+                                          or self.catalog.tag_workbook_info or {})
         self.signer = SessionSigner(settings.web["session_secret"], settings.web.get("session_hours", 12))
         self.limiter = LoginLimiter()
         self.jobs = JobManager(settings, {key: value["body"] for key, value in self.prompts.items()})
@@ -144,30 +158,47 @@ class WebApplication:
                 self._output_store = output_store
             return self._output_store
 
-    def reload_templates(self) -> None:
+    def _pull_manifest(self) -> tuple[list[dict], str]:
+        """拉云端模板索引；失败只降级不抛（标签筛选不依赖它）。"""
         from app.core import load_manifest
         manifest = str(self.settings.config.get("MANIFEST") or "")
-        items: list[dict] = []
-        warning = ""
-        if manifest:
-            try:
-                items = load_manifest(manifest)
-            except Exception as exc:
-                warning = f"云端模板索引不可用（{exc}），本次仅按本地生产清单筛选"
-        catalog = TemplateCatalog(items)
-        tag_info = {}
-        workbook = self.settings.tag_workbook_path
-        if workbook is not None and Path(workbook).is_file():
-            tag_info = catalog.attach_tag_workbook(workbook)
+        if not manifest:
+            return [], ""
+        try:
+            return load_manifest(manifest), ""
+        except Exception as exc:  # noqa: BLE001 - 云端不可用时降级为"只按本地清单筛选"
+            return [], f"云端模板索引不可用（{exc}），本次仅按本地生产清单筛选"
+
+    def rebuild_catalog(self, *, reload_manifest: bool = False) -> dict:
+        """重建内存候选集；默认复用缓存的 manifest（改标签不必去拉 COS，<50 ms）。"""
+        with self.catalog_lock:
+            items, warning = self.manifest_items, self.manifest_warning
+            if reload_manifest:
+                items, warning = self._pull_manifest()
+                self.manifest_items, self.manifest_warning = items, warning
+                self.manifest_pulled_at = time.time()
+            catalog = TemplateCatalog(items)
+            info: dict = {}
+            if self.tag_store is not None:
+                info = catalog.attach_tag_store(self.tag_store)
+            else:
+                workbook = self.settings.tag_workbook_path
+                if workbook is not None and Path(workbook).is_file():
+                    info = catalog.attach_tag_workbook(workbook)
+                elif not items:
+                    raise RuntimeError("既没有标签真源，也没有云端模板索引")
             if warning:
-                tag_info["manifest_warning"] = warning
-        elif not items:
-            raise RuntimeError("既没有可用的标签清单，也没有云端模板索引")
-        self.catalog = catalog
-        self.catalog.tag_workbook_info = tag_info
-        self.settings.templates = catalog.items
-        self.settings.tag_workbook_info = tag_info
-        self.settings.templates_error = ""
+                info["manifest_warning"] = warning
+            catalog.tag_workbook_info = info    # 先设 info，再原子换指针：读侧永远看到完整对象
+            self.catalog = catalog
+            self.settings.templates = catalog.items
+            self.settings.tag_workbook_info = info
+            self.settings.templates_error = ""
+            return info
+
+    def reload_templates(self) -> None:
+        """管理页「重新加载视频场景」：仍会重拉云端 manifest。"""
+        self.rebuild_catalog(reload_manifest=True)
 
 
 def _read_image_format(path: Path) -> str:
@@ -297,6 +328,16 @@ def make_handler(app: WebApplication):
                 return None
             return user
 
+        def _tags(self, fn):
+            """标签页接口统一出口：业务异常 → HTTP 码，响应体保持 {ok,error,...} 结构。"""
+            from app.web.tag_api import ApiError
+            try:
+                return self._json(fn())
+            except ApiError as exc:
+                return self._json({"ok": False, "error": str(exc), **exc.payload()}, exc.status)
+            except ValueError as exc:
+                return self._error(str(exc), 400)
+
         def do_HEAD(self):
             return self.do_GET()
 
@@ -352,7 +393,15 @@ def make_handler(app: WebApplication):
                 if not self._user():
                     return
                 template_id = path.split("/")[-2]
-                return self._preview(template_id)
+                query = urllib.parse.parse_qs(parsed.query)
+                return self._preview(template_id, allow_deprecated=query.get("allow_deprecated", ["0"])[0] == "1")
+            if path == "/api/tags/snapshot":
+                if not self._user():
+                    return
+                from app.web import tag_api
+                query = urllib.parse.parse_qs(parsed.query)
+                rev = str(query.get("rev", [""])[0] or "").strip()
+                return self._tags(lambda: tag_api.snapshot(app, rev or None))
             if path.startswith("/api/uploads/"):
                 user = self._user()
                 if not user:
@@ -557,6 +606,15 @@ def make_handler(app: WebApplication):
                         return self._batch_prompt(parts[2], data, user)
                     if action == "retry-failed":
                         return self._batch_retry(parts[2], data, user)
+            if path == "/api/tags" or path.startswith("/api/tags/"):
+                from app.web import tag_api
+                parts = path.strip("/").split("/")
+                action = parts[-1] if len(parts) >= 3 else ""
+                handler = {"tags": tag_api.set_tags, "deprecate": tag_api.deprecate,
+                           "library": tag_api.library, "impact": tag_api.impact}.get(action)
+                if handler is None:
+                    return self._error("页面或接口不存在。", 404)
+                return self._tags(lambda: handler(app, data, user))
             if path == "/api/admin/reload-templates":
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
@@ -1164,9 +1222,10 @@ def make_handler(app: WebApplication):
                 return self._error("暂时没有可下载的视频。", 404)
             return self._send_file(zip_path, "application/zip", f"{job_id}.zip")
 
-        def _preview(self, template_id):
+        def _preview(self, template_id, allow_deprecated=False):
             try:
-                item = app.catalog.preview(template_id)
+                # 已弃用的视频仍允许预览，否则用户没法在恢复前确认是哪一条
+                item = app.catalog.resolve(template_id, include_retired=allow_deprecated)
                 url = str(item.get("url") or "")
                 if not url and not item.get("key"):
                     return self._error("该视频尚未上传到云端，暂无预览。", 404)

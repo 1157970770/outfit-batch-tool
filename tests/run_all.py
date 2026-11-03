@@ -31,11 +31,13 @@ REQUIRED = [
     "test_core",
     "test_remote_config",
     "test_template_catalog",
+    "test_template_store",
     "test_cos_rest",
     "test_style_usage",
     "test_web_auth",
     "test_web_tags",
     "test_web",
+    "test_web_tag_api",
     "test_batches",
 ]
 OPTIONAL = ["test_ui", "test_prompts"]   # 需要 PySide6，桌面线

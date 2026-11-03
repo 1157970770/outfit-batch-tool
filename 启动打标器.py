@@ -12,6 +12,8 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 os.environ.setdefault("OUTFIT_TAG_LIBRARY", str(BASE / "_state" / "tagger" / "tags.json"))
+# 网页与桌面共用同一份标签真源；没有这个文件时自动退回纯本机模式。
+os.environ.setdefault("OUTFIT_TAG_STORE", str(BASE / "web-data" / "template_tags.json"))
 
 from tools.template_tag_manager import main  # noqa: E402
 
