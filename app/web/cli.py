@@ -111,7 +111,7 @@ def _tag_store_command(args, web: dict) -> int:
         if store.rows() and not (args.dry_run or args.force):
             raise RuntimeError(
                 f"真源已存在（{len(store.rows())} 行，revision {store.revision}）：{store_path}\n"
-                "确认覆盖请加 --force；只想看对账请加 --dry-run")
+                "导入会按模板ID合并（清单里没有的行保留、不删），确认继续请加 --force；只想看对账请加 --dry-run")
 
         report = store.import_from_xlsx(workbook, dry_run=True)
         manifest, warning = _manifest_items(base, data_dir)
@@ -150,7 +150,9 @@ def _tag_store_command(args, web: dict) -> int:
             return 2
 
         result = store.import_from_xlsx(workbook)
-        print(f"已导入：{result['rows']} 行，revision {result['revision']} → {store_path}")
+        print(f"已导入：清单 {result['rows']} 行（新增 {result.get('added', 0)} / 更新 "
+              f"{result.get('updated', 0)} / 保留 {result.get('kept', 0)} 行），"
+              f"revision {result['revision']} → {store_path}")
         print("下一步：重启网页服务，进「标签」页核对。回滚：把该文件改名即可退回 xlsx 模式。")
         return 0
     except (StoreError, RuntimeError) as exc:

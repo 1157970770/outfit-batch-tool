@@ -346,11 +346,27 @@ def main() -> int:
         names = {item["name"] for item in body(call(alice, base, "/api/tags/versions")[2])["versions"]}
         assert restored["backup"] in names and manual["name"] in names
 
+        revision = body(call(alice, base, "/api/tags/snapshot")[2])["revision"]
         code, _, raw = call(alice, base, "/api/tags/versions/restore", "POST",
-                            {"name": "v999999-1-auto-abcd.json.gz"})
+                            {"name": "v999999-1-auto-abcd.json.gz", "revision": revision})
         assert code == 404, (code, body(raw))
         code, _, raw = call(alice, base, "/api/tags/versions/restore", "POST",
-                            {"name": "../../etc/passwd"})
+                            {"name": "../../etc/passwd", "revision": revision})
+        assert code == 400, (code, body(raw))
+
+        # ---------- 写接口不带 revision 一律 400（以前是静默跳过乐观锁） ----------
+        for path, payload in (
+            ("/api/tags/videos/tags", {"ids": ["004"], "tags": ["近景"], "mode": "replace"}),
+            ("/api/tags/videos/deprecate", {"ids": ["004"], "deprecated": True}),
+            ("/api/tags/library", {"action": "create", "name": "无版本号", "category": "场景"}),
+            ("/api/tags/versions/restore", {"name": manual["name"]}),
+        ):
+            code, _, raw = call(alice, base, path, "POST", payload)
+            assert code == 400, (path, code, body(raw))
+            assert "revision" in str(body(raw).get("error") or ""), (path, body(raw))
+
+        code, _, raw = call(alice, base, "/api/tags/videos/tags", "POST",
+                            {"revision": "abc", "ids": ["004"], "tags": [], "mode": "replace"})
         assert code == 400, (code, body(raw))
     finally:
         server.shutdown()

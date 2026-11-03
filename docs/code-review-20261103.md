@@ -359,7 +359,7 @@ mode 只在 `lastMulti` 变化时改。
 
 未纳入本批（仍按 §7 后续批次处理）：重试沿用当前登录用户作 owner / 丢 `batch_ref`（P1-9）、`interrupted` 不可重试（P1-10）、`WaitTimeout` 记 `running` 导致永久不可重试（P1-19）——后者本次只在进度条与重试提示上做了兜底，状态机本身未改。
 
-### 7.2 第二批实际落地内容（计费四件套）
+### 7.2 第二批实际落地内容（已完成，提交 `a58646d`）
 
 > 完整清单、行为变化与回滚方式见 [fix-20261103-billing.md](fix-20261103-billing.md)。
 
@@ -374,4 +374,20 @@ mode 只在 `lastMulti` 变化时改。
 | `app/web/static/app.js`·`style.css` | `statusText` 增「结果未知」、失败计数含 `unknown`、新增 `.status.unknown` 样式 | 展示口径 |
 | `tests/test_billing.py` | 10 组断言：惩罚封顶/不回退、unknown 判定、下载失败保账、unknown 单列、标记先行、写盘失败后认领、job 丢失标失败、没建任务可再排 | 回归防护 |
 
-> 评审阶段为只读；第一批修复已提交 `40330f6`，第二批修复记录见 [fix-20261103-billing.md](fix-20261103-billing.md)。
+### 7.3 第三批实际落地内容（标签真源）
+
+> 完整清单、行为变化与回滚方式见 [fix-20261103-tags.md](fix-20261103-tags.md)。
+
+| 文件 | 改动 | 对应问题 |
+| --- | --- | --- |
+| `app/web/tag_api.py` | 新增 `_revision_of()`；`set_tags` / `deprecate` / `library` / `restore_version` 强制正整数 revision（None / 非整数 / 负数 → 400）；`upload_video`、`create_version` 作为纯追加豁免 | P1-6 |
+| `tools/template_store.py` | `_mutate` 的 revision 转换失败转 `StoreError`；`restore_version` 库层也强制 revision | P1-6 |
+| `tools/template_store.py` | `import_from_xlsx` 改为按模板 ID 合并（`added`/`updated`/`kept`/`unchanged`），`_check_import` 提到 dry-run 之外并支持 `allow_empty`，重复 id 汇总报错 | P1-7 |
+| `tools/template_store.py` | `_atomic_save` 加 `flush` + `fsync` + 目录 fsync；`_mutate` 在 `fn()` 前 deepcopy 快照，写盘失败恢复内存与索引；`load()` 损坏时回退 `.bak` 并标记 `recovered_from_bak` | P1-8 |
+| `tools/template_catalog.py` | xlsx 表头加「上传时间」「最后修改时间」（`_iso_time`/`_parse_time` 往返）；文本单元格标 `data_type="s"` 防公式注入；分类白名单改为「实际出现的大类」 | P1-9 |
+| `app/web/static/tag.js` | 排序与 72h「新」徽标只认 `uploaded_at`，`touched_at` 仅作同值段兜底与 title 说明（「上传时间未记录（最近修改于 …）」） | P1-10 |
+| `app/web/cli.py` | `--import-tags` 提示与输出改为合并口径（新增/更新/保留） | P1-7 配套 |
+| `tests/test_tag_truth.py` | 6 组断言：导入合并保留新行、空清单需 `allow_empty`、回滚要 revision、写盘失败回滚内存、xlsx 保 `=` 开头/自定义大类/时间列、坏文件从 `.bak` 自愈 | 回归防护 |
+| `tests/test_web_tag_api.py` | 新增「四个写接口缺 revision 一律 400」与 `revision: "abc"` → 400 的断言；两条版本名校验补 revision | P1-6 回归防护 |
+
+> 评审阶段为只读；第一批修复已提交 `40330f6`，第二批 `a58646d`，第三批见 [fix-20261103-tags.md](fix-20261103-tags.md)。

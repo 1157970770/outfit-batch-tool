@@ -3,6 +3,7 @@
 """本机视频标签项目与 XLSX 交接清单。"""
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -390,6 +391,41 @@ def validate_project(project: dict, *, require_files: bool = True) -> list[str]:
     return errors
 
 
+def _iso_time(value: Any) -> str:
+    """时间戳 → 清单里可读的时间文本；0/非法一律留空。"""
+    try:
+        stamp = float(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if stamp <= 0:
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _parse_time(value: Any) -> float:
+    """清单里的时间文本 → 时间戳；兼容旧清单里的纯数字时间戳。"""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, datetime.datetime):
+        return value.timestamp()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def save_xlsx(project: dict, destination: str | Path) -> Path:
     try:
         from openpyxl import Workbook
@@ -403,7 +439,7 @@ def save_xlsx(project: dict, destination: str | Path) -> Path:
     ws = wb.active
     ws.title = VIDEO_SHEET
     headers = ["模板ID", "相对路径", "文件名", "时长(秒)", "大小(MB)", "文件指纹", "标签", "状态",
-               "来源目录", "原始文件名"]
+               "来源目录", "原始文件名", "上传时间", "最后修改时间"]
     ws.append(headers)
     for row in project.get("videos", []):
         if row.get("missing"):
@@ -422,12 +458,28 @@ def save_xlsx(project: dict, destination: str | Path) -> Path:
                    row.get("duration"), row.get("size_mb"), row.get("fingerprint", ""),
                    ";".join(row.get("tags", [])), state,
                    str(row.get("source_dir") or project.get("source_root") or ""),
-                   str(row.get("original_name") or "")])
+                   str(row.get("original_name") or ""),
+                   _iso_time(row.get("uploaded_at")), _iso_time(row.get("touched_at"))])
+    # 一律按文本写：标签/文件名以 "=" 开头时，openpyxl 默认会写成公式，回读就成了空值
+    for cells in ws.iter_rows(min_row=2):
+        for cell in cells:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
     tags_ws = wb.create_sheet(TAGS_SHEET)
     tags_ws.append(["标签值", "分类"])
-    categories = normalize_tag_categories(project.get("tags", []), project.get("tag_categories", {}))
+    order = [str(name) for name in (project.get("category_order") or []) if str(name)]
+    for name in list(TAG_CATEGORIES) + [str(value or "").strip()
+                                        for value in (project.get("tag_categories") or {}).values()]:
+        if name and name not in order:
+            order.append(name)
+    categories = normalize_tag_categories(project.get("tags", []), project.get("tag_categories", {}),
+                                          allowed=order)
     for tag in project.get("tags", []):
         tags_ws.append([tag, categories[tag]])
+    for cells in tags_ws.iter_rows(min_row=2):
+        for cell in cells:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
     meta = wb.create_sheet(PROJECT_SHEET)
     meta.append(["项目字段", "值"])
     meta.append(["项目ID", str(project.get("project_id") or "")])
@@ -455,7 +507,8 @@ def load_xlsx(source: str | Path) -> dict:
         raise CatalogError("本机缺少 Excel 文件支持模块 openpyxl") from None
     path = Path(source)
     try:
-        wb = load_workbook(path, read_only=True, data_only=True)
+        # data_only=False：标签/文件名以 "=" 开头时按原文读回来，不要指望 Excel 里存了缓存值
+        wb = load_workbook(path, read_only=True, data_only=False)
     except Exception as exc:
         raise CatalogError(f"无法打开标签清单：{exc}") from None
     if VIDEO_SHEET not in wb.sheetnames or TAGS_SHEET not in wb.sheetnames:
@@ -464,15 +517,19 @@ def load_xlsx(source: str | Path) -> dict:
     tags_ws = wb[TAGS_SHEET]
     tags = []
     saved_categories = {}
+    category_order = list(TAG_CATEGORIES)
     for row in tags_ws.iter_rows(min_row=2, values_only=True):
         if not row or not row[0]:
             continue
         tag = validate_tag_name(row[0])
         if tag not in tags:
             tags.append(tag)
-        if len(row) > 1 and row[1] in TAG_CATEGORIES:
-            saved_categories[tag] = row[1]
-    tag_categories = normalize_tag_categories(tags, saved_categories)
+        category = str(row[1] or "").strip() if len(row) > 1 else ""
+        if category:
+            saved_categories[tag] = category
+            if category not in category_order:
+                category_order.append(category)  # 自定义大类按出现顺序保留，不再折叠回内置四类
+    tag_categories = normalize_tag_categories(tags, saved_categories, allowed=category_order)
     meta_values = {}
     if PROJECT_SHEET in wb.sheetnames:
         meta = wb[PROJECT_SHEET]
@@ -514,7 +571,9 @@ def load_xlsx(source: str | Path) -> dict:
                        "deprecated": get("状态") == "已弃用" or (get("状态") == "废弃" and bool(raw_tags)),
                        "uploaded": get("状态") == "已上传",
                        "source_dir": str(get("来源目录", "") or ""),
-                       "original_name": str(get("原始文件名", "") or "")})
+                       "original_name": str(get("原始文件名", "") or ""),
+                       "uploaded_at": _parse_time(get("上传时间")),
+                       "touched_at": _parse_time(get("最后修改时间"))})
     wb.close()
     source_root = str(meta_values.get("本机视频文件夹") or path.parent)
     for video in videos:  # 老清单没有来源目录列：一律回落到项目文件夹

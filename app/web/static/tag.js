@@ -283,7 +283,13 @@
     });
     const ORDER = {
       id: (a, b) => Number(a.id) - Number(b.id),
-      uploaded: (a, b) => Number(b.uploaded_at || b.touched_at || 0) - Number(a.uploaded_at || a.touched_at || 0),
+      uploaded: (a, b) => {
+        const av = Number(a.uploaded_at || 0);
+        const bv = Number(b.uploaded_at || 0);
+        // 有真实上传时间的一律按它排；都没有时退回最近修改时间，至少顺序稳定可预期
+        if (av !== bv) return bv - av;
+        return Number(b.touched_at || 0) - Number(a.touched_at || 0);
+      },
       size: (a, b) => Number(b.size_mb || 0) - Number(a.size_mb || 0),
       tags: (a, b) => b.tags.length - a.tags.length,
       updated: (a, b) => Number(b.touched_at || 0) - Number(a.touched_at || 0),
@@ -354,7 +360,9 @@
       const nameCell = document.createElement('span');
       nameCell.className = 'tag-row-name';
       // 早期上传的行没有 uploaded_at（字段是后加的），退回最近修改时间，排序与「新」标记才一致
-      const uploadedAt = Number(video.uploaded_at || video.touched_at || 0);
+      const uploadedAt = Number(video.uploaded_at || 0);
+      const touchedAt = Number(video.touched_at || 0);
+      // 「新」徽标只认真实上传时间：touched_at 是改标签时刷的，拿它冒充会把老素材标成新上传
       const isNew = uploadedAt > 0 && (Date.now() / 1000 - uploadedAt) < 72 * 3600;
       if (isNew) {
         const badge = document.createElement('span');
@@ -365,7 +373,8 @@
       nameCell.append(document.createTextNode(video.name || video.relative_path || '(无文件名)'));
       nameCell.title = uploadedAt
         ? `上传于 ${fmtDateTime(uploadedAt)}`
-        : (video.relative_path || video.name || '');
+        : (touchedAt ? `上传时间未记录（最近修改于 ${fmtDateTime(touchedAt)}）`
+          : (video.relative_path || video.name || ''));
 
       const tagsCell = document.createElement('span');
       tagsCell.className = 'tag-row-tags';

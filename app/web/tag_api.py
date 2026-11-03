@@ -165,13 +165,27 @@ def snapshot(app, rev=None) -> dict:
     }
 
 
+def _revision_of(data: dict, action: str = "写入") -> int:
+    """写接口必须带 revision：不带就等于关掉乐观锁，后写者会静默覆盖先写者。"""
+    raw = data.get("revision")
+    if raw is None or isinstance(raw, bool):
+        raise ApiError(f"{action}需要 revision：请刷新页面拿到最新版本后重试", 400)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ApiError("revision 必须是整数：请刷新页面后重试", 400) from None
+    if value < 0:
+        raise ApiError("revision 不能为负数：请刷新页面后重试", 400)
+    return value
+
+
 def set_tags(app, data: dict, user: dict) -> dict:
     store = _store(app)
     try:
         result = store.set_tags(data.get("ids"), data.get("tags"),
                                 mode=str(data.get("mode") or "replace"),
                                 user=str(user.get("username") or ""),
-                                revision=data.get("revision"))
+                                revision=_revision_of(data, "改标签"))
     except StoreError as exc:
         raise _wrap(exc) from None
     return _after_write(app, store, result)
@@ -182,7 +196,7 @@ def deprecate(app, data: dict, user: dict) -> dict:
     try:
         result = store.deprecate(data.get("ids"), bool(data.get("deprecated", True)),
                                  user=str(user.get("username") or ""),
-                                 revision=data.get("revision"),
+                                 revision=_revision_of(data, "弃用/恢复"),
                                  reason=str(data.get("reason") or ""))
     except StoreError as exc:
         raise _wrap(exc) from None
@@ -206,6 +220,7 @@ def library(app, data: dict, user: dict) -> dict:
     action = str(data.get("action") or "").strip()
     if action not in _LIBRARY_PARAMS:
         raise ApiError("不支持的标签库操作")
+    revision = _revision_of(data, "标签库操作")
     params = {key: data.get(key) for key in _LIBRARY_PARAMS[action] if key in data}
     # 合并/删除/改名会级联改写视频行：必须先让用户看到影响面再确认
     impact = {}
@@ -222,28 +237,28 @@ def library(app, data: dict, user: dict) -> dict:
     try:
         if action == "create":
             result = store.library_create(params.get("name"), params.get("category") or "",
-                                          user=username, revision=data.get("revision"))
+                                          user=username, revision=revision)
         elif action == "rename":
             result = store.library_rename(params.get("name"), params.get("new_name") or "",
-                                          user=username, revision=data.get("revision"))
+                                          user=username, revision=revision)
         elif action == "set_category":
             result = store.library_set_category(params.get("name"), params.get("category") or "",
-                                                user=username, revision=data.get("revision"))
+                                                user=username, revision=revision)
         elif action == "merge":
             result = store.library_merge(params.get("source"), params.get("target") or "",
-                                         user=username, revision=data.get("revision"))
+                                         user=username, revision=revision)
         elif action == "category_create":
             result = store.category_create(params.get("name") or "", user=username,
-                                           revision=data.get("revision"))
+                                           revision=revision)
         elif action == "category_rename":
             result = store.category_rename(params.get("name") or "", params.get("new_name") or "",
-                                           user=username, revision=data.get("revision"))
+                                           user=username, revision=revision)
         elif action == "category_delete":
             result = store.category_delete(params.get("name") or "", user=username,
-                                           revision=data.get("revision"))
+                                           revision=revision)
         else:
             result = store.library_delete(params.get("name"), user=username,
-                                          revision=data.get("revision"))
+                                          revision=revision)
     except StoreError as exc:
         raise _wrap(exc) from None
     payload = _after_write(app, store, result)
@@ -413,9 +428,10 @@ def restore_version(app, data: dict, user: dict) -> dict:
     name = str(data.get("name") or "").strip()
     if not name:
         raise ApiError("请指定要回滚的版本")
+    revision = _revision_of(data, "回滚版本")
     try:
         result = store.restore_version(name, user=str(user.get("username") or ""),
-                                       revision=data.get("revision"))
+                                       revision=revision)
     except StoreError as exc:
         raise _wrap(exc) from None
     payload = _after_write(app, store, result)

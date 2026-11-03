@@ -308,6 +308,7 @@ class TemplateStore:
         self.data = data
         self._stat = stat
         self._lock = threading.RLock()
+        self.recovered_from_bak = False
         self._index_locked()
 
     # ------------------------------------------------------------------ 装载
@@ -321,6 +322,17 @@ class TemplateStore:
         try:
             raw = json.loads(target.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError) as exc:
+            # 真源坏了先用上一版顶住，别让全站直接 503；下次写入会覆盖回正本
+            backup = target.with_name(target.name + ".bak")
+            if backup.exists():
+                try:
+                    recovered = json.loads(backup.read_text(encoding="utf-8-sig"))
+                except (OSError, json.JSONDecodeError):
+                    recovered = None
+                if isinstance(recovered, dict):
+                    store = cls(target, _normalize_data(recovered), None)
+                    store.recovered_from_bak = True
+                    return store
             raise StoreUnavailable(
                 f"标签真源文件损坏：{target.name}（{exc}）。可把 {target.name}.bak 改回原名后重试") from None
         return cls(target, _normalize_data(raw), _stat_of(target))
@@ -426,6 +438,21 @@ class TemplateStore:
         }
 
     # ------------------------------------------------------------------ 写入骨架
+    def _fsync_dir(self) -> None:
+        """把 rename 的结果也刷到目录项上；Windows 不能 open 目录，跳过即可。"""
+        if os.name == "nt":
+            return
+        try:
+            handle = os.open(str(self.path.parent), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(handle)
+        except OSError:
+            pass
+        finally:
+            os.close(handle)
+
     def _atomic_save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self.data, ensure_ascii=False, separators=(",", ":"))
@@ -433,8 +460,12 @@ class TemplateStore:
         try:
             if self.path.exists() and self.path.stat().st_size:
                 shutil.copyfile(self.path, self.path.with_name(self.path.name + ".bak"))
-            tmp.write_text(payload, encoding="utf-8")
+            with open(tmp, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(tmp, self.path)
+            self._fsync_dir()
         except OSError as exc:
             try:
                 tmp.unlink(missing_ok=True)
@@ -454,21 +485,43 @@ class TemplateStore:
             self.data["audit_dropped"] = int(self.data.get("audit_dropped") or 0) + overflow
 
     def _mutate(self, fn, *, user: str, revision: int | None, action: str) -> dict:
-        """统一写路径：锁 → 重读 → 校验 revision → 改内存 → revision+1 → 审计 → 原子写。"""
+        """统一写路径：锁 → 重读 → 校验 revision → 改内存 → revision+1 → 审计 → 原子写。
+
+        写盘失败时把内存整体退回调用前，避免「接口 503、内存却已改」的幻影数据。
+        """
         with self._lock, _FileLock(self.path):
             self._reload_locked()
-            if revision is not None and int(revision) != self.revision:
-                raise RevisionConflict("标签数据已被其他人更新，请刷新后重试", self.revision)
+            if revision is not None:
+                try:
+                    expected = int(revision)
+                except (TypeError, ValueError):
+                    raise StoreError("revision 必须是整数") from None
+                if expected != self.revision:
+                    raise RevisionConflict("标签数据已被其他人更新，请刷新后重试", self.revision)
+            snapshot = (copy.deepcopy(self.data), self._stat)
             result = fn() or {}
             changed = int(result.get("changed") or 0)
             detail = result.pop("detail", None) or {}
             if not changed:
+                # 没有实质变化就整份退回：这一步顺手抹掉 op() 里可能写进内存的旁支字段，
+                # 免得内存与磁盘分叉（之前 import 会留下只有内存才有的 migrated_from）。
+                restored, stat = snapshot
+                self.data = restored
+                self._stat = stat
+                self._index_locked()
                 return {**result, "changed": 0, "revision": self.revision}
             self.data["revision"] = self.revision + 1
             self.data["updated_at"] = time.time()
             self.data["updated_by"] = str(user or "")
-            self._audit_append(action, user, detail)
-            self._atomic_save()
+            try:
+                self._audit_append(action, user, detail)
+                self._atomic_save()
+            except BaseException:
+                restored, stat = snapshot
+                self.data = restored
+                self._stat = stat
+                self._index_locked()
+                raise
             self._index_locked()
             # 每次成功写入都留一份整库快照；快照失败不影响已经落盘的数据
             try:
@@ -1059,7 +1112,10 @@ class TemplateStore:
         """把整份真源回滚到某个版本：视频库条目、每条标签、弃用态、标签定义一起还原。
 
         回滚前会自动留一份 manual 备份（note=回滚前备份），所以这次回滚本身也能撤回。
+        整库回滚不可增量合并，必须带 revision：否则两个人同时回滚会互相覆盖而不报错。
         """
+        if revision is None:
+            raise StoreError("回滚整库必须带 revision：请先刷新拿到最新版本号再回滚")
         snapshot = self.read_version(name)
         raw_videos = snapshot.get("videos")
         if not isinstance(raw_videos, list) or not raw_videos:
@@ -1117,14 +1173,20 @@ class TemplateStore:
         return {**result, "version": name}
 
     # ------------------------------------------------------------------ 迁移 / 交接
-    def import_from_xlsx(self, source: str | Path, *, dry_run: bool = False, user: str = "import") -> dict:
-        """把标签 xlsx 全量导入真源。dry_run 只对账，不写盘。"""
+    def import_from_xlsx(self, source: str | Path, *, dry_run: bool = False,
+                         user: str = "import", allow_empty: bool = False) -> dict:
+        """把标签 xlsx 合并进真源：清单里有的按模板ID 更新，清单里没有的原样保留。
+
+        以前是整份替换：CLI 导入期间网页上传的视频、别人刚打的标会被静默覆盖，
+        传一份空清单就能清库。现在只做并集，想真清空必须显式删行/走弃用。
+        """
         try:
             project = load_xlsx(source)
         except CatalogError as exc:
             raise StoreError(str(exc)) from None
         videos: list[dict] = []
         seen: set[str] = set()
+        duplicate_ids = 0
         deprecated = 0
         untagged = 0
         no_fingerprint = 0
@@ -1132,7 +1194,8 @@ class TemplateStore:
         for video in project.get("videos") or []:
             row = _normalize_video(video)
             if row["id"] in seen:
-                raise StoreError(f"清单中模板ID重复：{row['id']}")
+                duplicate_ids += 1
+                continue
             seen.add(row["id"])
             if row["deprecated"]:
                 deprecated += 1
@@ -1149,50 +1212,106 @@ class TemplateStore:
             "source": str(source), "rows": len(videos), "deprecated": deprecated,
             "untagged": untagged, "no_fingerprint": no_fingerprint, "no_size": no_size,
             "tags": len(project.get("tags") or []),
-            "duplicate_ids": 0,
+            "duplicate_ids": duplicate_ids,
         }
+        self._check_import(report, allow_empty=allow_empty)
         if dry_run:
-            self._check_import(report)
             return {**report, "dry_run": True, "written": False, "revision": self.revision}
 
         def op() -> dict:
+            existing = {row["id"]: row for row in self.data["videos"]}
+            merged: list[dict] = []
+            added = updated = unchanged = 0
+            for row in videos:
+                old = existing.get(row["id"])
+                if old is None:
+                    added += 1
+                    merged.append(row)
+                    continue
+                keep = copy.deepcopy(old)
+                for key, value in row.items():
+                    if key in ("uploaded_at", "touched_at"):
+                        continue  # 时间戳只在清单明确给出时覆盖，避免导入把上传时间抹成 0
+                    if value in ("", None, 0, 0.0) and keep.get(key) not in ("", None, 0, 0.0):
+                        continue  # 清单里空着的列不覆盖已有信息
+                    keep[key] = value
+                for key in ("uploaded_at", "touched_at"):
+                    if row.get(key):
+                        keep[key] = row[key]
+                if keep == old:
+                    unchanged += 1
+                    merged.append(old)
+                else:
+                    updated += 1
+                    merged.append(keep)
+            listed = {row["id"] for row in videos}
+            kept_rows = [row for tid, row in existing.items() if tid not in listed]
+            merged.extend(kept_rows)
+            merged.sort(key=lambda item: (not item["id"].isdigit(),
+                                          int(item["id"]) if item["id"].isdigit() else 0, item["id"]))
+
+            old_library = self.data["library"]
+            old_tags = [str(tag) for tag in (old_library.get("tags") or [])]
             project_tags = _clean_tags(project.get("tags"))
-            project_categories = project.get("tag_categories") or {}
-            order: list[str] = list(TAG_CATEGORIES)
-            for value in project_categories.values():
-                name = str(value or "").strip()
+            tags = list(old_tags)
+            for tag in project_tags:
+                if tag not in tags:
+                    tags.append(tag)
+            order = [str(name) for name in (old_library.get("category_order") or []) if str(name)]
+            for name in list(TAG_CATEGORIES) + [str(value).strip() for value in
+                                                (project.get("tag_categories") or {}).values()]:
                 if name and name not in order:
                     order.append(name)
-            self.data["library"] = {
-                "version": 2,
-                "tags": project_tags,
-                "categories": normalize_tag_categories(project_tags, project_categories, allowed=order),
-                "category_order": order,
-            }
-            self.data["project"] = {
-                "project_id": str(project.get("project_id") or ""),
-                "source_root": str(project.get("source_root") or ""),
-                "roots": [str(value) for value in (project.get("roots") or []) if str(value)],
-                "next_id": int(project.get("next_id") or 1),
-            }
-            self.data["videos"] = videos
-            self.data.setdefault("migrated_from", None)
+            project_categories = {str(key): str(value).strip()
+                                  for key, value in (project.get("tag_categories") or {}).items()
+                                  if str(value or "").strip()}
+            categories = dict(old_library.get("categories") or {})
+            categories.update(normalize_tag_categories(tags, project_categories, allowed=order))
+            self.data["library"] = {"version": 2, "tags": tags, "categories": categories,
+                                    "category_order": order}
+
+            old_project = self.data["project"]
+            new_project = dict(old_project)
+            for key in ("project_id", "source_root"):
+                value = str(project.get(key) or "")
+                if value:
+                    new_project[key] = value
+            roots = [str(value) for value in (project.get("roots") or []) if str(value)]
+            if roots:
+                new_project["roots"] = roots
+            try:
+                imported_next = int(project.get("next_id") or 0)
+            except (TypeError, ValueError):
+                imported_next = 0
+            highest = max((int(item["id"]) for item in merged if item["id"].isdigit()), default=0) + 1
+            new_project["next_id"] = max(int(old_project.get("next_id") or 1), imported_next, highest)
+            self.data["project"] = new_project
+            self.data["videos"] = merged
             self.data["migrated_from"] = {
                 "kind": "xlsx", "path": str(source), "imported_at": time.time(),
                 "rows": len(videos), "deprecated": deprecated, "untagged": untagged,
             }
-            return {"changed": 1, "detail": {"source": str(source), "rows": len(videos)},
-                    "affected": len(videos)}
+            library_changed = (
+                tags != old_tags
+                or categories != dict(old_library.get("categories") or {})
+                or order != [str(name) for name in (old_library.get("category_order") or [])]
+                or new_project != old_project)
+            changed = 1 if (added or updated or library_changed) else 0
+            return {"changed": changed,
+                    "detail": {"source": str(source), "rows": len(videos), "added": added,
+                               "updated": updated, "kept": len(kept_rows)},
+                    "affected": added + updated, "added": added, "updated": updated,
+                    "kept": len(kept_rows), "unchanged": unchanged}
 
         result = self._mutate(op, user=user, revision=None, action="import_xlsx")
-        return {**report, "dry_run": False, "written": True, "revision": result["revision"]}
+        return {**report, "dry_run": False, "written": bool(result.get("changed")), **result}
 
     @staticmethod
-    def _check_import(report: dict) -> None:
-        if report["rows"] <= 0:
-            raise StoreError("标签清单里没有任何视频行")
+    def _check_import(report: dict, *, allow_empty: bool = False) -> None:
+        if report["rows"] <= 0 and not allow_empty:
+            raise StoreError("标签清单里没有任何视频行；确认要导入空清单请显式传 allow_empty=True")
         if report["duplicate_ids"]:
-            raise StoreError(f"清单中有 {report['duplicate_ids']} 个重复模板ID")
+            raise StoreError(f"清单中有 {report['duplicate_ids']} 个重复模板ID，请先修正清单")
 
     def export_to_xlsx(self, destination: str | Path) -> Path:
         return save_xlsx(self.to_project(), destination)

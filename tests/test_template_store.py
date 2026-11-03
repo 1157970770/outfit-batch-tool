@@ -394,7 +394,7 @@ def test_versions(tmp: Path) -> None:
     store.apply_project_diff(base, current, user="host")
     assert store.row("006") is not None
     old_name = store.list_versions()[-1]["name"]
-    result = store.restore_version(old_name, user="alice")
+    result = store.restore_version(old_name, user="alice", revision=store.revision)
     assert store.row("006") is None, "回滚到没有 006 的版本后应消失"
     assert result["added_since"] == 1, result
     backup_payload = store.read_version(result["backup"])

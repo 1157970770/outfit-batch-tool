@@ -30,6 +30,7 @@ REQUIRED = [
     "test_core",
     "test_template_catalog",
     "test_template_store",
+    "test_tag_truth",
     "test_cos_rest",
     "test_style_usage",
     "test_web_auth",
