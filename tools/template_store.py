@@ -197,6 +197,15 @@ def _empty_data() -> dict:
     }
 
 
+def _clamp_rating(value) -> int:
+    """评分钳到 0-5：非法/缺失一律 0（未打分）。"""
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, rating))
+
+
 def _normalize_video(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise StoreUnavailable("标签真源里的视频条目格式错误")
@@ -225,6 +234,10 @@ def _normalize_video(raw: dict) -> dict:
         "original_name": str(raw.get("original_name") or ""),
         "touched_at": float(raw.get("touched_at") or 0),
         "touched_by": str(raw.get("touched_by") or ""),
+        # 评分三件套必须进白名单，否则每次重载/回滚都会把评分剥掉（踩过坑：只剩最后一次打分）
+        "rating": _clamp_rating(raw.get("rating")),
+        "rating_at": float(raw.get("rating_at") or 0),
+        "rating_by": str(raw.get("rating_by") or ""),
     }
 
 

@@ -216,6 +216,22 @@ def test_rating(tmp: Path) -> None:
     assert store.path.read_bytes() == before
 
 
+def test_rating_survives_other_writes(tmp: Path) -> None:
+    """回归：评分必须跨其他写操作保留（_normalize_video 曾把 rating 从白名单漏掉，
+    导致每次重载/再写都把已有评分清零，只剩最后一次打分）。"""
+    store = new_store(tmp)
+    store.set_rating(["001"], 4, user="alice")
+    store.set_rating(["002"], 5, user="bob")     # 另一个人打分
+    store.set_tags(["003"], ["近景"], mode="replace", user="carol")  # 无关写操作
+    store.deprecate(["003"], True, user="carol")                    # 弃用也是写操作
+    assert store.row("001")["rating"] == 4, "001 的评分被后续写操作清掉了"
+    assert store.row("002")["rating"] == 5, "002 的评分被后续写操作清掉了"
+    # 落盘重载（等价别的进程读过再写）之后评分仍在
+    reloaded = TemplateStore(store.path)
+    assert reloaded.row("001")["rating"] == 4
+    assert reloaded.row("002")["rating"] == 5
+
+
 def test_library(tmp: Path) -> None:
     store = new_store(tmp)
     # 近景：001、003 使用；中远景：002 使用
