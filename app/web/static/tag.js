@@ -283,7 +283,7 @@
     });
     const ORDER = {
       id: (a, b) => Number(a.id) - Number(b.id),
-      uploaded: (a, b) => Number(b.uploaded_at || 0) - Number(a.uploaded_at || 0),
+      uploaded: (a, b) => Number(b.uploaded_at || b.touched_at || 0) - Number(a.uploaded_at || a.touched_at || 0),
       size: (a, b) => Number(b.size_mb || 0) - Number(a.size_mb || 0),
       tags: (a, b) => b.tags.length - a.tags.length,
       updated: (a, b) => Number(b.touched_at || 0) - Number(a.touched_at || 0),
@@ -353,7 +353,8 @@
 
       const nameCell = document.createElement('span');
       nameCell.className = 'tag-row-name';
-      const uploadedAt = Number(video.uploaded_at || 0);
+      // 早期上传的行没有 uploaded_at（字段是后加的），退回最近修改时间，排序与「新」标记才一致
+      const uploadedAt = Number(video.uploaded_at || video.touched_at || 0);
       const isNew = uploadedAt > 0 && (Date.now() / 1000 - uploadedAt) < 72 * 3600;
       if (isNew) {
         const badge = document.createElement('span');
