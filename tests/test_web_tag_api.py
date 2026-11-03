@@ -143,9 +143,9 @@ def main() -> int:
         code, headers, raw = call(alice, base, "/")
         assert code == 200, code
         html = raw.decode("utf-8")
-        for needle in ('data-view="tag-view"', "/static/tag.js", "/static/tag.css", ">标签<"):
+        for needle in ('data-view="tag-view"', "/static/tag.js", "/static/tag.css", ">视频库<"):
             assert needle in html, f"页面缺少 {needle}"
-        assert "标签" in html.split('data-view="admin-view"')[1].split("RunningHub")[0], "「标签」必须夹在管理与 RunningHub 之间"
+        assert "视频库" in html.split('data-view="admin-view"')[1].split("RunningHub")[0], "「视频库」必须夹在管理与 RunningHub 之间"
         csp = headers.get("Content-Security-Policy", "")
         assert "script-src 'self'" in csp, csp
 

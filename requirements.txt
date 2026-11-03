@@ -1,6 +1,3 @@
-# 桌面界面（app/main.py）
-PySide6>=6.5
-
 # 占位图生成、测试用图（demo.py / tests）
 Pillow>=9.0
 

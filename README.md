@@ -3,14 +3,12 @@
 1 张定妆图 + N 个视频模板 → N 条 7 秒换装视频，浏览器操作，主机跑任务。
 生成走**阿里云百炼官方** `wan3.0-video`，成品落本地，可选归档腾讯云 COS。
 
-> **当前产品线：网页版（v0.6.0）。桌面 exe 版自 2026-11-02 起暂时废弃，不再构建与维护。**
 > 接手开发先看 [AGENTS.md](AGENTS.md)（入口地图），再看 [docs/architecture.md](docs/architecture.md)（代码架构）。
 
-| 产品线 | 入口 | 状态 | 说明 |
-| --- | --- | --- | --- |
-| **网页版** | `run_web.py` → `app/web/` | ✅ **主线，维护中** | 局域网多账号，管理员按账户看用量 |
-| 桌面 exe 版 | `app/main.py` + `*.spec` | ⏸ **暂时废弃** | 代码与文档保留，见第六节 |
-| 引擎 / CLI | `app/core.py`、`app/wan_api.py`、`wan3_r2v.py` | ✅ 两条线共用 | 离线演练、批量脚本 |
+| 组成 | 入口 | 说明 |
+| --- | --- | --- |
+| 网页端 | `run_web.py` → `app/web/` | 局域网多账号，管理员按账户看用量 |
+| 引擎 / CLI | `app/core.py`、`app/wan_api.py`、`wan3_r2v.py` | 离线演练、批量脚本 |
 
 ---
 
@@ -53,7 +51,7 @@ python run_web.py
 | 小批量试跑 | 三列控制台一屏完成：定妆图 → 场景与参数 → 提示词，单次上限 3 条 |
 | 大批量生产 | 新建批次（批次号/备注/定妆图）→ 筛选候选 → 锁定清单 → 分多轮「生产 N 条」→ 导出成片 ZIP |
 | 历史任务 | 按批次号/账户分组查看，重试失败项、下载成片与 CSV 报告 |
-| 标签（所有人） | 给视频打标签 / 批量改标签、**上传新视频**（≤50MB，直传 COS 并立即可用）、**弃用与恢复**（软删除）、标签库与**自定义大类**的新建/改名/合并/删除、整库版本历史与回滚；数据落 `web-data/template_tags.json`，网页与桌面打标器共用 |
+| 标签（所有人） | 给视频打标签 / 批量改标签、**上传新视频**（≤50MB，直传 COS 并立即可用）、**弃用与恢复**（软删除）、标签库与**自定义大类**的新建/改名/合并/删除、整库版本历史与回滚；数据落 `web-data/template_tags.json`，网页与本地打标工具共用 |
 | 管理（仅 admin） | 服务状态、账号列表、重新加载场景、**账户用量**（条数/成功失败/计费秒/预估金额，点账户看逐条明细并导出 CSV） |
 
 权限按 `owner` 隔离：普通账号只看自己的任务与批次，管理员可按账户筛选。
@@ -118,18 +116,9 @@ python tests/test_batches.py       # 批次全流程 + 额度断言
 python demo.py --count 5           # 一键演练整条链路（假百炼）
 ```
 
-`tests/test_prompts.py`、`tests/test_ui.py` 需要 PySide6，属于废弃的桌面线；本机没装会跳过。
+`tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端，全部离线、不花钱。
 
-## 六、历史：桌面 exe 版（暂时废弃）
-
-自 2026-11-02 起不再构建、不再修问题。保留原因：部分客户机仍在用，且引擎与协议层与网页版共用。
-
-- 入口 `app/main.py`（PySide6）；打包 `换装批量生产器*.spec`、`scripts/build.bat`；
-- 使用与分发：`app/README.md`、[docs/usage-aliyun-wan3.md](docs/usage-aliyun-wan3.md)；
-- 授权与加密缓存：[docs/license-integration.md](docs/license-integration.md)；
-- 若将来恢复，需要补齐网页版已有的双额度限流与快速通道——**桌面线目前没有这些**。
-
-## 七、引擎与命令行（两条线共用）
+## 六、引擎与命令行
 
 ```bash
 # 离线演练：造占位图 → 本地假百炼 → 提交/轮询/下载/记账
@@ -152,7 +141,7 @@ python wan3_r2v.py run --tasks batch/tasks.batch.json --concurrency 3
 | `python scripts/cos_check.py` | COS 连通性自检（写/签/读/列/删） |
 | `python scripts/archive_to_cos.py --root out` | 历史成片补传 COS，回写 `cos_key` |
 
-## 八、成片归档到 COS
+## 七、成片归档到 COS
 
 结果链接 **24 小时失效**，本地磁盘迟早会满；接一层 COS 才有长期地址。
 
@@ -173,7 +162,7 @@ python scripts/cos_check.py
 建桶、CAM 最小权限、报错对照、费用见 [docs/cos-setup.md](docs/cos-setup.md)；
 客户端持密钥的风险评估见 [docs/adr-001-cos-client-credential.md](docs/adr-001-cos-client-credential.md)。
 
-## 九、生产链路
+## 八、生产链路
 
 ```
 定妆图（本地上传 1 次）
@@ -185,7 +174,7 @@ python scripts/cos_check.py
              └─（可选）归档 COS → prod/output/<日期>/<批次>/
 ```
 
-## 十、核心约定（别改错）
+## 九、核心约定（别改错）
 
 - 官方 `duration` 是**整数**：`7` 或 `-1`；旧 RunningHub 才是字符串 `"7"`；
 - 素材统一进 `input.media[]`：`reference_image` / `reference_video` / `reference_audio`；
@@ -194,7 +183,7 @@ python scripts/cos_check.py
 - 结果链接与 `task_id` 都只有 **24 小时**，成功即下载；
 - 官方 `usage` 不含金额，按 `duration` 记账，真实账单以阿里云为准。
 
-## 十一、文档索引
+## 十、文档索引
 
 | 文档 | 用途 |
 | --- | --- |
@@ -205,5 +194,4 @@ python scripts/cos_check.py
 | [docs/web-lan.md](docs/web-lan.md) | 局域网部署与排障 |
 | [docs/wan-3.0-reference-to-video.md](docs/wan-3.0-reference-to-video.md) | 官方接口规格 |
 | [docs/cos-setup.md](docs/cos-setup.md) | COS 接入手册 |
-| [docs/handover.md](docs/handover.md) | 历史交接手册（部分内容早于网页版，注意时效） |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |

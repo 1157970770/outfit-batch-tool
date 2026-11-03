@@ -1,7 +1,6 @@
 # ADR-001：客户端持有 COS 子账号密钥（接受风险，暂不改架构）
 
 **状态**：已接受　**日期**：2026-10-26　**决策人**：项目负责人
-**相关**：[license-integration.md](license-integration.md) §10
 
 ---
 

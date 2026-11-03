@@ -8,8 +8,7 @@
 
 约定：
   · 每个套件是独立脚本，退出码 0 即通过；
-  · 依赖 PySide6 的套件（test_ui / test_prompts）在没装时自动跳过——
-    它们属于已暂时废弃的桌面线，不算回归；
+  · 桌面 exe 版已移出本仓库，PySide6 相关套件不再包含在内；
   · 任一必需套件失败，整体退出码为 1。
 """
 from __future__ import annotations
@@ -29,7 +28,6 @@ REQUIRED = [
     "test_wan_api",
     "test_storage",
     "test_core",
-    "test_remote_config",
     "test_template_catalog",
     "test_template_store",
     "test_cos_rest",
@@ -40,7 +38,7 @@ REQUIRED = [
     "test_web_tag_api",
     "test_batches",
 ]
-OPTIONAL = ["test_ui", "test_prompts"]   # 需要 PySide6，桌面线
+OPTIONAL: list[str] = []
 PER_SUITE_TIMEOUT = 900                  # 单套 15 分钟
 
 

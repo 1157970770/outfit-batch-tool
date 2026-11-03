@@ -8,13 +8,10 @@
 局域网网页版批量视频生产器：1 张定妆图 + N 个视频模板 → N 条 7 秒换装视频，
 调用阿里云百炼 `wan3.0-video`，成品落本地并可选归档腾讯云 COS。
 
-**当前唯一在维护的产品线是网页版。** 桌面 exe 版自 2026-11-02 起**暂时废弃**（代码保留，不构建、不修 bug）。
-
-| 产品线 | 入口 | 状态 | 技术栈 |
-| --- | --- | --- | --- |
-| 网页版（主线） | `run_web.py` → `app/web/` | ✅ 维护中（v0.6.0） | 标准库 `ThreadingHTTPServer` + 原生 JS |
-| 桌面 exe 版 | `app/main.py` + `*.spec` | ⏸ **暂时废弃** | PySide6 + PyInstaller |
-| 引擎（共用） | `app/core.py` / `app/wan_api.py` | ✅ 两条线共用 | 纯 Python |
+| 组成 | 入口 | 说明 |
+| --- | --- | --- |
+| 网页端 | `run_web.py` → `app/web/` | 标准库 `ThreadingHTTPServer` + 原生 JS |
+| 引擎 | `app/core.py` / `app/wan_api.py` | 纯 Python，网页与 CLI 共用 |
 
 ## 2. 三分钟跑起来
 
@@ -46,7 +43,7 @@ app/web/server.py      路由 / 鉴权 / 静态文件 / CSV·ZIP 下载   ← �
           │
           ▼
 tools/template_store.py  标签唯一真源（JSON）：原子写 + 跨进程锁 + revision 乐观锁
-tools/template_catalog.py xlsx 导入导出、扫描、指纹、标签校验（网页与桌面共用）
+tools/template_catalog.py xlsx 导入导出、扫描、指纹、标签校验（网页与本地打标工具共用）
           │
           ▼
 app/core.py            BatchRunner：线程池，逐条 提交/轮询/下载，回调事件
@@ -56,9 +53,8 @@ app/wan_api.py         WanClient：DashScope(默认)/RunningHub 适配，双令�
 app/storage.py         COS / 本地存储适配
 ```
 
-> **网页端不经过桌面线的云函数授权与配置下发**：`app/license.py`、`app/secure_store.py`、
-> `server/license_api.py`、`server/passwords.json` 只服务已废弃的 exe 版，网页层没有任何引用。
-> 网页的配置一律来自本地 `server/config.json` + `server/web.json`，改完重启生效。
+> 配置一律来自本地 `server/config.json` + `server/web.json`，改完重启生效；
+> 没有云端配置下发，也没有授权校验（仓库里不再包含这些模块）。
 
 一次小批量请求经过：`POST /api/uploads` → `POST /api/jobs`（落 `web-data/jobs/<id>.json`）
 → 调度线程 `_dispatch` → `_run_job` → `BatchRunner.run()` → 事件回写 `records/done`
@@ -89,7 +85,7 @@ app/storage.py         COS / 本地存储适配
 | `server/*.example.json` | 上述两者的模板 | ✅ |
 | `web-data/jobs/<id>.json` | 任务状态与逐条记录 | ❌ |
 | `web-data/batches/<id>.json` | 批次与条目 | ❌ |
-| `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与桌面打标器共用；`.bak` 是上一版 | ❌ |
+| `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与本地打标工具共用；`.bak` 是上一版 | ❌ |
 | `web-data/manifest_overlay.json` | 网页上传的视频索引（云端 manifest 里没有它们）；启动时与 manifest 合并 | ❌ |
 | `web-data/tag_versions/` | 真源版本快照（gzip，整库含每条标签与弃用态）；自动留 50 版 + 手动 50 版，回滚前另存备份 | ❌ |
 | `web-data/{uploads,output,logs}/` | 定妆图、成片、任务日志 | ❌ |
@@ -123,7 +119,7 @@ python tests/test_web.py         # 网页端端到端：登录/上传/任务/用
 python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分组 + 额度断言
 ```
 
-`test_prompts` / `test_ui` 依赖 PySide6，本机没装会跳过——它们属于**已废弃的桌面线**，失败不算回归。
+`tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端，全部离线运行。
 
 ## 7. 别动 / 小心
 
@@ -140,7 +136,7 @@ python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分
 - `server.py` 1161 行、`wan_api.py` 1060 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
 - 测试是独立脚本，没有 pytest 夹具；`tests/run_all.py` 只是顺序执行器。
 - `wan.price_per_second` 三档均为 `null`，金额用公开价目表兜底，与真实账单有偏差。
-- 桌面线的 `app/main.py`、`*.spec`、`docs/usage-aliyun-wan3.md` 保持原样即可，不要删。
+- 本仓库只维护网页端与引擎；不要再引入 GUI 界面或桌面打包相关代码。
 
 ## 9. 文档索引
 
