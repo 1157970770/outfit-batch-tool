@@ -55,6 +55,15 @@ def body(raw):
         return {}
 
 
+
+def post_raw(opener, base, path, data: bytes, headers):
+    request = urllib.request.Request(base + path, data=data, method="POST", headers=headers)
+    try:
+        with opener.open(request, timeout=30) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read()
+
 def write_workbook(path: Path) -> Path:
     workbook = Workbook()
     sheet = workbook.active
@@ -98,7 +107,8 @@ def build_env(tmp: Path):
     api_config.write_text(json.dumps({
         "wan": {"provider": "dashscope", "api_key": "mock-key", "model": "wan3.0-video"},
         "manifest_url": str(manifest),
-        "cos": {"enabled": False},
+        "cos": {"enabled": True, "provider": "local", "root": str(tmp / "cos-root"),
+                "bucket": "local-000000"},
     }), encoding="utf-8")
     secret = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
     web_config = tmp / "web.json"
@@ -276,6 +286,44 @@ def main() -> int:
         assert snap.get("unchanged") is not True, "桌面端写过之后必须返回新快照"
         assert snap["revision"] == external.revision
         assert {video["id"]: video for video in snap["videos"]}["002"]["tags"] == ["中远景"]
+
+        # ---------- 版本：整库快照、手动打版、回滚 ----------
+        code, _, raw = call(alice, base, "/api/tags/versions?limit=100")
+        assert code == 200, body(raw)
+        listed = body(raw)
+        assert listed["versions"], "导入后就应该有自动版本"
+        assert listed["versions"][0]["kind"] == "auto"
+        revision = body(call(alice, base, "/api/tags/snapshot")[2])["revision"]
+
+        code, _, raw = call(alice, base, "/api/tags/versions", "POST",
+                            {"note": "接口测试版本"})
+        assert code == 200, body(raw)
+        manual = body(raw)["version"]
+        assert manual["kind"] == "manual" and manual["note"] == "接口测试版本"
+
+        code, _, raw = call(alice, base, "/api/tags/videos/tags", "POST",
+                            {"revision": revision, "ids": ["002"], "tags": ["特写"], "mode": "replace"})
+        assert code == 200, body(raw)
+        assert {v["id"]: v for v in body(call(alice, base, "/api/tags/snapshot")[2])["videos"]}["002"]["tags"] == ["特写"]
+
+        revision = body(call(alice, base, "/api/tags/snapshot")[2])["revision"]
+        code, _, raw = call(alice, base, "/api/tags/versions/restore", "POST",
+                            {"name": manual["name"], "revision": revision})
+        assert code == 200, body(raw)
+        restored = body(raw)
+        assert restored["restored"] == 4 and restored["backup"], restored
+        snap = body(call(alice, base, "/api/tags/snapshot")[2])
+        assert {v["id"]: v for v in snap["videos"]}["002"]["tags"] == ["中远景"], "回滚后标签要回到版本里的值"
+
+        names = {item["name"] for item in body(call(alice, base, "/api/tags/versions")[2])["versions"]}
+        assert restored["backup"] in names and manual["name"] in names
+
+        code, _, raw = call(alice, base, "/api/tags/versions/restore", "POST",
+                            {"name": "v999999-1-auto-abcd.json.gz"})
+        assert code == 404, (code, body(raw))
+        code, _, raw = call(alice, base, "/api/tags/versions/restore", "POST",
+                            {"name": "../../etc/passwd"})
+        assert code == 400, (code, body(raw))
     finally:
         server.shutdown()
         server.server_close()

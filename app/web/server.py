@@ -94,13 +94,15 @@ class WebApplication:
         # `_template_store` 是 COS 存储对象，这里的是 `tag_store`，两者别混。
         self.tag_store = getattr(settings, "tag_store", None)
         self.manifest_items = list(getattr(settings, "manifest_items", []) or [])
+        self.manifest_overlay = [dict(item) for item in (getattr(settings, "manifest_overlay", []) or [])]
+        self.overlay_lock = threading.Lock()
         self.manifest_warning = str(getattr(settings, "manifest_warning", "") or "")
         self.manifest_pulled_at = float(getattr(settings, "manifest_pulled_at", 0) or time.time())
         self.catalog_lock = threading.RLock()
         if self.tag_store is not None:
             # 真源模式：必须重新 attach 一次，才能拿到被排除在候选集之外的
             # 弃用行（retired_by_id）与未打标行（untagged_by_id）——标签页要展示它们。
-            self.catalog = TemplateCatalog(self.manifest_items)
+            self.catalog = TemplateCatalog(self._merged_manifest(self.manifest_items))
             self.catalog.attach_tag_store(self.tag_store)
         else:
             self.catalog = TemplateCatalog(settings.templates)
@@ -169,6 +171,21 @@ class WebApplication:
         except Exception as exc:  # noqa: BLE001 - 云端不可用时降级为"只按本地清单筛选"
             return [], f"云端模板索引不可用（{exc}），本次仅按本地生产清单筛选"
 
+    def _merged_manifest(self, items: list[dict]) -> list[dict]:
+        """云端 manifest + 本地上传 overlay：网页上传的视频凭 overlay 才能 join 出地址。"""
+        if not self.manifest_overlay:
+            return items
+        seen = {str(item.get("key") or "") or str(item.get("url") or "") for item in items}
+        merged = list(items)
+        for entry in self.manifest_overlay:
+            marker = str(entry.get("key") or "") or str(entry.get("url") or "")
+            if marker and marker in seen:
+                continue
+            merged.append(dict(entry))
+            if marker:
+                seen.add(marker)
+        return merged
+
     def rebuild_catalog(self, *, reload_manifest: bool = False) -> dict:
         """重建内存候选集；默认复用缓存的 manifest（改标签不必去拉 COS，<50 ms）。"""
         with self.catalog_lock:
@@ -177,6 +194,7 @@ class WebApplication:
                 items, warning = self._pull_manifest()
                 self.manifest_items, self.manifest_warning = items, warning
                 self.manifest_pulled_at = time.time()
+            items = self._merged_manifest(items)
             catalog = TemplateCatalog(items)
             info: dict = {}
             if self.tag_store is not None:
@@ -328,11 +346,11 @@ def make_handler(app: WebApplication):
                 return None
             return user
 
-        def _tags(self, fn):
+        def _tags(self, fn, status: int = 200):
             """标签页接口统一出口：业务异常 → HTTP 码，响应体保持 {ok,error,...} 结构。"""
             from app.web.tag_api import ApiError
             try:
-                return self._json(fn())
+                return self._json(fn(), status)
             except ApiError as exc:
                 return self._json({"ok": False, "error": str(exc), **exc.payload()}, exc.status)
             except ValueError as exc:
@@ -402,6 +420,14 @@ def make_handler(app: WebApplication):
                 query = urllib.parse.parse_qs(parsed.query)
                 rev = str(query.get("rev", [""])[0] or "").strip()
                 return self._tags(lambda: tag_api.snapshot(app, rev or None))
+            if path == "/api/tags/versions":
+                if not self._user():
+                    return
+                from app.web import tag_api
+                query = urllib.parse.parse_qs(parsed.query)
+                raw_limit = str(query.get("limit", ["100"])[0] or "")
+                limit = int(raw_limit) if raw_limit.isdigit() else 100
+                return self._tags(lambda: tag_api.versions(app, limit))
             if path.startswith("/api/uploads/"):
                 user = self._user()
                 if not user:
@@ -563,6 +589,9 @@ def make_handler(app: WebApplication):
             user = self._user()
             if not user:
                 return
+            # 视频上传是原始字节流（不用 JSON：50MB 走 base64 会白白多占 1/3 内存）
+            if path == "/api/tags/videos/upload":
+                return self._upload_template(user)
             try:
                 data = self._body()
             except OverflowError as exc:
@@ -611,7 +640,9 @@ def make_handler(app: WebApplication):
                 parts = path.strip("/").split("/")
                 action = parts[-1] if len(parts) >= 3 else ""
                 handler = {"tags": tag_api.set_tags, "deprecate": tag_api.deprecate,
-                           "library": tag_api.library, "impact": tag_api.impact}.get(action)
+                           "library": tag_api.library, "impact": tag_api.impact,
+                           "versions": tag_api.create_version,
+                           "restore": tag_api.restore_version}.get(action)
                 if handler is None:
                     return self._error("页面或接口不存在。", 404)
                 return self._tags(lambda: handler(app, data, user))
@@ -703,6 +734,49 @@ def make_handler(app: WebApplication):
             token = app.signer.issue(username, record)
             extra = {"Set-Cookie": f"outfit_sid={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={app.signer.hours * 3600}"}
             return self._json({"ok": True, "user": {"username": username, "role": record.get("role", "user")}}, extra=extra)
+
+        def _upload_template(self, user):
+            """接收单个视频（原始字节流）：暂存 → 校验 → 传 COS → 登记清单。"""
+            from app.web import tag_api
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if length <= 0:
+                return self._error("请选择要上传的视频文件。", 400)
+            if length > tag_api.MAX_UPLOAD_MB * 1024 * 1024:
+                return self._error(f"单个视频不能超过 {tag_api.MAX_UPLOAD_MB}MB。", 413)
+            filename = Path(urllib.parse.unquote(self.headers.get("X-File-Name", ""))).name or "video.mp4"
+            suffix = Path(filename).suffix.lower()
+            if suffix not in {".mp4", ".mov", ".m4v"}:
+                return self._error("只支持 mp4 / mov / m4v 视频。", 400)
+            try:
+                tags = json.loads(urllib.parse.unquote(self.headers.get("X-Tags", "[]")) or "[]")
+            except json.JSONDecodeError:
+                return self._error("标签参数无效。", 400)
+            if not isinstance(tags, list):
+                return self._error("标签参数无效。", 400)
+
+            auto_number = str(self.headers.get("X-Auto-Number", "") or "").strip() == "1"
+            folder = app.settings.data_dir / "uploads" / "tpl"
+            folder.mkdir(parents=True, exist_ok=True)
+            temp = folder / f"{uuid.uuid4().hex}{suffix}"
+            remaining = length
+            try:
+                with temp.open("wb") as handle:
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            raise ConnectionError("连接中断，文件未传完")
+                        handle.write(chunk)
+                        remaining -= len(chunk)
+                return self._tags(
+                    lambda: tag_api.upload_video(app, temp, filename, tags, user,
+                                                 auto_number=auto_number), 201)
+            except (ConnectionError, OSError) as exc:
+                return self._error(f"接收文件失败：{exc}", 400)
+            finally:
+                temp.unlink(missing_ok=True)
 
         def _upload(self, data, user):
             filename = Path(str(data.get("filename") or "outfit.jpg")).name

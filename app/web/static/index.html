@@ -303,6 +303,8 @@
           <div class="top-actions">
             <span id="tag-rev" class="tag-rev muted">未加载</span>
             <button id="tag-refresh" class="quiet" type="button">刷新</button>
+            <button id="tag-upload-btn" class="primary" type="button">上传视频</button>
+            <button id="tag-versions-btn" class="quiet" type="button">版本历史</button>
             <button id="tag-library-btn" class="quiet" type="button">标签库管理</button>
           </div>
         </div>
@@ -317,6 +319,7 @@
           </select></label>
           <label class="field tag-compact">排序<select id="tag-sort">
             <option value="id" selected>按模板ID</option>
+            <option value="uploaded">按上传时间（新→旧）</option>
             <option value="size">按大小</option>
             <option value="tags">按标签数</option>
             <option value="updated">按最近修改</option>
@@ -389,8 +392,10 @@
               <div class="tag-editor-foot">
                 <button id="tag-save" class="primary btn-sm" type="button">保存标签</button>
                 <button id="tag-clear-tags" class="quiet btn-sm" type="button">取消勾选</button>
-                <button id="tag-deprecate-btn" class="quiet btn-sm" type="button">弃用</button>
-                <button id="tag-restore-btn" class="quiet btn-sm hidden" type="button">恢复</button>
+                <span class="tag-danger-group">
+                  <button id="tag-deprecate-btn" class="tag-danger" type="button" title="不再参与生产，可随时恢复；不删除云端对象与本机文件">弃用此视频</button>
+                  <button id="tag-restore-btn" class="tag-danger is-restore hidden" type="button" title="重新加入生产候选">恢复使用</button>
+                </span>
               </div>
               <p id="tag-editor-hint" class="muted"></p>
             </div>
@@ -411,6 +416,48 @@
           <div id="tag-lib-list" class="tag-lib-list"></div>
           <p class="muted tag-lib-note">合并/删除会先显示「影响 N 条视频」，确认后立即生效且不可撤销；每次操作都会记录操作人。</p>
         </aside>
+
+        <aside id="version-drawer" class="tag-drawer hidden" aria-label="版本历史">
+          <div class="tag-drawer-head">
+            <h3>版本历史</h3>
+            <button id="version-close" class="quiet btn-sm" type="button">关闭</button>
+          </div>
+          <form id="version-create" class="version-create">
+            <input id="version-note" maxlength="80" autocomplete="off" placeholder="给当前状态起个名字（可选，如 上线前）">
+            <button class="primary btn-sm" type="submit">保存当前为版本</button>
+          </form>
+          <p class="muted version-hint">整份视频库 + 标签一起存。每次改标签、弃用、改标签库都会自动存一版（留最近 50 版）；手动版本长期保留。回滚前会自动备份当前状态，可再撤回。</p>
+          <p id="version-error" class="error hidden"></p>
+          <div id="version-list" class="version-list"></div>
+        </aside>
+
+        <div id="upload-modal" class="upload-modal hidden" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+          <div class="upload-card">
+            <div class="upload-head">
+              <h3 id="upload-title">上传新视频</h3>
+              <button id="upload-close" class="quiet btn-sm" type="button">关闭</button>
+            </div>
+            <p class="muted upload-hint">单个 ≤ 50MB，支持 mp4 / mov / m4v。上传后直接进云端模板库并登记进清单，可立即用于生产；文件名重复会自动加 -2。</p>
+            <label id="upload-drop" class="drop-zone upload-drop">
+              <input id="upload-files" type="file" accept=".mp4,.mov,.m4v,video/mp4,video/quicktime" multiple>
+              <span class="drop-copy"><span class="upload-icon">↑</span><strong>选择或拖入视频</strong><small>可多选，按顺序逐个上传</small></span>
+            </label>
+            <label class="batch-toggle upload-auto">
+              <input id="upload-auto-number" type="checkbox" checked>
+              <span>自动编号（忽略原文件名，按清单最后一个编号顺延，如 1412.mp4）</span>
+            </label>
+            <div id="upload-file-list" class="upload-list"></div>
+            <div class="upload-tags">
+              <b>标签（至少选一个，本批共用）</b>
+              <div id="upload-tag-groups" class="tag-editor-groups upload-tag-groups"></div>
+            </div>
+            <div class="upload-foot">
+              <span id="upload-summary" class="muted"></span>
+              <button id="upload-start" class="primary" type="button" disabled>开始上传</button>
+            </div>
+            <p id="upload-error" class="error hidden"></p>
+          </div>
+        </div>
       </section>
 
       <section id="admin-view" class="view">

@@ -353,6 +353,7 @@ class TemplateCatalog:
                 "changed": bool(video.get("changed")),
                 "touched_at": video.get("touched_at"),
                 "touched_by": str(video.get("touched_by") or ""),
+                "uploaded_at": float(video.get("uploaded_at") or 0),
                 "_keys": {_basename(row_path) for row_path in
                           (str(video.get("relative_path") or ""), str(video.get("name") or ""))} - {""},
                 "_size": size,
@@ -430,6 +431,7 @@ class TemplateCatalog:
                 "changed": bool(item.get("changed")),
                 "touched_at": item.get("touched_at"),
                 "touched_by": str(item.get("touched_by") or ""),
+                "uploaded_at": float(item.get("uploaded_at") or 0),
             }
 
         rows = [payload(item) for item in self.items]

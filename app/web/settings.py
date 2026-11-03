@@ -45,6 +45,8 @@ class WebSettings:
     tag_store_error: str = ""
     tag_source: str = "none"                 # "store" | "xlsx" | "none"
     manifest_items: list[dict] = field(default_factory=list)
+    manifest_overlay: list[dict] = field(default_factory=list)
+    manifest_overlay_path: Path | None = None
     manifest_warning: str = ""
     manifest_pulled_at: float = 0.0
 
@@ -178,6 +180,18 @@ def resolve_tag_store_path(web: dict, base: Path, data_dir: Path, *,
     return (Path(data_dir) / "template_tags.json") if use_default else None
 
 
+def _read_overlay(path: Path) -> list[dict]:
+    """网页上传的视频不在云端 manifest 里，用本地 overlay 补 url/key（重启不丢）。"""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = raw.get("entries") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return []
+    return [dict(item) for item in entries if isinstance(item, dict) and (item.get("key") or item.get("url"))]
+
+
 def load_settings(*, base_dir: str | Path | None = None,
                   web_file: str | Path | None = None,
                   api_file: str | Path | None = None,
@@ -227,6 +241,19 @@ def load_settings(*, base_dir: str | Path | None = None,
     elif load_templates:
         manifest_error = "服务端没有配置模板清单"
 
+    # 网页上传的模板不在云端 manifest 里：用本地 overlay 合并，重启后仍能 join 出地址
+    overlay_path = data_dir / "manifest_overlay.json"
+    overlay_items = _read_overlay(overlay_path) if load_templates else []
+    if overlay_items:
+        seen = {str(item.get("key") or "") or str(item.get("url") or "") for item in manifest_items}
+        for item in overlay_items:
+            marker = str(item.get("key") or "") or str(item.get("url") or "")
+            if marker and marker in seen:
+                continue
+            manifest_items.append(item)
+            if marker:
+                seen.add(marker)
+
     # 模板集来源优先级：服务端标签真源（store）> 本机标签工作簿（xlsx，回滚通道）> 纯 manifest。
     # manifest 始终只是"哪些视频已上传云端"的索引，用来补 url/key，不决定标签。
     tag_store_path = (resolve_tag_store_path(web, base, data_dir, use_default=use_runtime_defaults)
@@ -272,5 +299,7 @@ def load_settings(*, base_dir: str | Path | None = None,
                        tag_store_path=tag_store_path, tag_store=tag_store,
                        tag_store_error=tag_store_error, tag_source=tag_source,
                        manifest_items=manifest_items,
+                       manifest_overlay=overlay_items,
+                       manifest_overlay_path=overlay_path,
                        manifest_warning=(f"云端模板索引不可用（{manifest_error}）" if manifest_error else ""),
                        manifest_pulled_at=0.0)

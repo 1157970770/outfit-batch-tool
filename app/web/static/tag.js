@@ -23,6 +23,7 @@
     page: 1, pageSize: 50,
     selected: new Set(), matched: [],
     previewId: '', mode: 'replace', lastMulti: false, pending: new Set(), drawerOpen: false,
+    versions: [], versionOpen: false,
   };
 
   /* ---------------------------------------------------------------- 工具 */
@@ -275,6 +276,7 @@
     });
     const ORDER = {
       id: (a, b) => Number(a.id) - Number(b.id),
+      uploaded: (a, b) => Number(b.uploaded_at || 0) - Number(a.uploaded_at || 0),
       size: (a, b) => Number(b.size_mb || 0) - Number(a.size_mb || 0),
       tags: (a, b) => b.tags.length - a.tags.length,
       updated: (a, b) => Number(b.touched_at || 0) - Number(a.touched_at || 0),
@@ -294,7 +296,7 @@
     }
     const head = document.createElement('div');
     head.className = 'tag-row is-head';
-    ['', 'ID', '文件名', '标签', '状态', '大小'].forEach((text) => {
+    ['', 'ID', '文件名', '标签', '状态', '大小', ''].forEach((text) => {
       const cell = document.createElement('span');
       cell.textContent = text;
       head.append(cell);
@@ -344,8 +346,18 @@
 
       const nameCell = document.createElement('span');
       nameCell.className = 'tag-row-name';
-      nameCell.textContent = video.name || video.relative_path || '(无文件名)';
-      nameCell.title = video.relative_path || video.name || '';
+      const uploadedAt = Number(video.uploaded_at || 0);
+      const isNew = uploadedAt > 0 && (Date.now() / 1000 - uploadedAt) < 72 * 3600;
+      if (isNew) {
+        const badge = document.createElement('span');
+        badge.className = 'tag-new';
+        badge.textContent = '新';
+        nameCell.append(badge);
+      }
+      nameCell.append(document.createTextNode(video.name || video.relative_path || '(无文件名)'));
+      nameCell.title = uploadedAt
+        ? `上传于 ${fmtDateTime(uploadedAt)}`
+        : (video.relative_path || video.name || '');
 
       const tagsCell = document.createElement('span');
       tagsCell.className = 'tag-row-tags';
@@ -372,7 +384,23 @@
       sizeCell.className = 'tag-row-state';
       sizeCell.textContent = fmtSize(video.size_mb);
 
-      row.append(checkCell, idCell, nameCell, tagsCell, stateCell, sizeCell);
+      // 行内快捷「弃 / 恢」：不用先选中，点一下就和大按钮走同一套确认与接口
+      const actCell = document.createElement('span');
+      actCell.className = 'tag-row-act';
+      const act = document.createElement('button');
+      act.type = 'button';
+      act.className = 'tag-mini' + (video.deprecated ? ' is-restore' : '');
+      act.textContent = video.deprecated ? '恢' : '弃';
+      act.title = video.deprecated
+        ? '恢复使用：重新进入生产候选（标签不变）'
+        : '弃用：不再参与生产，可随时恢复；不删除云端对象与本机文件';
+      act.addEventListener('click', (event) => {
+        event.stopPropagation();
+        setDeprecated(!video.deprecated, [video.id]);
+      });
+      actCell.append(act);
+
+      row.append(checkCell, idCell, nameCell, tagsCell, stateCell, sizeCell, actCell);
       row.addEventListener('click', () => selectPreview(video.id));
       table.append(row);
     }
@@ -467,8 +495,13 @@
     }
 
     const allDeprecated = rows.every(row => row.deprecated);
-    $('tag-deprecate-btn').classList.toggle('hidden', allDeprecated);
-    $('tag-restore-btn').classList.toggle('hidden', !allDeprecated);
+    const many = rows.length > 1;
+    const deprecateBtn = $('tag-deprecate-btn');
+    const restoreBtn = $('tag-restore-btn');
+    deprecateBtn.textContent = many ? `弃用 ${rows.length} 条` : '弃用此视频';
+    restoreBtn.textContent = many ? `恢复 ${rows.length} 条` : '恢复使用';
+    deprecateBtn.classList.toggle('hidden', allDeprecated);
+    restoreBtn.classList.toggle('hidden', !allDeprecated);
     updateEditorHint(rows);
   }
 
@@ -535,8 +568,8 @@
     }
   }
 
-  async function setDeprecated(flag) {
-    const targets = editorTargets();
+  async function setDeprecated(flag, idsArg) {
+    const targets = (idsArg && idsArg.length) ? idsArg : editorTargets();
     if (!targets.length) return;
     if (flag) {
       let impact = null;
@@ -660,6 +693,7 @@
 
   function openDrawer() {
     state.drawerOpen = true;
+    if (state.versionOpen) closeVersions();
     const select = $('tag-lib-cat');
     if (!select.childElementCount) {
       for (const category of state.categories.length ? state.categories : ['景别', '适合季节', '场景', '姿势']) {
@@ -675,6 +709,312 @@
   function closeDrawer() {
     state.drawerOpen = false;
     $('tag-drawer').classList.add('hidden');
+  }
+
+  /* ---------------------------------------------------------------- 版本历史 */
+  const VERSION_ACTION = {
+    set_tags: '改标签', deprecate: '弃用/恢复', library_create: '新建标签',
+    library_rename: '标签改名', library_set_category: '改标签分类',
+    library_merge: '合并标签', library_delete: '删除标签',
+    import_xlsx: '导入清单', project_sync: '桌面端同步',
+    restore_version: '回滚版本', manual: '手动版本', before_restore: '回滚前备份',
+  };
+
+  function fmtDateTime(seconds) {
+    if (!seconds) return '—';
+    const date = new Date(Number(seconds) * 1000);
+    if (Number.isNaN(date.getTime())) return '—';
+    const pad = (value) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+      + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  async function loadVersions() {
+    const root = $('version-list');
+    root.replaceChildren(emptyNode('正在加载…'));
+    try {
+      const data = await api('/api/tags/versions?limit=100');
+      state.versions = data.versions || [];
+      renderVersions();
+    } catch (err) {
+      root.replaceChildren(emptyNode(err.message));
+      toast(err.message);
+    }
+  }
+
+  function renderVersions() {
+    const root = $('version-list');
+    root.replaceChildren();
+    if (!state.versions.length) {
+      root.append(emptyNode('还没有版本。改一次标签，或点上方「保存当前为版本」。'));
+      return;
+    }
+    for (const version of state.versions) {
+      const row = document.createElement('div');
+      row.className = 'version-row' + (version.kind === 'manual' ? ' is-pinned' : '');
+
+      const head = document.createElement('div');
+      head.className = 'version-head';
+      const badge = document.createElement('span');
+      badge.className = 'version-badge' + (version.kind === 'manual' ? ' is-manual' : '');
+      badge.textContent = version.kind === 'manual' ? '手动' : '自动';
+      const time = document.createElement('span');
+      time.className = 'version-time';
+      time.textContent = fmtDateTime(version.at);
+      const count = document.createElement('span');
+      count.className = 'version-meta';
+      count.textContent = `r${version.revision} · ${version.count} 条`;
+      head.append(badge, time, count);
+
+      const meta = document.createElement('div');
+      meta.className = 'version-meta';
+      const action = VERSION_ACTION[version.action] || version.action || '变更';
+      meta.textContent = `${action} · ${version.user || '未知'}`
+        + (version.note ? ` · ${version.note}` : '');
+      meta.title = meta.textContent;
+
+      const restoreBtn = document.createElement('button');
+      restoreBtn.type = 'button';
+      restoreBtn.className = 'quiet btn-sm';
+      restoreBtn.textContent = '回滚到此版本';
+      restoreBtn.addEventListener('click', () => restoreVersion(version));
+
+      row.append(head, meta, restoreBtn);
+      root.append(row);
+    }
+  }
+
+  async function restoreVersion(version) {
+    const stamp = fmtDateTime(version.at);
+    const ok = confirm(
+      `把视频库与标签回滚到 ${stamp}（r${version.revision}，${version.count} 条）？\n\n`
+      + '当前状态会先自动备份成「回滚前备份」版本，随时可以再撤回。');
+    if (!ok) return;
+    try {
+      const data = await api('/api/tags/versions/restore', {
+        method: 'POST',
+        body: JSON.stringify({ name: version.name, revision: state.revision }),
+      });
+      toast(`已回滚到 ${stamp}：${data.restored} 条${data.backup ? '，已备份当前状态' : ''}`);
+      closeVersions();
+      state.loaded = false;
+      state.revision = 0;
+      await load();
+      if (app().reloadTemplates) Promise.resolve(app().reloadTemplates()).catch(() => {});
+    } catch (err) {
+      if (err.status === 409) {
+        toast('有人刚改过，已刷新到最新，请再点一次回滚');
+        state.revision = Number(err.data?.revision || 0);
+        state.loaded = false;
+        await load();
+      } else {
+        toast(err.message);
+      }
+    }
+  }
+
+  async function createVersion(event) {
+    event.preventDefault();
+    const note = $('version-note').value.trim();
+    try {
+      await api('/api/tags/versions', { method: 'POST', body: JSON.stringify({ note }) });
+      $('version-note').value = '';
+      toast('已保存当前版本');
+      await loadVersions();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  function openVersions() {
+    state.versionOpen = true;
+    if (state.drawerOpen) closeDrawer();
+    $('version-drawer').classList.remove('hidden');
+    loadVersions();
+  }
+
+  function closeVersions() {
+    state.versionOpen = false;
+    $('version-drawer').classList.add('hidden');
+  }
+
+  /* ---------------------------------------------------------------- 上传新视频 */
+  const UPLOAD_MAX_MB = 50;
+  const UPLOAD_EXT = ['.mp4', '.mov', '.m4v'];
+  state.upload = { items: [], tags: new Set(), busy: false };
+
+  function openUpload() {
+    if (state.upload.busy) { toast('正在上传，请稍候'); return; }
+    state.upload.items = [];
+    state.upload.tags = new Set();
+    $('upload-error').classList.add('hidden');
+    $('upload-files').value = '';
+    renderUploadTags();
+    renderUploadList();
+    $('upload-modal').classList.remove('hidden');
+  }
+
+  function closeUpload() {
+    if (state.upload.busy) { toast('正在上传，完成后会自动关闭'); return; }
+    $('upload-modal').classList.add('hidden');
+  }
+
+  function renderUploadTags() {
+    const root = $('upload-tag-groups');
+    root.replaceChildren();
+    const groups = tagsByCategory();
+    for (const category of state.categories) {
+      const tags = groups[category] || [];
+      if (!tags.length) continue;
+      const group = document.createElement('div');
+      group.className = 'tag-editor-group';
+      const title = document.createElement('b');
+      title.textContent = category;
+      group.append(title);
+      const options = document.createElement('div');
+      options.className = 'tag-editor-options';
+      for (const tag of tags) {
+        const label = document.createElement('label');
+        label.className = 'tag-option' + (state.upload.tags.has(tag) ? ' is-on' : '');
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = state.upload.tags.has(tag);
+        input.addEventListener('change', () => {
+          if (input.checked) state.upload.tags.add(tag); else state.upload.tags.delete(tag);
+          label.classList.toggle('is-on', input.checked);
+          renderUploadList();
+        });
+        const text = document.createElement('span');
+        text.textContent = tag;
+        label.append(input, text);
+        options.append(label);
+      }
+      group.append(options);
+      root.append(group);
+    }
+    if (!root.childElementCount) {
+      root.append(emptyNode('标签库是空的，请先在「标签库管理」里新建标签。'));
+    }
+  }
+
+  function addUploadFiles(fileList) {
+    let skipped = 0;
+    for (const file of fileList || []) {
+      const suffix = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+      if (!UPLOAD_EXT.includes(suffix)) { skipped += 1; continue; }
+      if (file.size > UPLOAD_MAX_MB * 1024 * 1024) { skipped += 1; continue; }
+      if (state.upload.items.some(item => item.file.name === file.name && item.file.size === file.size)) continue;
+      state.upload.items.push({ file, status: '等待', progress: 0, error: '', renamed: false });
+    }
+    if (skipped) toast(`已跳过 ${skipped} 个文件（只收 mp4/mov/m4v，单个 ≤ ${UPLOAD_MAX_MB}MB）`);
+    renderUploadList();
+  }
+
+  function renderUploadList() {
+    const root = $('upload-file-list');
+    root.replaceChildren();
+    for (const item of state.upload.items) {
+      const row = document.createElement('div');
+      row.className = 'upload-item';
+      const name = document.createElement('span');
+      name.className = 'upload-item-name';
+      name.textContent = item.file.name;
+      name.title = `${item.file.name} · ${(item.file.size / 1024 / 1024).toFixed(1)}MB`;
+      const bar = document.createElement('div');
+      bar.className = 'upload-progress';
+      const fill = document.createElement('span');
+      fill.style.width = `${item.progress}%`;
+      bar.append(fill);
+      const status = document.createElement('span');
+      status.className = 'upload-status'
+        + (item.status === '完成' ? ' is-ok' : '') + (item.status === '失败' ? ' is-bad' : '');
+      const savedAs = item.savedAs && item.savedAs !== item.file.name ? item.savedAs : '';
+      status.textContent = item.status + (savedAs ? ` → ${savedAs}` : '');
+      status.title = [item.error, savedAs ? `已存为 ${savedAs}` : ''].filter(Boolean).join('；');
+      row.append(name, bar, status);
+      root.append(row);
+    }
+    const pending = state.upload.items.filter(item => item.status === '等待').length;
+    const done = state.upload.items.filter(item => item.status === '完成').length;
+    $('upload-summary').textContent = state.upload.items.length
+      ? `共 ${state.upload.items.length} 个 · 待传 ${pending} · 完成 ${done}`
+      : '还没有选择文件';
+    $('upload-start').disabled = state.upload.busy || !pending || !state.upload.tags.size;
+    $('upload-start').textContent = state.upload.busy ? '上传中…' : '开始上传';
+  }
+
+  function uploadOne(item, tags) {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/tags/videos/upload');
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(item.file.name));
+      xhr.setRequestHeader('X-Tags', encodeURIComponent(JSON.stringify(tags)));
+      xhr.setRequestHeader('X-Auto-Number', $('upload-auto-number').checked ? '1' : '0');
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        item.progress = Math.min(99, Math.round((event.loaded / event.total) * 100));
+        renderUploadList();
+      };
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) { data = {}; }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          item.progress = 100;
+          item.status = '完成';
+          item.renamed = !!data.renamed;
+          item.savedAs = data.row ? data.row.name : '';
+          if (data.warning) item.error = data.warning;
+        } else {
+          item.status = '失败';
+          item.error = data.error || `上传失败（${xhr.status}）`;
+        }
+        renderUploadList();
+        resolve();
+      };
+      xhr.onerror = () => {
+        item.status = '失败';
+        item.error = '网络中断';
+        renderUploadList();
+        resolve();
+      };
+      xhr.send(item.file);
+    });
+  }
+
+  async function startUpload() {
+    if (state.upload.busy) return;
+    const tags = [...state.upload.tags];
+    if (!tags.length) { toast('请至少选择一个标签'); return; }
+    const queue = state.upload.items.filter(item => item.status === '等待');
+    if (!queue.length) return;
+    state.upload.busy = true;
+    $('upload-error').classList.add('hidden');
+    renderUploadList();
+    let ok = 0;
+    let failed = 0;
+    for (const item of queue) {
+      item.status = '上传中';
+      renderUploadList();
+      await uploadOne(item, tags);
+      if (item.status === '完成') ok += 1; else failed += 1;
+    }
+    state.upload.busy = false;
+    renderUploadList();
+    const error = $('upload-error');
+    if (failed) {
+      error.textContent = `${failed} 个失败：${state.upload.items.filter(i => i.status === '失败')
+        .map(i => `${i.file.name}（${i.error || '未知错误'}）`).join('；')}`;
+      error.classList.remove('hidden');
+    }
+    if (ok) {
+      toast(`已上传 ${ok} 条，立即可以用于生产`);
+      state.loaded = false;
+      state.revision = 0;
+      await load();
+      if (app().reloadTemplates) Promise.resolve(app().reloadTemplates()).catch(() => {});
+      if (!failed) closeUpload();
+    }
   }
 
   /* ---------------------------------------------------------------- 事件 */
@@ -751,6 +1091,26 @@
   $('tag-bulk-restore').addEventListener('click', () => setDeprecated(false));
   $('tag-library-btn').addEventListener('click', openDrawer);
   $('tag-drawer-close').addEventListener('click', closeDrawer);
+  $('tag-versions-btn').addEventListener('click', openVersions);
+  $('version-close').addEventListener('click', closeVersions);
+  $('version-create').addEventListener('submit', createVersion);
+  $('tag-upload-btn').addEventListener('click', openUpload);
+  $('upload-close').addEventListener('click', closeUpload);
+  $('upload-files').addEventListener('change', (event) => addUploadFiles(event.target.files));
+  $('upload-start').addEventListener('click', startUpload);
+  const uploadDrop = $('upload-drop');
+  ['dragenter', 'dragover'].forEach(name => uploadDrop.addEventListener(name, (event) => {
+    event.preventDefault();
+    uploadDrop.classList.add('is-over');
+  }));
+  ['dragleave', 'drop'].forEach(name => uploadDrop.addEventListener(name, (event) => {
+    event.preventDefault();
+    uploadDrop.classList.remove('is-over');
+  }));
+  uploadDrop.addEventListener('drop', (event) => {
+    event.preventDefault();
+    addUploadFiles(event.dataTransfer ? event.dataTransfer.files : null);
+  });
   $('tag-lib-create').addEventListener('submit', async (event) => {
     event.preventDefault();
     const error = $('tag-lib-error');
@@ -763,7 +1123,10 @@
     else if (!error.textContent) error.classList.add('hidden');
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.drawerOpen) closeDrawer();
+    if (event.key !== 'Escape') return;
+    if (!$('upload-modal').classList.contains('hidden')) { closeUpload(); return; }
+    if (state.versionOpen) { closeVersions(); return; }
+    if (state.drawerOpen) closeDrawer();
   });
   window.addEventListener('beforeunload', () => {
     const player = $('tag-preview-video');

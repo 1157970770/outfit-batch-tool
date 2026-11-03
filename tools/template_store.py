@@ -15,12 +15,14 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import json
 import os
 import re
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from tools.template_catalog import (
@@ -37,6 +39,13 @@ AUDIT_LIMIT = 500
 MAX_BULK_IDS = 2000
 MODES = ("replace", "add", "remove")
 LIBRARY_ACTIONS = ("create", "rename", "set_category", "merge", "delete")
+
+# 版本快照：整份真源（视频库 + 标签 + 弃用态）压成 gzip，单版约 50–80KB。
+VERSION_DIRNAME = "tag_versions"
+VERSION_SCHEMA = 1
+AUTO_KEEP = 50          # 自动版本只留最近 50 份
+PINNED_KEEP = 50        # 手动/回滚前备份最多留 50 份
+VERSION_NAME = re.compile(r"^v(\d{6})-(\d+)-(auto|manual)-([0-9a-f]{4})\.json\.gz$")
 
 _DIGITS = re.compile(r"^\d+$")
 
@@ -211,6 +220,7 @@ def _normalize_video(raw: dict) -> dict:
         "changed": bool(raw.get("changed")),
         "previous_fingerprint": str(raw.get("previous_fingerprint") or ""),
         "uploaded": bool(raw.get("uploaded")),
+        "uploaded_at": float(raw.get("uploaded_at") or 0),
         "source_dir": str(raw.get("source_dir") or ""),
         "original_name": str(raw.get("original_name") or ""),
         "touched_at": float(raw.get("touched_at") or 0),
@@ -435,6 +445,11 @@ class TemplateStore:
             self._audit_append(action, user, detail)
             self._atomic_save()
             self._index_locked()
+            # 每次成功写入都留一份整库快照；快照失败不影响已经落盘的数据
+            try:
+                self._write_version_locked("auto", action, user, detail)
+            except Exception:  # noqa: BLE001 - 版本是旁路能力，不能反过来阻断保存
+                pass
             return {**result, "changed": changed, "revision": self.revision}
 
     # ------------------------------------------------------------------ 视频写
@@ -509,6 +524,85 @@ class TemplateStore:
                     "detail": {"ids": wanted, "deprecated": flag, "reason": str(reason or "")}}
 
         return self._mutate(op, user=user, revision=revision, action="deprecate")
+
+    def _unique_name_locked(self, name: str) -> str:
+        """同一份清单里文件名必须唯一：重名自动加 -2、-3（COS 对象名另带随机后缀）。"""
+        taken = {str(row.get("name") or "").casefold() for row in self.data["videos"]}
+        base = str(name or "").strip() or "video.mp4"
+        if base.casefold() not in taken:
+            return base
+        stem, suffix = Path(base).stem, Path(base).suffix
+        index = 2
+        while f"{stem}-{index}{suffix}".casefold() in taken:
+            index += 1
+        return f"{stem}-{index}{suffix}"
+
+    def _next_movie_number_locked(self) -> int:
+        """按清单里现有文件名的数字部分顺延，例如最后是 1411.mp4 → 1412。"""
+        numbers = []
+        for row in self.data["videos"]:
+            for raw in (row.get("name"), row.get("relative_path"), row.get("original_name")):
+                stem = Path(str(raw or "")).stem
+                if stem.isdigit():
+                    numbers.append(int(stem))
+        return max(numbers, default=0) + 1
+
+    def add_video(self, *, name: str, tags, size_mb=0.0, size_bytes=0, duration=None,
+                  fingerprint: str = "", uploaded: bool = True,
+                  source_dir: str = "网页上传", auto_number: bool = False,
+                  user: str = "", revision: int | None = None) -> dict:
+        """网页上传成功后登记一条新视频（编号自动顺延，重名自动改名）。
+
+        `auto_number=True` 时忽略原文件名，按清单里最后一个数字文件顺延成 0001 形式。
+        COS 对象已经先传好了再调这里；本方法只写清单，不碰对象存储。
+        """
+        labels = _clean_tags(tags)
+        if not labels:
+            raise StoreError("新视频至少要有一个标签")
+        raw_name = str(name or "").strip() or "video.mp4"
+
+        def op() -> dict:
+            known = set(self.data["library"]["tags"])
+            unknown = [label for label in labels if label not in known]
+            if unknown:
+                raise StoreError(f"标签不存在：{unknown[0]}")
+            if auto_number:
+                suffix = Path(raw_name).suffix.lower() or ".mp4"
+                filename = self._unique_name_locked(f"{self._next_movie_number_locked():04d}{suffix}")
+            else:
+                filename = self._unique_name_locked(raw_name)
+            videos = self.data["videos"]
+            maximum = max((int(row["id"]) for row in videos if row["id"].isdigit()), default=0)
+            try:
+                next_id = int(self.data["project"].get("next_id") or 0)
+            except (TypeError, ValueError):
+                next_id = 0
+            next_id = max(next_id, maximum + 1)
+            template_id = f"{next_id:03d}"
+            now = time.time()
+            row = _normalize_video({
+                "id": template_id, "relative_path": filename, "name": filename,
+                "duration": duration, "size_mb": size_mb, "size_bytes": size_bytes,
+                "fingerprint": fingerprint, "tags": labels, "uploaded": uploaded,
+                "deprecated": False, "missing": False, "changed": False,
+                "source_dir": source_dir, "uploaded_at": now, "touched_at": now,
+                "touched_by": str(user or ""),
+            })
+            videos.append(row)
+            videos.sort(key=lambda item: (not item["id"].isdigit(),
+                                          int(item["id"]) if item["id"].isdigit() else 0,
+                                          item["id"]))
+            self.data["project"]["next_id"] = next_id + 1
+            return {
+                "changed": 1,
+                "updated": [copy.deepcopy(row)],
+                "row": copy.deepcopy(row),
+                "renamed": filename != raw_name,
+                "detail": {"id": template_id, "name": filename, "tags": labels,
+                           "renamed_from": raw_name if filename != raw_name else ""},
+            }
+
+        return self._mutate(op, user=user, revision=revision, action="upload_video")
 
     def apply_project_diff(self, base: dict, current: dict, *, user: str = "",
                            revision: int | None = None) -> dict:
@@ -754,6 +848,164 @@ class TemplateStore:
         limit = max(1, min(int(limit or 30), AUDIT_LIMIT))
         with self._lock:
             return [dict(entry) for entry in self.data.get("audit", [])[-limit:]]
+
+    # ------------------------------------------------------------------ 版本快照
+    def versions_dir(self) -> Path:
+        return self.path.parent / VERSION_DIRNAME
+
+    def _snapshot_payload(self, kind: str, action: str, user: str, detail: dict,
+                          note: str = "") -> dict:
+        """整份真源快照：视频库（含每条的标签与弃用态）+ 标签定义 + 项目信息。"""
+        return {
+            "schema": VERSION_SCHEMA,
+            "kind": kind,
+            "action": str(action or ""),
+            "note": str(note or "")[:120],
+            "revision": self.revision,
+            "at": time.time(),
+            "user": str(user or ""),
+            "detail": detail or {},
+            "library": self.library(),
+            "project": copy.deepcopy(self.data.get("project") or {}),
+            "videos": copy.deepcopy(self.data.get("videos") or []),
+        }
+
+    def _write_version_locked(self, kind: str, action: str, user: str, detail: dict,
+                              note: str = "") -> dict:
+        payload = self._snapshot_payload(kind, action, user, detail, note)
+        folder = self.versions_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        name = (f"v{payload['revision']:06d}-{int(payload['at'])}-{kind}-"
+                f"{uuid.uuid4().hex[:4]}.json.gz")
+        target = folder / name
+        tmp = folder / (name + ".tmp")
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        with gzip.open(tmp, "wb", compresslevel=6) as handle:
+            handle.write(raw)
+        os.replace(tmp, target)
+
+        meta = {
+            "name": name, "kind": kind, "action": payload["action"], "note": payload["note"],
+            "revision": payload["revision"], "at": payload["at"], "user": payload["user"],
+            "count": len(payload["videos"]), "bytes": target.stat().st_size,
+        }
+        meta_path = folder / (name + ".meta.json")
+        meta_tmp = folder / (name + ".meta.json.tmp")
+        meta_tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        os.replace(meta_tmp, meta_path)
+        self._prune_versions_locked()
+        return meta
+
+    def _prune_versions_locked(self) -> None:
+        folder = self.versions_dir()
+        if not folder.is_dir():
+            return
+        entries: list[tuple[float, dict, Path]] = []
+        for meta_path in folder.glob("*.meta.json"):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            entries.append((float(meta.get("at") or 0), meta, meta_path))
+        for kind, keep in (("auto", AUTO_KEEP), ("manual", PINNED_KEEP)):
+            group = sorted((item for item in entries if item[1].get("kind") == kind),
+                           key=lambda item: item[0])
+            for _at, meta, meta_path in group[:-keep]:
+                name = str(meta.get("name") or "")
+                if name:
+                    (folder / name).unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+
+    def list_versions(self, limit: int = 100) -> list[dict]:
+        """只读 meta，不解析快照正文（快照是 gzip 的整库数据）。"""
+        limit = max(1, min(int(limit or 100), 500))
+        with self._lock:
+            folder = self.versions_dir()
+            if not folder.is_dir():
+                return []
+            items: list[dict] = []
+            for meta_path in folder.glob("*.meta.json"):
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(meta, dict) and meta.get("name"):
+                    items.append(meta)
+        items.sort(key=lambda item: float(item.get("at") or 0), reverse=True)
+        return items[:limit]
+
+    def read_version(self, name: str) -> dict:
+        raw_name = str(name or "").strip()
+        if not VERSION_NAME.match(raw_name):
+            raise StoreError("版本文件名无效")
+        path = self.versions_dir() / raw_name
+        if not path.is_file():
+            raise NotFound("找不到该版本")
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StoreUnavailable(f"版本文件损坏：{raw_name}（{exc}）") from None
+        if not isinstance(payload, dict):
+            raise StoreUnavailable(f"版本文件格式错误：{raw_name}")
+        return payload
+
+    def create_version(self, note: str = "", *, user: str = "") -> dict:
+        """手动打一个版本（长期保留，不参与自动版本的 50 份淘汰）。"""
+        with self._lock, _FileLock(self.path):
+            self._reload_locked()
+            return self._write_version_locked(
+                "manual", "manual", user or self.updated_by,
+                {"note": str(note or "")[:120]}, note=str(note or ""))
+
+    def restore_version(self, name: str, *, user: str = "",
+                        revision: int | None = None) -> dict:
+        """把整份真源回滚到某个版本：视频库条目、每条标签、弃用态、标签定义一起还原。
+
+        回滚前会自动留一份 manual 备份（note=回滚前备份），所以这次回滚本身也能撤回。
+        """
+        snapshot = self.read_version(name)
+        raw_videos = snapshot.get("videos")
+        if not isinstance(raw_videos, list) or not raw_videos:
+            raise StoreError("该版本里没有视频数据，无法回滚")
+        videos: list[dict] = []
+        seen: set[str] = set()
+        for item in raw_videos:
+            row = _normalize_video(item)
+            if row["id"] in seen:
+                raise StoreError(f"版本数据里模板ID重复：{row['id']}")
+            seen.add(row["id"])
+            videos.append(row)
+        library_raw = snapshot.get("library") if isinstance(snapshot.get("library"), dict) else {}
+        target_tags = _clean_tags(library_raw.get("tags"))
+        target_categories = normalize_tag_categories(target_tags, library_raw.get("categories") or {})
+
+        def op() -> dict:
+            # 先备份当前状态（与回滚同一次持锁，避免中间被别的进程插队）
+            backup = self._write_version_locked(
+                "manual", "before_restore", user or self.updated_by,
+                {"restore_to": name}, note=f"回滚前备份（{name}）")
+            current_ids = {row["id"] for row in self.data.get("videos") or []}
+            target_ids = {row["id"] for row in videos}
+            self.data["library"] = {"version": 2, "tags": target_tags,
+                                    "categories": target_categories}
+            self.data["videos"] = videos
+            if isinstance(snapshot.get("project"), dict) and snapshot["project"]:
+                self.data["project"] = copy.deepcopy(snapshot["project"])
+            return {
+                "changed": max(1, len(videos)),
+                "updated": [],
+                "restored": len(videos),
+                # 当前有、目标版本没有 → 回滚后会从清单消失（数据仍在备份版里）
+                "added_since": len(current_ids - target_ids),
+                # 目标版本有、当前没有 → 回滚后重新出现
+                "removed_since": len(target_ids - current_ids),
+                "backup": backup.get("name", ""),
+                "detail": {"restore_to": name, "restored": len(videos)},
+            }
+
+        result = self._mutate(op, user=user, revision=revision, action="restore_version")
+        return {**result, "version": name}
 
     # ------------------------------------------------------------------ 迁移 / 交接
     def import_from_xlsx(self, source: str | Path, *, dry_run: bool = False, user: str = "import") -> dict:

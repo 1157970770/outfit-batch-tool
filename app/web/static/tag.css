@@ -60,7 +60,7 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-row {
   display: grid;
   /* 文件名固定窄列（超长省略 + title），标签拿剩余宽度并允许换行，保证全部可见 */
-  grid-template-columns: 26px 54px 132px minmax(0, 1fr) 76px 68px;
+  grid-template-columns: 26px 54px 132px minmax(0, 1fr) 76px 68px 34px;
   gap: 8px;
   align-items: center;
   padding: 5px 10px;
@@ -84,6 +84,16 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-row > * { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tag-row-id { font-family: var(--font-mono); color: var(--muted); }
 .tag-row-name { font-weight: 500; }
+.tag-new {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #e8f1ff;
+  color: var(--blue);
+  font-size: 10.5px;
+  font-weight: 600;
+}
 /* 标签列是唯一允许换行的列：多了就换行，不截断、不折叠 */
 .tag-row-tags {
   display: flex;
@@ -96,6 +106,24 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-row-state { color: var(--muted); font-size: 11.5px; }
 .tag-row-state.is-ok { color: var(--green); }
 .tag-row-state.is-off { color: var(--red); }
+
+/* 行内「弃 / 恢」：和右下角大按钮同一套语义，只是省去先选中那一步 */
+.tag-row-act { display: flex; align-items: center; justify-content: center; }
+.tag-mini {
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--red);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tag-mini:hover { background: var(--red); color: #fff; }
+.tag-mini.is-restore { border-color: var(--green); color: var(--green); }
+.tag-mini.is-restore:hover { background: var(--green); color: #fff; }
 
 .tag-empty { padding: 40px 16px; text-align: center; color: var(--muted); }
 
@@ -196,6 +224,36 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-editor-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tag-editor-hint { margin: 0; font-size: 12px; }
 
+/* 弃用 = 让这条视频退出生产（软删除）：独立到最右、红色、比打标按钮大一号，
+   和「保存标签 / 取消勾选」之间留出分隔线，避免误点 */
+.tag-danger-group {
+  margin-left: auto;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  display: flex;
+  gap: 6px;
+}
+.tag-danger {
+  min-height: 36px;
+  padding: 0 18px;
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+  background: var(--red);
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.tag-danger:hover { background: #9c1e25; border-color: #9c1e25; }
+.tag-danger:active { transform: translateY(1px); }
+.tag-danger.is-restore {
+  background: var(--paper);
+  color: var(--green);
+  border-color: var(--green);
+  font-weight: 600;
+}
+.tag-danger.is-restore:hover { background: #eefaf3; }
+
 /* ---------- 标签库抽屉 ---------- */
 .tag-drawer {
   position: fixed; top: 0; right: 0; bottom: 0;
@@ -232,6 +290,52 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 
 .tag-lib-note { font-size: 12px; }
 
+/* ---------- 版本历史抽屉 ---------- */
+.version-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.version-create input { min-height: 32px; }
+
+.version-hint { font-size: 12px; line-height: 1.55; margin: 0 0 10px; }
+
+.version-list { display: grid; gap: 6px; }
+
+.version-row {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+}
+.version-row.is-pinned {
+  border-color: color-mix(in srgb, var(--blue) 42%, var(--line));
+  background: #f7faff;
+}
+.version-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.version-badge {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.version-badge.is-manual { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, #fff); }
+.version-time { flex: none; font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.version-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-row button { justify-self: start; margin-top: 2px; }
+.version-empty { padding: 24px 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
+
 /* 窄屏放不下三栏：改成上下排（列表 → 预览 → 编辑），高度交回页面自然滚动 */
 @media (max-width: 1200px) {
   .tag-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
@@ -242,3 +346,74 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
   .tag-editor-groups { flex: none; max-height: 60vh; }
   .tag-drawer { width: 100vw; }
 }
+
+/* ---------- 上传新视频弹层 ---------- */
+.upload-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(16, 24, 40, .45);
+}
+
+.upload-card {
+  width: min(720px, 96vw);
+  max-height: 90vh;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  box-shadow: var(--shadow-pop);
+}
+
+.upload-head { display: flex; align-items: center; justify-content: space-between; }
+.upload-head h3 { margin: 0; font-size: 16px; }
+.upload-hint { margin: 0; font-size: 12px; line-height: 1.5; }
+
+.upload-drop {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.upload-drop input { display: none; }
+.upload-drop.is-over { border-color: var(--blue); background: #eff5ff; }
+
+.upload-list { display: grid; gap: 4px; max-height: 26vh; overflow: auto; }
+.upload-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px 96px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.upload-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-progress { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.upload-progress span { display: block; height: 100%; width: 0; background: var(--blue); transition: width .15s; }
+.upload-status {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-status.is-ok { color: var(--green); }
+.upload-status.is-bad { color: var(--red); }
+
+.upload-auto { margin: 0; font-size: 12px; color: var(--ink-2); }
+
+.upload-tags > b { display: block; margin-bottom: 6px; font-size: 12.5px; }
+.upload-tag-groups { max-height: 26vh; }
+
+.upload-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.upload-foot .primary { min-height: 34px; padding: 0 20px; }

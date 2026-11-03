@@ -1,0 +1,20 @@
+@echo off
+rem Restart the Outfit web server (needs Administrator: the service runs as a
+rem scheduled task in session 0, a normal user cannot stop that process).
+setlocal
+set "PORT=8765"
+echo [1/3] stopping process listening on port %PORT% ...
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
+  echo     taskkill /PID %%p
+  taskkill /PID %%p /F
+)
+timeout /t 2 /nobreak >nul
+echo [2/3] starting scheduled task OutfitWebServer ...
+schtasks /run /tn "OutfitWebServer"
+timeout /t 14 /nobreak >nul
+echo [3/3] current listener:
+netstat -ano | findstr ":%PORT%" | findstr "LISTENING"
+echo.
+echo If nothing is listed above, right-click this file and choose
+echo "Run as administrator", or reboot and log in again.
+pause

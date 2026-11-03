@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 from openpyxl import Workbook  # noqa: E402
 from tools.template_catalog import load_xlsx  # noqa: E402
 from tools.template_store import (  # noqa: E402
+    NotFound,
     RevisionConflict,
     StoreError,
     StoreUnavailable,
@@ -352,6 +353,78 @@ def test_no_tags_json(tmp: Path) -> None:
     assert library.read_bytes() == before, "store 模式不写 _state/tagger/tags.json"
 
 
+
+def test_versions(tmp: Path) -> None:
+    store = new_store(tmp)
+    versions = store.list_versions()
+    assert versions and versions[0]["kind"] == "auto", versions
+    assert versions[0]["count"] == 4
+    base_name = versions[0]["name"]
+
+    change = store.set_tags(["001"], ["酒店"], mode="replace", user="alice")
+    assert change["changed"] == 1
+    after_change = store.list_versions()
+    assert len(after_change) >= 2 and after_change[0]["revision"] == change["revision"]
+    assert after_change[0]["action"] == "set_tags"
+    assert store.row("001")["tags"] == ["酒店"]
+
+    manual = store.create_version("上线前", user="alice")
+    assert manual["kind"] == "manual" and manual["note"] == "上线前"
+    assert store.list_versions()[0]["name"] == manual["name"]
+
+    # 回滚到导入时那一版：标签回到 001=近景+适合秋冬
+    result = store.restore_version(base_name, user="bob", revision=store.revision)
+    assert result["restored"] == 4, result
+    assert store.row("001")["tags"] == ["近景", "适合秋冬"]
+    assert result["backup"], "回滚前必须自动留备份"
+
+    names = {item["name"] for item in store.list_versions()}
+    assert result["backup"] in names, "备份版本要能在列表里看到"
+    assert base_name in names, "被回滚到的版本本身不能丢"
+
+    # 回滚后新增的视频，回滚到旧版会消失，但仍留在备份里
+    base = store.to_project()
+    current = store.to_project()
+    current["videos"].append({
+        "id": "006", "relative_path": "0006.mp4", "name": "0006.mp4", "duration": 7.0,
+        "size_mb": 4.0, "fingerprint": "ffff6666", "tags": ["近景"], "deprecated": False,
+        "missing": False, "changed": False, "uploaded": False, "source_dir": base["source_root"],
+        "original_name": "",
+    })
+    store.apply_project_diff(base, current, user="host")
+    assert store.row("006") is not None
+    old_name = store.list_versions()[-1]["name"]
+    result = store.restore_version(old_name, user="alice")
+    assert store.row("006") is None, "回滚到没有 006 的版本后应消失"
+    assert result["added_since"] == 1, result
+    backup_payload = store.read_version(result["backup"])
+    assert any(row["id"] == "006" for row in backup_payload["videos"]), "备份里必须保留 006"
+
+    # 文件名校验 / 不存在
+    try:
+        store.read_version("../../etc/passwd")
+    except StoreError:
+        pass
+    else:
+        raise AssertionError("非法版本名必须拒绝")
+    try:
+        store.read_version("v999999-1-auto-abcd.json.gz")
+    except NotFound:
+        pass
+    else:
+        raise AssertionError("不存在的版本必须 404")
+
+
+def test_version_prune(tmp: Path) -> None:
+    store = new_store(tmp, name="pruned.json")
+    for index in range(55):
+        tags = ["近景"] if index % 2 else ["酒店"]
+        store.set_tags(["002"], tags, mode="replace", user="loop")
+    from tools.template_store import AUTO_KEEP
+    autos = [item for item in store.list_versions(limit=500) if item["kind"] == "auto"]
+    assert len(autos) <= AUTO_KEEP, (len(autos), AUTO_KEEP)
+    assert len(autos) >= AUTO_KEEP - 1, len(autos)
+
 def main() -> int:
     test_import(tempdir("tagstore-import-"))
     test_revision_and_idempotent(tempdir("tagstore-rev-"))
@@ -360,13 +433,15 @@ def main() -> int:
     test_library(tempdir("tagstore-lib-"))
     test_impact_read_only(tempdir("tagstore-impact-"))
     test_apply_project_diff(tempdir("tagstore-diff-"))
+    test_versions(tempdir("tagstore-ver-"))
+    test_version_prune(tempdir("tagstore-prune-"))
     test_audit_limit(tempdir("tagstore-audit-"))
     test_corrupt(tempdir("tagstore-broken-"))
     test_threads(tempdir("tagstore-thread-"))
     test_cross_process(tempdir("tagstore-cross-"))
     test_xlsx_roundtrip(tempdir("tagstore-xlsx-"))
     test_no_tags_json(tempdir("tagstore-nolib-"))
-    print("OK 标签真源：revision 乐观锁、弃用可恢复、标签库级联、审计上限、跨进程共享、xlsx 往返")
+    print("OK 标签真源：revision 乐观锁、弃用可恢复、标签库级联、版本快照/回滚、审计上限、跨进程共享、xlsx 往返")
     return 0
 
 

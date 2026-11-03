@@ -90,6 +90,8 @@ app/storage.py         COS / 本地存储适配
 | `web-data/jobs/<id>.json` | 任务状态与逐条记录 | ❌ |
 | `web-data/batches/<id>.json` | 批次与条目 | ❌ |
 | `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与桌面打标器共用；`.bak` 是上一版 | ❌ |
+| `web-data/manifest_overlay.json` | 网页上传的视频索引（云端 manifest 里没有它们）；启动时与 manifest 合并 | ❌ |
+| `web-data/tag_versions/` | 真源版本快照（gzip，整库含每条标签与弃用态）；自动留 50 版 + 手动 50 版，回滚前另存备份 | ❌ |
 | `web-data/{uploads,output,logs}/` | 定妆图、成片、任务日志 | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 

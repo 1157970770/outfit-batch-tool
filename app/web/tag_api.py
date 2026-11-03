@@ -10,11 +10,19 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import os
+import re
 import time
+import uuid
+from pathlib import Path
 
 from tools.template_store import RevisionConflict, StoreError
 
 MAX_IDS = 2000
+MAX_UPLOAD_MB = 50
+TEMPLATE_PREFIX = "input/tpl"
+CATEGORY_SLUGS = {"景别": "jingbie", "适合季节": "jijie", "场景": "changjing", "姿势": "zishi"}
 
 
 class ApiError(Exception):
@@ -243,3 +251,165 @@ def impact(app, data: dict, user: dict) -> dict:
     preview["ok"] = True
     preview["checked_at"] = time.time()
     return preview
+
+
+# ---------------------------------------------------------------------- 上传新视频
+def _overlay_path(app) -> Path:
+    configured = getattr(app.settings, "manifest_overlay_path", None)
+    return Path(configured) if configured else Path(app.settings.data_dir) / "manifest_overlay.json"
+
+
+def _append_overlay(app, entry: dict) -> None:
+    """把网页上传的对象登记进本地 overlay：重启后仍能 join 出 key/url。"""
+    path = _overlay_path(app)
+    lock = getattr(app, "overlay_lock", None)
+    with (lock if lock is not None else contextlib.nullcontext()):
+        entries = [dict(item) for item in (getattr(app, "manifest_overlay", []) or [])]
+        marker = entry.get("key") or entry.get("url")
+        entries = [item for item in entries if (item.get("key") or item.get("url")) != marker]
+        entries.append(entry)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"version": 1, "entries": entries}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        app.manifest_overlay = entries
+
+
+def _tagset(labels: list[str], categories: dict, template_id: str) -> list[dict]:
+    tagset = [{"Key": "kind", "Value": "tpl"}, {"Key": "tpl_id", "Value": str(template_id)}]
+    grouped: dict[str, list[str]] = {}
+    order: list[str] = []
+    for label in labels:
+        category = categories.get(label) or "场景"
+        if category not in grouped:
+            grouped[category] = []
+            order.append(category)
+        grouped[category].append(label)
+    for index, category in enumerate(order):
+        key = CATEGORY_SLUGS.get(category) or f"cat{index + 1}"
+        tagset.append({"Key": key[:16], "Value": "/".join(grouped[category])[:120]})
+    return tagset[:10]  # COS 单对象标签上限 10 个
+
+
+def upload_video(app, temp_path: str | Path, filename: str, tags, user: dict,
+                 auto_number: bool = False) -> dict:
+    """一次一条：校验 → 传 COS → 登记真源 → 写 overlay → 重建候选集。
+
+    文件先传成功才写清单；清单写失败会把刚传的对象删掉，避免桶里留孤儿。
+    """
+    store = _store(app)
+    labels = [str(value).strip() for value in (tags or []) if str(value).strip()]
+    if not labels:
+        raise ApiError("请至少选择一个标签", 400)
+    known = set(store.library()["tags"])
+    unknown = [label for label in labels if label not in known]
+    if unknown:
+        raise ApiError(f"标签不存在：{unknown[0]}", 400)
+
+    try:
+        storage = app.template_store()
+    except Exception as exc:  # noqa: BLE001 - 凭证缺失/桶不可用统一按 503 回
+        raise ApiError(f"云端存储不可用：{exc}", 503) from None
+    if storage is None:
+        raise ApiError("云端模板库未启用（COS 未配置），无法上传视频", 503)
+
+    from app.media import validate_video
+    src = Path(temp_path)
+    if src.stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
+        raise ApiError(f"单个视频不能超过 {MAX_UPLOAD_MB}MB", 413)
+    try:
+        info = validate_video(src)
+    except Exception as exc:  # noqa: BLE001 - MediaError 与 ffprobe 异常都按 400 回
+        raise ApiError(str(exc), 400) from None
+
+    from app.storage import file_fingerprint
+    size_mb = round(src.stat().st_size / 1024 / 1024, 3)
+    duration = info.get("duration")
+    fingerprint = file_fingerprint(src)[:16]
+    suffix = Path(str(filename)).suffix.lower() or ".mp4"
+    stem = re.sub(r"[^\w\u4e00-\u9fa5-]+", "-", Path(str(filename)).stem)[:40] or "video"
+    key = f"{TEMPLATE_PREFIX}/{stem}-{uuid.uuid4().hex[:8]}{suffix}"
+
+    try:
+        storage.put_path(src, key, content_type="video/mp4")
+    except Exception as exc:  # noqa: BLE001
+        raise ApiError(f"上传到云端失败：{exc}", 502) from None
+
+    try:
+        result = store.add_video(name=str(filename), tags=labels, size_mb=size_mb,
+                                 size_bytes=src.stat().st_size, duration=duration,
+                                 fingerprint=fingerprint, uploaded=True,
+                                 source_dir="网页上传", auto_number=bool(auto_number),
+                                 user=str(user.get("username") or ""))
+    except StoreError as exc:
+        try:
+            storage.delete(key)
+        except Exception:  # noqa: BLE001
+            pass
+        raise _wrap(exc) from None
+
+    row = result.get("row") or {}
+    try:
+        storage.tag_object(key, {item["Key"]: item["Value"] for item in
+                                 _tagset(labels, store.categories(), str(row.get("id") or ""))})
+    except Exception:  # noqa: BLE001 - 标签权限缺失不影响上传本身
+        pass
+    try:
+        _append_overlay(app, {
+            "id": str(row.get("id") or ""), "name": str(row.get("name") or filename),
+            "filename": str(row.get("name") or filename),
+            "relative_path": str(row.get("name") or filename),
+            "size_mb": size_mb, "fingerprint": fingerprint, "duration": duration,
+            "key": key, "url": "", "source": "web-upload",
+        })
+    except Exception as exc:  # noqa: BLE001 - 清单已写入，索引失败只提示
+        payload = _after_write(app, store, result)
+        payload["warning"] = f"视频已上传，但索引写入失败：{exc}。请在管理页「重新加载视频场景」后重试。"
+        payload["row"] = row
+        return payload
+
+    payload = _after_write(app, store, result)
+    payload["row"] = row
+    payload["renamed"] = bool(result.get("renamed"))
+    payload["auto_number"] = bool(auto_number)
+    payload["key"] = key
+    return payload
+
+
+def versions(app, limit: int = 100) -> dict:
+    """版本列表：整份真源快照（视频库 + 标签），自动 50 份 + 手动 50 份。"""
+    store = _store(app)
+    return {"ok": True, "revision": store.revision,
+            "versions": store.list_versions(limit),
+            "auto_keep": 50, "pinned_keep": 50,
+            "path": str(store.versions_dir())}
+
+
+def create_version(app, data: dict, user: dict) -> dict:
+    store = _store(app)
+    note = str(data.get("note") or "").strip()
+    try:
+        meta = store.create_version(note, user=str(user.get("username") or ""))
+    except StoreError as exc:
+        raise _wrap(exc) from None
+    return {"ok": True, "version": meta, "revision": store.revision}
+
+
+def restore_version(app, data: dict, user: dict) -> dict:
+    """回滚整份真源到指定版本；回滚前服务端会自动留一份「回滚前备份」。"""
+    store = _store(app)
+    name = str(data.get("name") or "").strip()
+    if not name:
+        raise ApiError("请指定要回滚的版本")
+    try:
+        result = store.restore_version(name, user=str(user.get("username") or ""),
+                                       revision=data.get("revision"))
+    except StoreError as exc:
+        raise _wrap(exc) from None
+    payload = _after_write(app, store, result)
+    payload["restored"] = int(result.get("restored") or 0)
+    payload["added_since"] = int(result.get("added_since") or 0)
+    payload["removed_since"] = int(result.get("removed_since") or 0)
+    payload["backup"] = str(result.get("backup") or "")
+    payload["version"] = name
+    return payload
