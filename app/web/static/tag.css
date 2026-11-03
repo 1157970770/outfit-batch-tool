@@ -140,7 +140,8 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
   cursor: pointer;
 }
 .rating-star.is-on { color: #f59e0b; }
-.rating-star.is-locked { color: #e8ebf0; cursor: default; }
+/* 占位星只在"未点亮"时才用浅灰，不能盖掉 is-on 的金色 */
+.rating-star.is-locked:not(.is-on) { color: #e8ebf0; cursor: default; }
 .rating-star:hover:not(:disabled) { transform: scale(1.2); }
 .rating-star:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; border-radius: 2px; }
 
