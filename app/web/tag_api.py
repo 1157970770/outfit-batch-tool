@@ -203,6 +203,18 @@ def deprecate(app, data: dict, user: dict) -> dict:
     return _after_write(app, store, result)
 
 
+def set_rating(app, data: dict, user: dict) -> dict:
+    """给视频打星（1-5，0 清除）；走同一套 revision 乐观锁与审计。"""
+    store = _store(app)
+    try:
+        result = store.set_rating(data.get("ids"), data.get("rating"),
+                                  user=str(user.get("username") or ""),
+                                  revision=_revision_of(data, "打分"))
+    except StoreError as exc:
+        raise _wrap(exc) from None
+    return _after_write(app, store, result)
+
+
 _LIBRARY_PARAMS = {
     "create": ("name", "category"),
     "rename": ("name", "new_name"),

@@ -706,6 +706,7 @@ def make_handler(app: WebApplication):
                 parts = path.strip("/").split("/")
                 action = parts[-1] if len(parts) >= 3 else ""
                 handler = {"tags": tag_api.set_tags, "deprecate": tag_api.deprecate,
+                           "rating": tag_api.set_rating,
                            "library": tag_api.library, "impact": tag_api.impact,
                            "versions": tag_api.create_version,
                            "restore": tag_api.restore_version}.get(action)

@@ -59,8 +59,8 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 
 .tag-row {
   display: grid;
-  /* 文件名固定窄列（超长省略 + title），标签拿剩余宽度并允许换行，保证全部可见 */
-  grid-template-columns: 26px 54px 132px minmax(0, 1fr) 76px 68px 34px;
+  /* 文件名列再压缩（132→104），给新的评分列腾位置：标签仍拿剩余宽度 */
+  grid-template-columns: 26px 54px 104px minmax(0, 1fr) 78px 76px 68px 34px;
   gap: 8px;
   align-items: center;
   padding: 5px 10px;
@@ -76,10 +76,31 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
   font-weight: 600; color: var(--ink-2);
   cursor: default;
 }
-.tag-row.is-picked { background: color-mix(in srgb, var(--blue) 6%, #fff); }
+/* 选中行：明显的蓝色背景 + 左侧蓝色高亮条，视觉上一眼可辨 */
+.tag-row.is-picked {
+  background: color-mix(in srgb, var(--blue) 22%, #fff);
+  box-shadow: inset 4px 0 0 var(--blue);
+}
+/* 选中行悬停时保持选中蓝，不被灰色盖掉 */
+.tag-row.is-picked:hover:not(.is-head) {
+  background: color-mix(in srgb, var(--blue) 28%, #fff);
+}
+/* 正在预览播放的行：橙色系，与勾选的蓝色明确区分 */
+.tag-row.is-playing {
+  background: color-mix(in srgb, #f59e0b 20%, #fff);
+  box-shadow: inset 4px 0 0 #f59e0b;
+}
+.tag-row.is-playing:hover:not(.is-head) {
+  background: color-mix(in srgb, #f59e0b 26%, #fff);
+}
+/* 既被勾选又在播放：左条蓝色（勾选）、底色偏橙（播放），两个状态都能看出 */
+.tag-row.is-picked.is-playing {
+  box-shadow: inset 4px 0 0 var(--blue);
+}
 .tag-row.is-deprecated { opacity: .62; }
 .tag-row.is-deprecated .tag-row-name { text-decoration: line-through; }
-.tag-row:hover:not(.is-head) { background: #f8fafc; }
+/* 悬浮行：明显的蓝灰底色，让用户清楚看到当前指到哪一行 */
+.tag-row:hover:not(.is-head):not(.is-picked):not(.is-playing) { background: #e6edf9; }
 
 .tag-row > * { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tag-row-id { font-family: var(--font-mono); color: var(--muted); }
@@ -106,6 +127,22 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-row-state { color: var(--muted); font-size: 11.5px; }
 .tag-row-state.is-ok { color: var(--green); }
 .tag-row-state.is-off { color: var(--red); }
+
+/* ---------- 评分列：3-5 星可点，点当前星数即清除；1-2 星仅占位 ---------- */
+.tag-row-rating { display: flex; align-items: center; gap: 1px; overflow: visible; }
+.rating-star {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 15px;
+  line-height: 1;
+  color: #d5d9e0;
+  cursor: pointer;
+}
+.rating-star.is-on { color: #f59e0b; }
+.rating-star.is-locked { color: #e8ebf0; cursor: default; }
+.rating-star:hover:not(:disabled) { transform: scale(1.2); }
+.rating-star:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; border-radius: 2px; }
 
 /* 行内「弃 / 恢」：和右下角大按钮同一套语义，只是省去先选中那一步 */
 .tag-row-act { display: flex; align-items: center; justify-content: center; }

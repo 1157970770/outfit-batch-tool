@@ -20,6 +20,7 @@
     videos: [], byId: new Map(), categories: [],
     library: { tags: [], categories: {}, usage: {} },
     stats: {}, filters: {}, query: '', status: 'active', sort: 'id', onlyReady: false,
+    ratingFilter: 'all',
     page: 1, pageSize: 50,
     selected: new Set(), matched: [],
     previewId: '', mode: 'replace', lastMulti: false, pending: new Set(), drawerOpen: false,
@@ -45,6 +46,43 @@
     if (!video.tags.length) return { text: '未打标', cls: 'is-off' };
     if (video.ready) return { text: '可生成', cls: 'is-ok' };
     return { text: video.upload_state || '待上传', cls: '' };
+  }
+
+  /* -------------------------------------------------------------- 评分 */
+  const RATING_MAX = 5;   // 展示 5 颗星
+  const RATING_MIN = 3;   // 只允许打 3-5 星（0=清除）
+
+  function buildRatingCell(video) {
+    const cell = document.createElement('span');
+    cell.className = 'tag-row-rating';
+    const rating = Number(video.rating || 0);
+    for (let star = 1; star <= RATING_MAX; star++) {
+      const starEl = document.createElement('button');
+      starEl.type = 'button';
+      starEl.textContent = '★';
+      starEl.className = 'rating-star' + (star <= rating ? ' is-on' : '');
+      if (star < RATING_MIN) {
+        starEl.disabled = true;
+        starEl.classList.add('is-locked');
+        starEl.title = '评分从 3 星起';
+      } else {
+        starEl.title = rating === star ? `清除评分（${video.id}）` : `评为 ${star} 星（${video.id}）`;
+        starEl.addEventListener('click', (event) => {
+          event.stopPropagation();  // 别触发行点击 → 预览
+          rateVideo(video, rating === star ? 0 : star);
+        });
+      }
+      cell.append(starEl);
+    }
+    return cell;
+  }
+
+  async function rateVideo(video, value) {
+    const table = $('tag-table');
+    const top = table.scrollTop;  // 保存后整表重绘，把滚动位置还回去
+    const data = await post('/api/tags/videos/rating', { ids: [video.id], rating: value });
+    table.scrollTop = top;
+    if (data) toast(value ? `${video.id} 已评 ${value} 星` : `${video.id} 已清除评分`);
   }
 
   function activeLibrary() {
@@ -270,6 +308,11 @@
       if (state.status === 'deprecated' && !video.deprecated) return false;
       if (state.status === 'untagged' && (video.deprecated || video.tags.length)) return false;
       if (state.onlyReady && !video.ready) return false;
+      if (state.ratingFilter !== 'all') {
+        const rating = Number(video.rating || 0);
+        if (state.ratingFilter === '0') { if (rating) return false; }
+        else if (rating !== Number(state.ratingFilter)) return false;
+      }
       if (query) {
         const haystack = `${video.id} ${video.name} ${video.relative_path}`.toLowerCase();
         if (!haystack.includes(query)) return false;
@@ -309,7 +352,7 @@
     }
     const head = document.createElement('div');
     head.className = 'tag-row is-head';
-    ['', 'ID', '文件名', '标签', '状态', '大小', ''].forEach((text) => {
+    ['', 'ID', '文件名', '标签', '评分', '状态', '大小', ''].forEach((text) => {
       const cell = document.createElement('span');
       cell.textContent = text;
       head.append(cell);
@@ -325,7 +368,9 @@
     for (const video of items) {
       const row = document.createElement('div');
       row.className = 'tag-row';
+      row.dataset.vid = video.id;
       if (state.selected.has(video.id)) row.classList.add('is-picked');
+      if (video.id === state.previewId) row.classList.add('is-playing');
       if (video.deprecated) row.classList.add('is-deprecated');
 
       const checkCell = document.createElement('span');
@@ -391,6 +436,8 @@
         tagsCell.textContent = '—';
       }
 
+      const ratingCell = buildRatingCell(video);
+
       const stateCell = document.createElement('span');
       const info = rowState(video);
       stateCell.className = `tag-row-state ${info.cls}`;
@@ -417,7 +464,7 @@
       });
       actCell.append(act);
 
-      row.append(checkCell, idCell, nameCell, tagsCell, stateCell, sizeCell, actCell);
+      row.append(checkCell, idCell, nameCell, tagsCell, ratingCell, stateCell, sizeCell, actCell);
       row.addEventListener('click', () => selectPreview(video.id));
       table.append(row);
     }
@@ -539,6 +586,12 @@
 
   function selectPreview(id) {
     state.previewId = id;
+    // 不重绘整表：长列表里点一行就跳回顶部很难用；只原地切换「正在播放」高亮
+    const table = $('tag-table');
+    const prev = table.querySelector('.tag-row.is-playing');
+    if (prev) prev.classList.remove('is-playing');
+    const now = table.querySelector(`.tag-row[data-vid="${CSS.escape(String(id))}"]`);
+    if (now) now.classList.add('is-playing');
     const video = state.byId.get(id);
     const player = $('tag-preview-video');
     const note = $('tag-preview-note');
@@ -1109,6 +1162,9 @@
   });
   $('tag-status').addEventListener('change', (event) => {
     state.status = event.target.value; state.page = 1; renderAll();
+  });
+  $('tag-rating-filter').addEventListener('change', (event) => {
+    state.ratingFilter = event.target.value; state.page = 1; renderAll();
   });
   $('tag-sort').addEventListener('change', (event) => {
     state.sort = event.target.value; state.page = 1; renderAll();

@@ -170,6 +170,52 @@ def test_deprecate(tmp: Path) -> None:
     assert row["deprecated_at"] == 0 and row["deprecated_by"] == ""
 
 
+def test_rating(tmp: Path) -> None:
+    store = new_store(tmp)
+    result = store.set_rating(["001"], 4, user="alice")
+    assert result["changed"] == 1 and result["revision"] == store.revision
+    row = store.row("001")
+    assert row["rating"] == 4 and row["rating_by"] == "alice" and row["rating_at"] > 0
+
+    again = store.set_rating(["001"], 4, user="bob")
+    assert again["changed"] == 0, "同星数重复打分必须幂等"
+
+    # 同一颗星再点一次 = 清除
+    store.set_rating(["001"], 0, user="bob")
+    row = store.row("001")
+    assert row["rating"] == 0 and row["rating_by"] == "" and row["rating_at"] == 0
+
+    # 批量打分 + 越界值
+    batch = store.set_rating(["001", "002", "003"], 5, user="carol")
+    assert batch["changed"] == 3
+    for try_value in (-1, 6, "abc", None):
+        try:
+            store.set_rating(["001"], try_value, user="x")
+        except StoreError:
+            pass
+        else:
+            raise AssertionError(f"非法评分必须拒绝：{try_value!r}")
+
+    try:
+        store.set_rating(["999"], 3, user="x")
+    except NotFound:
+        pass
+    else:
+        raise AssertionError("不存在的视频必须 404")
+
+    # 旧 revision 写入必须 409 且文件不变
+    stale = store.revision
+    store.set_rating(["001"], 3, user="alice")
+    before = store.path.read_bytes()
+    try:
+        store.set_rating(["002"], 3, revision=stale, user="bob")
+    except RevisionConflict:
+        pass
+    else:
+        raise AssertionError("旧 revision 必须 409")
+    assert store.path.read_bytes() == before
+
+
 def test_library(tmp: Path) -> None:
     store = new_store(tmp)
     # 近景：001、003 使用；中远景：002 使用

@@ -8,10 +8,10 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css">
-  <link rel="stylesheet" href="/static/tag.css">
+  <link rel="stylesheet" href="/static/tag.css?v=20261103f">
   <script defer src="/static/app.js"></script>
   <script defer src="/static/batch.js"></script>
-  <script defer src="/static/tag.js"></script>
+  <script defer src="/static/tag.js?v=20261103f"></script>
 </head>
 <body>
   <main id="login-view" class="login-wrap">
@@ -319,6 +319,13 @@
             <option value="untagged">未打标</option>
             <option value="all">全部</option>
           </select></label>
+          <label class="field tag-compact">星数<select id="tag-rating-filter">
+            <option value="all" selected>全部</option>
+            <option value="0">未打分</option>
+            <option value="3">★★★</option>
+            <option value="4">★★★★</option>
+            <option value="5">★★★★★</option>
+          </select></label>
           <label class="field tag-compact">排序<select id="tag-sort">
             <option value="id" selected>按模板ID</option>
             <option value="uploaded">按上传时间（新→旧）</option>
@@ -371,7 +378,7 @@
 
           <div class="tag-preview-col">
             <aside class="batch-preview">
-              <video id="tag-preview-video" class="template-preview batch-preview-video" controls preload="metadata" playsinline></video>
+              <video id="tag-preview-video" class="template-preview batch-preview-video" controls preload="metadata" playsinline loop></video>
               <p id="tag-preview-name" class="batch-preview-name muted">点左侧任意一行，在这里预览并改标签。</p>
               <p id="tag-preview-note" class="batch-preview-note hidden"></p>
             </aside>

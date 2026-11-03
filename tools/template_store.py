@@ -603,6 +603,41 @@ class TemplateStore:
 
         return self._mutate(op, user=user, revision=revision, action="deprecate")
 
+    def set_rating(self, ids, rating, *, user: str = "", revision: int | None = None) -> dict:
+        """给视频打星：1-5 星，0 表示清除评分。打分也算一次修改，记 touched_at/审计。"""
+        wanted = _clean_ids(ids)
+        try:
+            value = int(rating)
+        except (TypeError, ValueError):
+            raise StoreError("评分必须是 0-5 的整数") from None
+        if not 0 <= value <= 5:
+            raise StoreError("评分必须是 0-5 的整数（0 为清除）")
+
+        def op() -> dict:
+            updated: list[dict] = []
+            skipped: list[str] = []
+            now = time.time()
+            for template_id in wanted:
+                row = self._by_id.get(template_id)
+                if row is None:
+                    skipped.append(template_id)
+                    continue
+                current = int(row.get("rating") or 0)
+                if current == value:
+                    continue
+                row["rating"] = value
+                row["rating_at"] = now if value else 0.0
+                row["rating_by"] = str(user or "") if value else ""
+                row["touched_at"] = now
+                row["touched_by"] = str(user or "")
+                updated.append(copy.deepcopy(row))
+            if not updated and skipped and len(skipped) == len(wanted):
+                raise NotFound(f"视频不存在：{skipped[0]}")
+            return {"changed": len(updated), "updated": updated, "skipped": skipped,
+                    "detail": {"ids": wanted, "rating": value, "affected": len(updated)}}
+
+        return self._mutate(op, user=user, revision=revision, action="set_rating")
+
     def _unique_name_locked(self, name: str) -> str:
         """同一份清单里文件名必须唯一：重名自动加 -2、-3（COS 对象名另带随机后缀）。"""
         taken = {str(row.get("name") or "").casefold() for row in self.data["videos"]}
