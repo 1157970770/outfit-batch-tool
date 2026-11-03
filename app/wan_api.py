@@ -75,6 +75,8 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_CANCELED = "canceled"
 STATUS_UNKNOWN = "unknown"
+# 本机主动放弃等待：云端任务还在（可能继续跑并计费），只是我们不再轮询了。
+STATUS_STOPPED = "stopped"
 
 TERMINAL_STATUSES = (STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELED, STATUS_UNKNOWN)
 
@@ -151,6 +153,21 @@ class TaskCanceled(WanError):
     def __init__(self, task_id: str):
         self.task_id = task_id
         super().__init__("canceled", f"任务已取消：{task_id}")
+
+
+class WaitStopped(WanError):
+    """本机主动停止等待（用户点了取消 / 进程正在退出）。
+
+    与 TaskCanceled 的区别是：云端那条任务**并没有被取消**，它可能继续跑完并计费，
+    所以这里保留 task_id，由上层记成 canceled 但写明"云端可能仍在运行"。
+    """
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+        super().__init__(
+            "stopped",
+            f"已停止等待，taskId={task_id} 仍在云端运行并可能继续计费，请到控制台核对",
+        )
 
 
 @dataclass
@@ -1005,15 +1022,43 @@ class WanClient:
 
     def wait_task(self, task_id: str, *, timeout: int | None = None,
                   interval: float | None = None,
-                  on_status: Callable[[str], None] | None = None) -> TaskResult:
+                  on_status: Callable[[str], None] | None = None,
+                  should_stop: Callable[[], bool] | None = None) -> TaskResult:
+        """轮询到终态。
+
+        `should_stop` 提供后，取消/退出能在 ~0.5s 内生效（抛 WaitStopped），
+        不必等满一个 poll_interval，也不必等满 timeout：在飞名额立刻归还。
+        云端任务不会被取消，所以异常里带着 task_id 交给上层记成 canceled。
+
+        计时一律用 monotonic：墙钟被 NTP 前跳会让 1800s 的等待提前判死，
+        后跳则可能等成双倍。
+        """
         timeout = int(timeout if timeout is not None else self.cfg.poll_timeout)
         interval = float(interval if interval is not None else self.cfg.poll_interval)
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         last_status = ""
         network_failures = 0
 
-        while time.time() < deadline:
-            time.sleep(max(0.05, interval * random.uniform(0.8, 1.2)))
+        def stopped() -> bool:
+            if should_stop is None:
+                return False
+            try:
+                return bool(should_stop())
+            except Exception:  # noqa: BLE001 - 停止回调本身出错不能把轮询带崩
+                return False
+
+        while time.monotonic() < deadline:
+            if stopped():
+                raise WaitStopped(task_id)
+            # 分段睡：整段 sleep(15) 期间点了取消也感知不到，取消感知延迟就是 15s。
+            nap = max(0.05, interval * random.uniform(0.8, 1.2))
+            slept = 0.0
+            while slept < nap:
+                if stopped():
+                    raise WaitStopped(task_id)
+                step = min(0.5, nap - slept)
+                time.sleep(step)
+                slept += step
             try:
                 result = self.get_task(task_id)
             except WanError as exc:
@@ -1037,6 +1082,8 @@ class WanClient:
                         pass
             if result.status in TERMINAL_STATUSES:
                 return result
+            if stopped():
+                raise WaitStopped(task_id)
 
         raise WaitTimeout(task_id, timeout)
 

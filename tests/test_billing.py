@@ -96,7 +96,8 @@ class StubClient:
             raise self.submit_exc
         return SubmitResult(task_id="task-1", status="PENDING", request_id="req-1")
 
-    def wait_task(self, task_id, *, timeout=None, interval=None, on_status=None):
+    def wait_task(self, task_id, *, timeout=None, interval=None, on_status=None,
+                  should_stop=None):
         return self.result
 
 

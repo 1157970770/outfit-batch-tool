@@ -39,6 +39,36 @@ from app.web import WEB_VERSION
 
 MAX_BODY = 32 * 1024 * 1024
 USERNAME_RE = re.compile(r"^[\w.-]{2,32}$", re.UNICODE)
+# 单 IP 的登录失败上限（账号桶更严，这里只防「换用户名」绕开）。
+# 给到 30 是因为办公室/家庭通常是同一个出口 IP，别让几个人打错密码就锁死全屋。
+LOGIN_IP_LIMIT = 30
+# 同时在跑的登录校验数：未知账号每次要走 310,000 轮 PBKDF2（约 0.1s CPU）。
+_LOGIN_SLOTS = threading.BoundedSemaphore(4)
+# 单进程的连接上限：每个连接一条线程，超出直接拒绝，避免几十条半开连接把线程吃光。
+MAX_CONNECTIONS = 64
+
+
+class LengthRequired(ValueError):
+    """请求体长度未知（chunked 等）：回 411 而不是猜一个长度去读。"""
+
+
+def _remove_quiet(path: Path) -> None:
+    """删临时文件；失败只当没删（tmp 目录不是权威数据）。"""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def temp_zip_path(data_dir: Path, tag: str) -> Path:
+    """每次请求一个唯一的 zip 路径。
+
+    以前用固定的 `<job_id>.zip`：同一任务并发下载会在同一路径上互相 truncate，
+    客户端拿到 CRC 错误或半截包；`tmp/` 下的文件也从没人清理。
+    """
+    folder = Path(data_dir) / "tmp"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{tag}-{uuid.uuid4().hex[:10]}.zip"
 
 
 def _local_hosts() -> set[str]:
@@ -119,6 +149,9 @@ class WebApplication:
         self._template_store_lock = threading.Lock()
         self._output_store = None
         self._output_store_lock = threading.Lock()
+        # web.json 只有一个文件：并发写要串行，否则 tmp 会被互相截断；
+        # 用 RLock 是因为「改内存 → 落盘」整段持锁时，persist_web 内部还会再进一次。
+        self._web_lock = threading.RLock()
         # 批次管理器复用 JobManager.lock；catalog 用回调取，热重载后无需重建。
         self.batches = BatchManager(settings, self.jobs, lambda: self.catalog, self.resolve_upload)
 
@@ -140,10 +173,26 @@ class WebApplication:
         return self.signer.verify(token, self.settings.users)
 
     def persist_web(self) -> None:
+        """落盘 web.json。
+
+        临时文件名必须唯一：以前所有线程共用一个 `web.json.tmp`，两个管理员同时改
+        账号时会互相截断——A 刚 replace 走 tmp，B 的 replace 就抛 FileNotFoundError；
+        更糟的是交错内容被发布出去，下次启动 load_settings() 失败，
+        全部账号与会话密钥一起丢。
+        """
         path = self.settings.web_file
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.settings.web, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        with self._web_lock:
+            tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp.write_text(json.dumps(self.settings.web, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+                os.replace(tmp, path)
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
 
     def template_store(self):
         with self._template_store_lock:
@@ -238,6 +287,10 @@ def make_handler(app: WebApplication):
         protocol_version = "HTTP/1.1"
         server_version = "OutfitLocal/1"
         sys_version = ""
+        # 读不到请求头就断开：否则「连上就发一个 Content-Length: 32MB 的头，然后不发数据」
+        # 能让一条连接永久占着一个线程，几十条就把线程池吃干净。
+        # StreamRequestHandler.setup() 会用这个值给 socket 设超时。
+        timeout = 30
 
         def log_message(self, fmt, *args):
             # 不记录请求体、Cookie、密码或签名 URL。
@@ -295,6 +348,12 @@ def make_handler(app: WebApplication):
             self._json({"ok": False, "error": str(message)[:600]}, status)
 
         def _body(self, limit=MAX_BODY):
+            # 只支持 Content-Length：分块传输要边读边拼边界，本服务用不到，
+            # 当成 {} 处理反而会让请求体残留在连接里被当成下一个请求。
+            encoding = str(self.headers.get("Transfer-Encoding") or "").lower()
+            if "chunked" in encoding:
+                self.close_connection = True
+                raise LengthRequired("不支持分块传输（Transfer-Encoding: chunked），请带 Content-Length。")
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
@@ -583,17 +642,24 @@ def make_handler(app: WebApplication):
             if path == "/api/login":
                 try:
                     data = self._body(16 * 1024)
+                except LengthRequired as exc:
+                    return self._error(exc, 411)
                 except (OverflowError, ValueError) as exc:
                     return self._error(exc, 413 if isinstance(exc, OverflowError) else 400)
                 return self._login(data)
             user = self._user()
             if not user:
+                # 鉴权失败时请求体一个字节没读：不关连接的话，残留字节会被
+                # handle_one_request 当成下一个请求解析（keep-alive 串包）。
+                self.close_connection = True
                 return
             # 视频上传是原始字节流（不用 JSON：50MB 走 base64 会白白多占 1/3 内存）
             if path == "/api/tags/videos/upload":
                 return self._upload_template(user)
             try:
                 data = self._body()
+            except LengthRequired as exc:
+                return self._error(exc, 411)
             except OverflowError as exc:
                 return self._error(exc, 413)
             except ValueError as exc:
@@ -715,22 +781,36 @@ def make_handler(app: WebApplication):
         def _login(self, data):
             username = str(data.get("username") or "").strip()
             password = str(data.get("password") or "")
-            key = self.client_address[0] + "|" + username
-            if not app.limiter.allowed(key):
+            # 两个桶：IP 桶挡「换用户名继续试」，账号桶挡「换 IP 打同一账号」。
+            # 以前只有「IP|用户名」一个 key，换用户名就是新桶，等于没限流。
+            ip_key = f"ip|{self.client_address[0]}"
+            user_key = f"user|{username}"
+            if (not app.limiter.allowed(ip_key, LOGIN_IP_LIMIT)
+                    or not app.limiter.allowed(user_key)):
                 return self._error("尝试次数过多，请 10 分钟后再试。", 429)
-            record = app.settings.users.get(username)
-            ok = bool(record and record.get("enabled", True) and verify_password(password, record))
-            if record and record.get("expires") and str(record["expires"]) < time.strftime("%Y-%m-%d"):
-                ok = False
-            if not ok:
-                app.limiter.failed(key)
-                # 未知账号也执行一次 PBKDF2，降低账号枚举时序差异。
-                if not record:
-                    import hashlib
-                    from app.web.auth import PBKDF2_ROUNDS
-                    hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), b"unknown-user-salt", PBKDF2_ROUNDS)
-                return self._error("账号或密码不正确。", 401)
-            app.limiter.succeeded(key)
+            # 未知账号要跑一次 PBKDF2 抹平时序，CPU 单价很高：限并发，
+            # 否则几个客户端并发猜用户名就能把进程卡在哈希上，正常请求全排队。
+            if not _LOGIN_SLOTS.acquire(blocking=False):
+                return self._error("登录请求过多，请稍后再试。", 429)
+            try:
+                record = app.settings.users.get(username)
+                ok = bool(record and record.get("enabled", True) and verify_password(password, record))
+                if record and record.get("expires") and str(record["expires"]) < time.strftime("%Y-%m-%d"):
+                    ok = False
+                if not ok:
+                    app.limiter.failed(ip_key)
+                    app.limiter.failed(user_key)
+                    # 未知账号也执行一次 PBKDF2，降低账号枚举时序差异。
+                    if not record:
+                        import hashlib
+                        from app.web.auth import PBKDF2_ROUNDS
+                        hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), b"unknown-user-salt", PBKDF2_ROUNDS)
+                    return self._error("账号或密码不正确。", 401)
+            finally:
+                _LOGIN_SLOTS.release()
+            # 只清账号桶：IP 桶留给窗口自然衰减。否则拿自己的合法账号登一次，
+            # 就能把这个 IP 的失败计数清零，继续猜别人的密码。
+            app.limiter.succeeded(user_key)
             token = app.signer.issue(username, record)
             extra = {"Set-Cookie": f"outfit_sid={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={app.signer.hours * 3600}"}
             return self._json({"ok": True, "user": {"username": username, "role": record.get("role", "user")}}, extra=extra)
@@ -966,7 +1046,10 @@ def make_handler(app: WebApplication):
                 path = app.batches.zip_path(batch_id, user)
             except BatchError as exc:
                 return self._error(exc, exc.status)
-            return self._send_file(path, "application/zip", f"batch-{batch_id}.zip")
+            try:
+                return self._send_file(path, "application/zip", f"batch-{batch_id}.zip")
+            finally:
+                _remove_quiet(path)
 
         # ---------------------------------------------------------- 历史分组
         def _history_groups(self, query, user):
@@ -1176,9 +1259,10 @@ def make_handler(app: WebApplication):
                 return self._error("密码至少需要 8 位。")
             if role not in ("user", "admin"):
                 return self._error("用户角色无效。")
-            app.settings.users[username] = {**make_password(password), "role": role,
-                                            "enabled": True, "version": 1, "expires": ""}
-            app.persist_web()
+            with app._web_lock:
+                app.settings.users[username] = {**make_password(password), "role": role,
+                                                "enabled": True, "version": 1, "expires": ""}
+                app.persist_web()
             return self._json({"ok": True, "username": username}, 201)
 
         def _admin_reset_user(self, username, data):
@@ -1188,9 +1272,10 @@ def make_handler(app: WebApplication):
                 return self._error("账号不存在。", 404)
             if len(password) < 8:
                 return self._error("新密码至少需要 8 位。")
-            user.update(make_password(password))
-            user["version"] = int(user.get("version", 1)) + 1
-            app.persist_web()
+            with app._web_lock:
+                user.update(make_password(password))
+                user["version"] = int(user.get("version", 1)) + 1
+                app.persist_web()
             return self._json({"ok": True})
 
         def _admin_disable_user(self, username, actor):
@@ -1203,18 +1288,20 @@ def make_handler(app: WebApplication):
                 admins = [u for u in app.settings.users.values() if u.get("role") == "admin" and u.get("enabled", True)]
                 if len(admins) <= 1:
                     return self._error("至少保留一个可用管理员。", 409)
-            user["enabled"] = False
-            user["version"] = int(user.get("version", 1)) + 1
-            app.persist_web()
+            with app._web_lock:
+                user["enabled"] = False
+                user["version"] = int(user.get("version", 1)) + 1
+                app.persist_web()
             return self._json({"ok": True})
 
         def _admin_enable_user(self, username):
             user = app.settings.users.get(username)
             if not user:
                 return self._error("账号不存在。", 404)
-            user["enabled"] = True
-            user["version"] = int(user.get("version", 1)) + 1
-            app.persist_web()
+            with app._web_lock:
+                user["enabled"] = True
+                user["version"] = int(user.get("version", 1)) + 1
+                app.persist_web()
             return self._json({"ok": True})
 
         def _admin_delete_user(self, username, actor):
@@ -1227,8 +1314,9 @@ def make_handler(app: WebApplication):
                 return self._error("账号不存在。", 404)
             if username == actor.get("username"):
                 return self._error("不能删除当前登录的账号。", 409)
-            del app.settings.users[username]
-            app.persist_web()
+            with app._web_lock:
+                del app.settings.users[username]
+                app.persist_web()
             return self._json({"ok": True, "username": username})
 
         def _job_detail(self, job_id, user):
@@ -1279,22 +1367,29 @@ def make_handler(app: WebApplication):
             out = app.jobs.output_path(job_id)
             if not job or not out or not out.is_dir():
                 return self._error("暂时没有可下载的视频。", 404)
-            zip_path = app.settings.data_dir / "tmp" / f"{job_id}.zip"
-            zip_path.parent.mkdir(parents=True, exist_ok=True)
+            zip_path = temp_zip_path(app.settings.data_dir, f"job-{job_id}")
+            added = 0
             try:
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                     for tid in job.get("template_ids", []):
                         video = out / f"{tid}.mp4"
                         if video.is_file():
                             zf.write(video, f"{tid}.mp4")
+                            added += 1
                     report = out / "report.csv"
                     if report.is_file():
                         zf.write(report, "report.csv")
             except OSError as exc:
+                _remove_quiet(zip_path)
                 return self._error(f"打包失败：{exc}", 500)
-            if zip_path.stat().st_size == 0:
+            # 空 zip 也有 22 字节 EOCD，用文件大小判空永远是假：要看真正写进去几个视频。
+            if not added:
+                _remove_quiet(zip_path)
                 return self._error("暂时没有可下载的视频。", 404)
-            return self._send_file(zip_path, "application/zip", f"{job_id}.zip")
+            try:
+                return self._send_file(zip_path, "application/zip", f"{job_id}.zip")
+            finally:
+                _remove_quiet(zip_path)
 
         def _preview(self, template_id, allow_deprecated=False):
             try:
@@ -1399,6 +1494,71 @@ def make_handler(app: WebApplication):
     return Handler
 
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    """每连接一线程，但线程数量有上限。
+
+    `daemon_threads` / `allow_reuse_address` 必须是**类属性**：写在构造之后再赋值，
+    绑定早就做完了，那两行是死代码。allow_reuse_address 保留为 True——
+    Windows 下关闭它会让 TIME_WAIT 状态的旧连接把端口占死，重启直接失败；
+    「两个进程同时监听同一端口」改用 server.lock 单实例锁解决。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 16
+
+    def __init__(self, *args, max_connections: int = MAX_CONNECTIONS, **kwargs):
+        self._slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # 超出上限就当场关掉，而不是再开一条线程陪着阻塞：几十条「连上不发数据」
+        # 的连接足以耗尽线程，正常用户就连不上了。
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
+def _acquire_instance_lock(path: Path):
+    """数据目录级的单实例锁；拿不到返回 None。
+
+    端口层面挡不住第二个进程（SO_REUSEADDR 在 Windows 上允许同时 bind，
+    后起的进程可能抢到带 Cookie 的请求），所以在数据目录上加一把进程级文件锁。
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            if not handle.read(1):
+                handle.write(" ")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def serve(host: str | None = None, port: int | None = None) -> int:
     try:
         settings = load_settings()
@@ -1408,14 +1568,19 @@ def serve(host: str | None = None, port: int | None = None) -> int:
     app = WebApplication(settings)
     bind_host = host or str(settings.web.get("host") or "0.0.0.0")
     bind_port = int(port or settings.web.get("port") or 8765)
-    try:
-        server = ThreadingHTTPServer((bind_host, bind_port), make_handler(app))
-    except OSError as exc:
-        print(f"无法监听 {bind_host}:{bind_port}：{exc}")
+    lock = _acquire_instance_lock(settings.data_dir / "server.lock")
+    if lock is None:
+        print("已有一个网页服务在运行（同一数据目录），请先关闭它再启动。")
         app.jobs.shutdown()
         return 2
-    server.daemon_threads = True
-    server.allow_reuse_address = True
+    try:
+        server = LocalHTTPServer((bind_host, bind_port), make_handler(app))
+    except OSError as exc:
+        print(f"无法监听 {bind_host}:{bind_port}：{exc}")
+        print("端口可能被其它程序占用：netstat -ano | findstr :%d" % bind_port)
+        lock.close()
+        app.jobs.shutdown()
+        return 2
     def _rank(ip: str) -> tuple[int, str]:
         """把最可能是「办公/家庭局域网」的地址排前面，虚拟网卡靠后。
 
@@ -1441,7 +1606,14 @@ def serve(host: str | None = None, port: int | None = None) -> int:
         print(f"局域网访问：http://{address}:{bind_port}")
     print("客户端只需浏览器；按 Ctrl+C 停止服务。")
     address_file = settings.data_dir / "访问地址.txt"
-    address_file.write_text("\n".join([f"http://127.0.0.1:{bind_port}"] + [f"http://{a}:{bind_port}" for a in addresses]), encoding="utf-8")
+    try:
+        address_file.write_text(
+            "\n".join([f"http://127.0.0.1:{bind_port}"]
+                      + [f"http://{a}:{bind_port}" for a in addresses]),
+            encoding="utf-8")
+    except OSError:
+        # 只是给用户看的便利文件；写不了（只读目录/被占用）不该让已经绑好端口的服务退出。
+        print("（访问地址文件写入失败，不影响服务运行）")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -1450,4 +1622,5 @@ def serve(host: str | None = None, port: int | None = None) -> int:
         server.shutdown()
         server.server_close()
         app.jobs.shutdown()
+        lock.close()
     return 0

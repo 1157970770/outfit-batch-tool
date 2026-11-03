@@ -511,6 +511,9 @@ class JobManager:
                 return False
             if job.get("status") == "queued":
                 job["status"] = "canceled"
+                # 派发线程可能已经把这个 job 放进 active 并起了线程（毫秒级窗口）。
+                # 只改 status 不够保险：一并置取消标记，让工作线程拿锁后自己退出。
+                job["cancel_requested"] = True
                 job["message"] = "已取消排队任务。"
                 job["finished_at"] = time.time()
                 self._save(job)

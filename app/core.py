@@ -28,7 +28,7 @@ try:                      # 作为包导入（测试/界面）
     from .storage import Storage, file_fingerprint, object_key
     from .wan_api import (
         STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
-        TaskCanceled, TaskExpired, WaitTimeout, WanClient, WanConfig, WanError,
+        TaskCanceled, TaskExpired, WaitStopped, WaitTimeout, WanClient, WanConfig, WanError,
         estimate_cost,
     )
     from .media import MediaError, SourceUploader, describe_media_source, resolve_body, resolve_image
@@ -36,7 +36,7 @@ except ImportError:       # 直接 python3 app/core.py 时
     from storage import Storage, file_fingerprint, object_key  # type: ignore
     from wan_api import (  # type: ignore
         STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
-        TaskCanceled, TaskExpired, WaitTimeout, WanClient, WanConfig, WanError,
+        TaskCanceled, TaskExpired, WaitStopped, WaitTimeout, WanClient, WanConfig, WanError,
         estimate_cost,
     )
     from media import (  # type: ignore
@@ -525,6 +525,12 @@ class BatchRunner:
         except SubmitUnknown as exc:
             rec["status"] = "unknown"
             rec["error"] = str(exc)
+        except WaitStopped as exc:
+            # 本机不再等，云端那条任务仍在跑：结果未知，且**不能**允许一键重试，
+            # 否则同一条模板会被二次提交、二次计费。落在 unknown（不可重试）而不是 canceled。
+            rec["status"] = "unknown"
+            rec["stopped"] = True
+            rec["error"] = str(exc)
         except WaitTimeout as exc:
             rec["status"] = "running"
             rec["error"] = str(exc)
@@ -581,6 +587,8 @@ class BatchRunner:
         return self._client.wait_task(
             resp.task_id, timeout=spec.poll_timeout, interval=spec.poll_interval,
             on_status=lambda status: self.log(f"[{tid}] {status}"),
+            # 点了取消就尽快放手：云端那条任务收不回来，但本机不必再占着在飞名额陪跑到超时。
+            should_stop=self.stop_event.is_set,
         )
 
     def _archive(self, rec: dict, path: Path) -> None:

@@ -812,13 +812,20 @@ class BatchManager:
                     files.append((f"{item.get('template_id')}.mp4", video))
         if not files:
             raise BatchError("暂时没有可下载的视频。", 404)
-        zip_path = self.settings.data_dir / "tmp" / f"batch-{batch['id']}.zip"
+        # 每次打包一个唯一文件名：固定名会让同一批次的两个并发下载互相 truncate，
+        # 客户端拿到半截 zip（调用方负责发完就删）。
+        zip_path = (self.settings.data_dir / "tmp"
+                    / f"batch-{batch['id']}-{uuid.uuid4().hex[:10]}.zip")
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for arcname, path in files:
                     zf.write(path, arcname)
         except OSError as exc:
+            try:
+                zip_path.unlink()
+            except OSError:
+                pass
             raise BatchError(f"打包失败：{exc}", 500) from None
         return zip_path
 

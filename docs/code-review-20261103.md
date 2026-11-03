@@ -390,4 +390,28 @@ mode 只在 `lastMulti` 变化时改。
 | `tests/test_tag_truth.py` | 6 组断言：导入合并保留新行、空清单需 `allow_empty`、回滚要 revision、写盘失败回滚内存、xlsx 保 `=` 开头/自定义大类/时间列、坏文件从 `.bak` 自愈 | 回归防护 |
 | `tests/test_web_tag_api.py` | 新增「四个写接口缺 revision 一律 400」与 `revision: "abc"` → 400 的断言；两条版本名校验补 revision | P1-6 回归防护 |
 
-> 评审阶段为只读；第一批修复已提交 `40330f6`，第二批 `a58646d`，第三批见 [fix-20261103-tags.md](fix-20261103-tags.md)。
+### 7.4 第四批实际落地内容（协议面与并发）
+
+> 完整清单、行为变化与回滚方式见 [fix-20261103-http.md](fix-20261103-http.md)。
+
+| 文件 | 改动 | 对应问题 |
+| --- | --- | --- |
+| `app/web/auth.py` | `LoginLimiter` 支持按 key 给上限、空桶即删、超量按插入顺序淘汰（`defaultdict` 去掉） | P1-11 |
+| `app/web/server.py` | 登录判定改为 IP 桶（30）+ 账号桶（8）双桶，校验并发 `BoundedSemaphore(4)`，成功只清账号桶 | P1-11 |
+| `app/web/server.py` | `_body` 拒绝 `Transfer-Encoding: chunked`（411），未登录分支 `close_connection = True` | P1-12 |
+| `app/web/server.py` | `Handler.timeout = 30`；新增 `LocalHTTPServer`（`BoundedSemaphore(64)` 限连接数） | P1-13 |
+| `app/web/server.py` | `persist_web` 用 uuid 临时名 + `_web_lock`(RLock)；五个账号写点「改内存 + 落盘」整段持锁 | P1-14 |
+| `app/web/server.py`·`batches.py` | `temp_zip_path()` 一请求一名、发完即删；空包判断改成「写进去几个视频」 | P1-15 |
+| `app/web/server.py` | `LocalHTTPServer` 类属性声明 + `server.lock` 单实例锁 + `访问地址.txt` 包 try | P1-16 |
+| `app/wan_api.py` | `wait_task(should_stop=...)`、`WaitStopped`、`STATUS_STOPPED`，deadline 改 monotonic，睡眠按 0.5s 切片 | P1-17 |
+| `app/core.py` | 传 `should_stop=self.stop_event.is_set`；停止等待落 `unknown` + `stopped`（不落 canceled，避免一键重试二次计费） | P1-17 |
+| `app/web/jobs.py` | queued 取消同时置 `cancel_requested` | P1-18 |
+| `tests/test_web_hardening.py` | 13 组断言：限流分桶/桶上限、chunked 411、鉴权失败关连接、类属性与连接上限、`web.json` 并发写、zip 唯一名、取消秒级退出、停止记录不可重试、排队取消置标记 | 回归防护 |
+
+评审的两个建议在本批被**有意偏离**，理由写在 fix 文档里：
+① `allow_reuse_address` 不设 `False`（Windows 上 TIME_WAIT 会占死端口、重启即失败），
+改用 `server.lock` 单实例锁解决「两个进程同端口」；
+② 停止等待的记录不记 `canceled`（`canceled` 在重试白名单里，会导致二次计费），改记 `unknown`。
+
+> 评审阶段为只读；第一批修复已提交 `40330f6`，第二批 `a58646d`，第三批 `96f13d5`，
+> 第四批见 [fix-20261103-http.md](fix-20261103-http.md)。
