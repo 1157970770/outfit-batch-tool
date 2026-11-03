@@ -688,6 +688,12 @@
     state.mode = state.selected.size ? 'add' : 'replace';
     // 不重绘整表：长列表里点一行就跳回顶部很难用
     renderEditor();
+    // 光标自动落到打分输入框并全选原值：选中即打分，不用再特意点一下输入框
+    const ratingInput = document.querySelector('#tag-editor-rating .rating-input');
+    if (ratingInput) {
+      ratingInput.focus();
+      ratingInput.select();
+    }
   }
 
   /* ---------------------------------------------------------------- 写操作 */
