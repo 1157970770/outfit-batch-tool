@@ -50,7 +50,7 @@
 
   /* -------------------------------------------------------------- 评分 */
   const RATING_MAX = 5;   // 展示 5 颗星
-  const RATING_MIN = 3;   // 只允许打 3-5 星（0=清除）
+  const RATING_MIN = 1;   // 1-5 星全部可打（0=清除）
 
   function buildRatingCell(video) {
     const cell = document.createElement('span');
