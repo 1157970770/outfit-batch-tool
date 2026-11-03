@@ -644,6 +644,7 @@ textarea {
 .status.succeeded { background: #eaf6f0; color: var(--green); }
 .status.partial { background: #fff7e6; color: var(--amber); }
 .status.failed, .status.interrupted { background: #fdeeee; color: var(--red); }
+.status.unknown { background: #fff1e6; color: #b45309; }
 .status.canceled { background: #f2f4f7; color: #4b5563; }
 
 .progress {

@@ -490,6 +490,12 @@ class JobManager:
             if not selected:
                 if any(str(r.get("status")) == "running" for r in source.get("records", [])):
                     raise ValueError("还有条目在等云端出片（或等待超时），请稍后再重试")
+                unknown = sum(1 for r in source.get("records", []) if str(r.get("status")) == "unknown")
+                if unknown:
+                    raise ValueError(
+                        f"有 {unknown} 条提交结果未知（云端可能已创建任务并计费），"
+                        "请先到控制台核对，确认没有重复后再新建任务"
+                    )
                 raise ValueError("该任务没有可重试的失败项")
             image_path = Path(source["image_path"])
             if not image_path.is_file():
@@ -566,7 +572,9 @@ class JobManager:
           · 金额是「计费秒 × 单价」的估算，真实账单以阿里云为准；
           · 含零使用量的账户，方便管理员看出"谁还没开始用"。
         """
-        failed_states = {"failed", "invalid", "expired", "canceled"}
+        # unknown = 提交结果未知（云端可能已建任务并计费），必须计入失败侧，
+        # 否则账上既不算成功也不算失败，会从统计里静默消失。
+        failed_states = {"failed", "invalid", "expired", "canceled", "unknown"}
 
         def blank(name: str, role: str = "user", enabled: bool = True) -> dict:
             return {"owner": name, "role": role, "enabled": enabled,

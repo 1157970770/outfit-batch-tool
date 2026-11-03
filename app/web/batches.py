@@ -195,7 +195,11 @@ class BatchManager:
         """
         job_id = str(batch.get("active_job_id") or "")
         if not job_id:
-            return False
+            # 上一次生产建了 job 但批次没来得及标 producing（写盘失败 / 进程被杀）：
+            # 先认领，别让用户再点一次生产导致同批模板被重复提交。
+            job_id = self._adopt_pending_run(batch)
+            if not job_id:
+                return False
         job = self.jobs.jobs.get(job_id) if self.jobs is not None else None
         if isinstance(job, dict) and job.get("status") not in _TERMINAL_JOB:
             return False
@@ -241,6 +245,58 @@ class BatchManager:
         self._refresh(batch)
         self._save(batch)
         return True
+
+    def _save_quiet(self, batch: dict) -> None:
+        """尽力而为地落盘：用于已经无法回头（job 已建）的收尾路径。"""
+        try:
+            self._save(batch)
+        except OSError:
+            pass
+
+    def _adopt_pending_run(self, batch: dict) -> str:
+        """认领 `pending_run` 标记，返回可对账的 job id（没有则空串）。
+
+        `_start_run` 在 `jobs.create` **之前**就把标记落盘，建完立刻把 job_id 写回，
+        所以进程在中途被杀 / 写盘失败时，磁盘上一定留有线索：
+          · 没有 job_id → 任务根本没建，条目保持 pending，清掉标记即可；
+          · 有 job_id 但 job 查不到 → 云端状态无法确认，标失败交给人工核对，不自动重发；
+          · 有 job_id 且 job 在 → 接回 producing，让正常对账继续收敛。
+        """
+        pending = batch.get("pending_run")
+        if not isinstance(pending, dict):
+            return ""
+        job_id = str(pending.get("job_id") or "")
+        template_ids = {str(tid) for tid in (pending.get("template_ids") or [])}
+        job = self.jobs.jobs.get(job_id) if (self.jobs is not None and job_id) else None
+        if not job_id:
+            batch.pop("pending_run", None)
+        elif not isinstance(job, dict):
+            for item in batch.get("items") or []:
+                if (str(item.get("template_id")) in template_ids
+                        and item.get("state") == "pending"):
+                    item["state"] = "failed"
+                    item["error"] = "上次生产中断：对应任务已找不到，请核对后重试。"
+            batch.pop("pending_run", None)
+        else:
+            for item in batch.get("items") or []:
+                if (str(item.get("template_id")) in template_ids
+                        and item.get("state") == "pending"):
+                    item["state"] = "producing"
+                    item["job_id"] = job_id
+                    item["error"] = ""
+            batch["active_job_id"] = job_id
+            runs = batch.setdefault("runs", [])
+            if not any(str(run.get("job_id")) == job_id for run in runs):
+                runs.append({
+                    "job_id": job_id, "count": len(template_ids),
+                    "started_at": float(pending.get("started_at") or time.time()),
+                    "finished_at": None, "success": 0, "failed": 0, "blocked": 0,
+                })
+            batch.pop("pending_run", None)
+        batch["updated_at"] = time.time()
+        self._refresh(batch)
+        self._save(batch)
+        return job_id if isinstance(job, dict) else ""
 
     # ------------------------------------------------------------------ 估算金额
     def estimate(self, live_items: list[dict], resolution: str,
@@ -543,6 +599,21 @@ class BatchManager:
         duration = _as_int(batch.get("duration"), DEFAULT_DURATION)
         if not duration_ok(duration):
             duration = DEFAULT_DURATION
+        # 先落「本次生产已开始」的标记，再建 job。jobs.create 之后任何一步失败（写盘、
+        # 记账、标记条目）都不会让批次看起来还能再点一次生产——否则同一批条目会再建
+        # 一个 job，云端会真的再出一遍片、再收一次钱。
+        marker = {
+            "template_ids": [str(item.get("template_id")) for item, _live_item in taken],
+            "job_id": "", "started_at": time.time(),
+        }
+        batch["pending_run"] = marker
+        batch["updated_at"] = marker["started_at"]
+        try:
+            self._save(batch)
+        except OSError as exc:
+            batch.pop("pending_run", None)
+            raise BatchError(
+                f"批次状态写入失败，本次没有创建任务，请稍后重试（{exc}）", 503) from None
         try:
             job = self.jobs.create(
                 user["username"], image_path, str(batch.get("image_name") or "定妆图"),
@@ -554,12 +625,25 @@ class BatchManager:
                 style_no=str(batch.get("style_no") or ""),
             )
         except ValueError as exc:
+            batch.pop("pending_run", None)
+            self._save_quiet(batch)
             raise BatchError(str(exc), 409) from None
         job_id = str(job["id"])
-        # 款号-模板记账（提交时记，失败重试也覆盖为最近一次）：小批量试跑不经过这里，天然不计入。
-        top = str((batch.get("tags") or {}).get("top") or "").strip() or clean_style_no(batch.get("style_no"))
-        self.usage.record(top, [str(item.get("template_id")) for item, _ in taken],
-                          batch_no=str(batch.get("batch_no") or ""), batch_id=str(batch["id"]))
+        marker["job_id"] = job_id
+        try:
+            # 任务已建：立刻把 job id 落盘，之后哪怕进程被杀也能在 _reconcile 里认领。
+            self._save(batch)
+        except OSError as exc:
+            raise BatchError(
+                f"任务已创建（{job_id}），但批次状态写入失败：{exc}；"
+                "请勿重复生产，刷新后查看，或联系管理员核对。", 503) from None
+        # 款号-模板记账（提交时记，失败重试也覆盖为最近一次）：纯审计，失败不能影响已建好的任务。
+        try:
+            top = str((batch.get("tags") or {}).get("top") or "").strip() or clean_style_no(batch.get("style_no"))
+            self.usage.record(top, [str(item.get("template_id")) for item, _ in taken],
+                              batch_no=str(batch.get("batch_no") or ""), batch_id=str(batch["id"]))
+        except Exception:  # noqa: BLE001 - 记账本是附加信息，不能拖垮生产
+            self.warnings.append(f"批次 {batch['id']} 的款号记账失败（不影响出片）")
         for item, _live_item in taken:
             item["state"] = "producing"
             item["job_id"] = job_id
@@ -570,8 +654,15 @@ class BatchManager:
             "finished_at": None, "success": 0, "failed": 0, "blocked": len(blocked),
         })
         batch["updated_at"] = time.time()
-        self._refresh(batch)
-        self._save(batch)
+        batch.pop("pending_run", None)
+        try:
+            self._refresh(batch)
+            self._save(batch)
+        except OSError as exc:
+            batch["pending_run"] = marker   # 保住内存里的认领凭据，刷新即对账
+            raise BatchError(
+                f"任务已创建（{job_id}），但批次状态写入失败：{exc}；"
+                "请刷新后查看，不要重复生产。", 503) from None
         return {
             "job": job,
             "batch": self.public(batch),

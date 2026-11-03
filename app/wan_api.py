@@ -827,6 +827,10 @@ class _RateLimiter:
     参数二选一：rpm（每分钟请求数，新口径）或 qps（每秒，旧口径，兼容既有调用）。
     """
 
+    # 惩罚封顶：连续 429 时 penalize 会把下一次放行时间不断往后推，
+    # 不设上界就会让全站提交与轮询一起停摆。最多再等这么久。
+    PENALTY_CAP = 60.0
+
     def __init__(self, qps: float = 0.0, *, rpm: float | None = None):
         if rpm:
             self.interval = 60.0 / max(1.0, float(rpm))
@@ -844,10 +848,15 @@ class _RateLimiter:
             time.sleep(wait)
 
     def penalize(self, seconds: float = 5.0) -> None:
-        """命中官方限流时把**全局**下一次允许时间推后，避免继续戳 429。"""
+        """命中官方限流时把**全局**下一次允许时间推后，避免继续戳 429。
+
+        封顶 `PENALTY_CAP` 秒：即使连续命中，也最多让全站在未来一分钟内缓一缓，
+        不会因为叠加而永久停摆（官方 429 通常几十秒内恢复）。
+        """
         with self._lock:
             now = time.monotonic()
-            self._next = max(self._next, now) + max(0.0, float(seconds))
+            target = max(self._next, now) + max(0.0, float(seconds))
+            self._next = min(target, now + self.PENALTY_CAP)
 
 
 _GLOBAL_LOCK = threading.Lock()

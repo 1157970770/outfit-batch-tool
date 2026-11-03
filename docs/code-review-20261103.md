@@ -343,7 +343,7 @@ mode 只在 `lastMulti` 变化时改。
 | 第四批 | P1-11~P1-18（限流分桶、body 消费、socket 超时、uuid tmp、取消生效） | 中 | 协议面与并发鲁棒性 |
 | 第五批 | P1-21~P1-24 + §3 P2 | 大 | 产出正确性与体验 |
 
-### 7.1 第一批实际落地内容（已完成，未提交）
+### 7.1 第一批实际落地内容（已完成，提交 `40330f6`）
 
 > 完整清单、行为变化与回滚方式见 [fix-20261103-p0.md](fix-20261103-p0.md)。
 
@@ -359,4 +359,19 @@ mode 只在 `lastMulti` 变化时改。
 
 未纳入本批（仍按 §7 后续批次处理）：重试沿用当前登录用户作 owner / 丢 `batch_ref`（P1-9）、`interrupted` 不可重试（P1-10）、`WaitTimeout` 记 `running` 导致永久不可重试（P1-19）——后者本次只在进度条与重试提示上做了兜底，状态机本身未改。
 
-> 评审阶段为只读；第一批修复已按 §7.1 落地（工作区改动，尚未提交 git）。
+### 7.2 第二批实际落地内容（计费四件套）
+
+> 完整清单、行为变化与回滚方式见 [fix-20261103-billing.md](fix-20261103-billing.md)。
+
+| 文件 | 改动 | 对应问题 |
+| --- | --- | --- |
+| `app/core.py` | 成功分支改为**先记账后下载**：`usage`/`billable_seconds`/`estimated_cost` 先落 `rec`；下载失败置 `failed` + `download_failed`，报错写明「已按 N 秒计费」 | P1-1 |
+| `app/core.py` | 新增 `SubmitUnknown` 与 `submit_outcome_unknown()`：5xx / 网络中断 / 无 http_status 的超时算「结果未知」；4xx 明确拒绝仍按失败处理 | P1-2 |
+| `app/wan_api.py` | `_RateLimiter.PENALTY_CAP = 60.0`，`penalize` 取 `min(target, now + cap)`，连续 429 不再把全站推到远期 | P1-3 |
+| `app/web/batches.py` | `_start_run` 改为两阶段：`jobs.create` **之前**先落 `pending_run` 标记；建完立刻写回 `job_id`；中途写盘失败报 503 且不谎报成功 | P1-4 |
+| `app/web/batches.py` | 新增 `_adopt_pending_run()` / `_save_quiet()`；`_reconcile` 先认领标记：job 在则接回 producing，job 找不到则标失败待人工核对 | P1-4 |
+| `app/web/jobs.py` | `usage_for` 的失败侧补 `unknown`；`retry_failed` 遇到 `unknown` 直接拒绝并提示先核对控制台 | P1-2 配套 |
+| `app/web/static/app.js`·`style.css` | `statusText` 增「结果未知」、失败计数含 `unknown`、新增 `.status.unknown` 样式 | 展示口径 |
+| `tests/test_billing.py` | 10 组断言：惩罚封顶/不回退、unknown 判定、下载失败保账、unknown 单列、标记先行、写盘失败后认领、job 丢失标失败、没建任务可再排 | 回归防护 |
+
+> 评审阶段为只读；第一批修复已提交 `40330f6`，第二批修复记录见 [fix-20261103-billing.md](fix-20261103-billing.md)。

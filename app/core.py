@@ -57,6 +57,20 @@ class EngineError(RuntimeError):
     pass
 
 
+class SubmitUnknown(WanError):
+    """提交请求已发出，但没拿到明确响应：云端可能已经建了任务并按秒计费。
+
+    这类结果**不能**当普通失败处理——直接重试可能生成第二条视频、付两次钱。
+    单独一个状态，让账目与重试按钮都不把它当成「没花钱」。
+    """
+
+    def __init__(self, detail: str):
+        super().__init__(
+            "unknown",
+            f"提交结果未知（云端可能已创建任务并计费，请先到控制台核对，不要直接重试）：{detail}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # 模板清单
 # ---------------------------------------------------------------------------
@@ -157,13 +171,24 @@ def status_counts(records) -> dict:
     报成「全部完成」。running 也单独计数 —— 它表示还在等云端出片（含等待超时）。
     """
     counts = {"total": 0, "success": 0, "failed": 0, "invalid": 0,
-              "expired": 0, "canceled": 0, "skipped": 0, "running": 0}
+              "expired": 0, "canceled": 0, "skipped": 0, "running": 0, "unknown": 0}
     for record in records:
         counts["total"] += 1
         status = str((record or {}).get("status") or "")
         if status in counts:
             counts[status] += 1
     return counts
+
+
+def submit_outcome_unknown(exc: WanError) -> bool:
+    """提交阶段的错误里，哪些「可能已经在云端建了任务」。
+
+    4xx 是服务端明确拒绝（参数/鉴权/限流），一定没建任务，可以安全重试；
+    5xx 与网络中断说明请求可能已送达，云端可能已经建任务并开始计费。
+    """
+    if exc.http_status >= 500:
+        return True
+    return exc.category in ("network", "timeout") and not exc.http_status
 
 
 def _as_seconds(value) -> float | None:
@@ -471,20 +496,35 @@ class BatchRunner:
             if final.status != STATUS_SUCCEEDED or not final.video_url:
                 raise EngineError(f"任务状态 {final.status} 但没有结果地址")
 
-            download_file(final.video_url, out_file)
-
+            # 记账必须放在下载**之前**：云端已经出片并按秒计费，下载失败不能让这笔账凭空消失。
             usage = final.usage or {}
             billable, estimated = estimate_cost(usage, spec.resolution, spec.price_per_second)
             rec.update({
-                "status": "success",
                 "request_id": final.request_id or rec.get("request_id", ""),
                 "usage": usage,
                 "billable_seconds": billable,
                 "estimated_cost": estimated,
                 "seconds": round(time.time() - started, 1),
-                "verify": self._verify(out_file, template_seconds),
             })
-            self._archive(rec, out_file)
+            try:
+                download_file(final.video_url, out_file)
+            except Exception as exc:  # noqa: BLE001 - 账已记下，下载失败要如实标出来
+                rec["status"] = "failed"
+                rec["download_failed"] = True
+                rec["error"] = (
+                    f"云端已出片并按 {billable:g} 秒计费，但下载失败："
+                    f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                rec["status"] = "success"
+                try:
+                    rec["verify"] = self._verify(out_file, template_seconds)
+                except Exception as exc:  # noqa: BLE001 - 校验只是附加信息
+                    rec["verify_error"] = f"{type(exc).__name__}: {exc}"
+                self._archive(rec, out_file)
+        except SubmitUnknown as exc:
+            rec["status"] = "unknown"
+            rec["error"] = str(exc)
         except WaitTimeout as exc:
             rec["status"] = "running"
             rec["error"] = str(exc)
@@ -521,7 +561,13 @@ class BatchRunner:
         if self.stop_event.is_set():
             rec["status"] = "skipped"
             return None
-        resp = self._client.submit(wire)
+        try:
+            resp = self._client.submit(wire)
+        except WanError as exc:
+            # 请求可能已送达云端：结果未知，既不能当失败重试，也不能当没花钱。
+            if submit_outcome_unknown(exc):
+                raise SubmitUnknown(str(exc)) from None
+            raise
         rec["task_id"] = resp.task_id
         rec["request_id"] = resp.request_id
         rec["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
