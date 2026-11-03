@@ -128,22 +128,23 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-row-state.is-ok { color: var(--green); }
 .tag-row-state.is-off { color: var(--red); }
 
-/* ---------- 评分列：3-5 星可点，点当前星数即清除；1-2 星仅占位 ---------- */
-.tag-row-rating { display: flex; align-items: center; gap: 1px; overflow: visible; }
-.rating-star {
-  padding: 0;
-  border: 0;
-  background: none;
-  font-size: 15px;
-  line-height: 1;
-  color: #d5d9e0;
+/* ---------- 评分列：数字+星徽标（如 4★），点击 +1 循环，5★ 再点清零 ---------- */
+.tag-row-rating { display: flex; align-items: center; overflow: visible; }
+.rating-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
   cursor: pointer;
+  white-space: nowrap;
 }
-.rating-star.is-on { color: #f59e0b; }
-/* 占位星只在"未点亮"时才用浅灰，不能盖掉 is-on 的金色 */
-.rating-star.is-locked:not(.is-on) { color: #e8ebf0; cursor: default; }
-.rating-star:hover:not(:disabled) { transform: scale(1.2); }
-.rating-star:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; border-radius: 2px; }
+.rating-badge.is-on { color: #b45309; border-color: #f59e0b; background: #fef3c7; }
+.rating-badge:hover { border-color: #f59e0b; }
+.rating-badge:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 
 /* 编辑面板的大号打分组件 */
 .tag-editor-rating {
@@ -157,8 +158,20 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
   margin-top: 10px;
 }
 .tag-editor-rating-label { font-size: 13px; color: var(--ink-2); }
-.tag-editor-rating-stars { display: flex; align-items: center; gap: 6px; }
-.tag-editor-rating .rating-star-lg { font-size: 30px; }
+.tag-editor-rating .rating-badge-lg { font-size: 20px; padding: 2px 14px; border-radius: 14px; }
+.rating-step {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.rating-step:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+.rating-step:disabled { opacity: .4; cursor: not-allowed; }
 .tag-editor-rating .muted { font-size: 12px; }
 
 /* 行内「弃 / 恢」：和右下角大按钮同一套语义，只是省去先选中那一步 */

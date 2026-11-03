@@ -49,31 +49,25 @@
   }
 
   /* -------------------------------------------------------------- 评分 */
-  const RATING_MAX = 5;   // 展示 5 颗星
-  const RATING_MIN = 1;   // 1-5 星全部可打（0=清除）
+  const RATING_MAX = 5;   // 0=未打分，1-5 星
 
+  /* 行内评分徽标：数字+星（如 4★），点击 +1 循环（5★ 再点清零） */
   function buildRatingCell(video) {
     const cell = document.createElement('span');
     cell.className = 'tag-row-rating';
     const rating = Number(video.rating || 0);
-    for (let star = 1; star <= RATING_MAX; star++) {
-      const starEl = document.createElement('button');
-      starEl.type = 'button';
-      starEl.textContent = '★';
-      starEl.className = 'rating-star' + (star <= rating ? ' is-on' : '');
-      if (star < RATING_MIN) {
-        starEl.disabled = true;
-        starEl.classList.add('is-locked');
-        starEl.title = '评分从 3 星起';
-      } else {
-        starEl.title = rating === star ? `清除评分（${video.id}）` : `评为 ${star} 星（${video.id}）`;
-        starEl.addEventListener('click', (event) => {
-          event.stopPropagation();  // 别触发行点击 → 预览
-          rateVideos([video], rating === star ? 0 : star);
-        });
-      }
-      cell.append(starEl);
-    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'rating-badge' + (rating ? ' is-on' : '');
+    btn.textContent = rating ? `${rating}★` : '—';
+    btn.title = rating
+      ? `${video.id} 当前 ${rating} 星，点击 +1（5★ 后再点清除）`
+      : `${video.id} 未打分，点击评 1 星`;
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();  // 别触发行点击 → 预览
+      rateVideos([video], (rating + 1) % 6);
+    });
+    cell.append(btn);
     return cell;
   }
 
@@ -571,7 +565,7 @@
     updateEditorHint(rows);
   }
 
-  /* 编辑面板的大号打分组件：与行内小星星同一套接口，单条/批量都作用到当前编辑对象 */
+  /* 编辑面板的打分组件：数字+星徽标 + ＋/－ 调节 + 清除，单条/批量都作用到当前编辑对象 */
   function renderEditorRating(rows) {
     const box = $('tag-editor-rating');
     const note = $('tag-editor-rating-note');
@@ -579,26 +573,50 @@
     if (!rows || !rows.length) { if (note) note.textContent = ''; return; }
     const ratings = rows.map(row => Number(row.rating || 0));
     const uniform = ratings.every(r => r === ratings[0]) ? ratings[0] : -1;
-    if (uniform < 0) { if (note) note.textContent = '选中视频评分不一致'; }
-    else if (note) note.textContent = uniform ? `当前 ${uniform} 星` : '未打分';
-    for (let star = 1; star <= RATING_MAX; star++) {
-      const starEl = document.createElement('button');
-      starEl.type = 'button';
-      starEl.textContent = '★';
-      starEl.className = 'rating-star rating-star-lg' + (uniform >= star ? ' is-on' : '');
-      if (star < RATING_MIN) {
-        starEl.disabled = true;
-        starEl.classList.add('is-locked');
-        starEl.title = '评分从 3 星起';
-      } else {
-        starEl.title = uniform === star ? `清除评分（${rows.length} 条）` : `评为 ${star} 星（${rows.length} 条）`;
-        starEl.addEventListener('click', (event) => {
-          event.stopPropagation();
-          rateVideos(rows, uniform === star ? 0 : star);
-        });
-      }
-      box.append(starEl);
-    }
+    const base = uniform < 0 ? 0 : uniform;   // 评分不一致时按 0 起调
+
+    const badge = document.createElement('span');
+    badge.className = 'rating-badge rating-badge-lg' + (uniform > 0 ? ' is-on' : '');
+    badge.textContent = uniform < 0 ? '—' : (uniform ? `${uniform}★` : '—');
+    box.append(badge);
+
+    const plus = document.createElement('button');
+    plus.type = 'button';
+    plus.className = 'rating-step';
+    plus.textContent = '＋';
+    plus.title = `加一星（${rows.length} 条）`;
+    plus.disabled = base >= RATING_MAX;
+    plus.addEventListener('click', (event) => {
+      event.stopPropagation();
+      rateVideos(rows, Math.min(RATING_MAX, base + 1));
+    });
+    box.append(plus);
+
+    const minus = document.createElement('button');
+    minus.type = 'button';
+    minus.className = 'rating-step';
+    minus.textContent = '－';
+    minus.title = `减一星（0 为清除，${rows.length} 条）`;
+    minus.disabled = base <= 0;
+    minus.addEventListener('click', (event) => {
+      event.stopPropagation();
+      rateVideos(rows, Math.max(0, base - 1));
+    });
+    box.append(minus);
+
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'quiet btn-sm';
+    clear.textContent = '清除评分';
+    clear.disabled = base <= 0;
+    clear.title = `清除评分（${rows.length} 条）`;
+    clear.addEventListener('click', (event) => {
+      event.stopPropagation();
+      rateVideos(rows, 0);
+    });
+    box.append(clear);
+
+    if (note) note.textContent = uniform < 0 ? '选中视频评分不一致' : '';
   }
 
   function updateEditorHint(rows) {    const hint = $('tag-editor-hint');
