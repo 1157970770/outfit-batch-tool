@@ -55,7 +55,7 @@ python run_web.py --import-tags
 
 ## 启动
 
-在主机双击仓库根目录的 `启动视频标签整理.bat`。如果主机还没装依赖，先执行：
+在主机双击 `启动打标器.vbs`（排错用 `启动器\启动视频标签整理.bat`）。如果主机还没装依赖，先执行：
 
 ```powershell
 python3 -m pip install -r tools/requirements-tag-tool.txt

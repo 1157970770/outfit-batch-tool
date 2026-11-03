@@ -70,7 +70,7 @@
 - 顺带修掉一个统计口径问题：未打标行原先会被算进"清单外文件"，现在 `unlisted_files` 只统计"目录里有、清单里没有"的视频（当前 **4** 个）。
 - 加载结果：`workbook_rows=1263`、`untagged_skipped=76`、`unlisted_files=4`、`source_ready_templates=0`。
 - 测试：`tests/test_web_tags.py` 增加"未打标行被跳过且不计入清单外""全部未打标时明确报错"两个用例；`test_web_tags / test_web / test_web_auth / test_template_catalog` 全通过。
-- ⚠️ **改的是启动时读取的配置，正在运行的服务（8765）不会自动生效**，需要关掉控制台重开一次 `启动网页服务.bat`。
+- ⚠️ **改的是启动时读取的配置，正在运行的服务（8765）不会自动生效**，需要关掉控制台重开一次 `启动器\启动网页服务.bat`。
 
 ## 剩余事项
 

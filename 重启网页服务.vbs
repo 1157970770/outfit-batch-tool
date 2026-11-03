@@ -10,10 +10,10 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 Set shellApp = CreateObject("Shell.Application")
 
 base = fso.GetParentFolderName(WScript.ScriptFullName)
-If Not fso.FileExists(base & "\重启网页服务-管理员.bat") Then
+If Not fso.FileExists(base & "\启动器\重启网页服务-管理员.bat") Then
     base = "D:\批量视频任务设计区"
 End If
-bat = base & "\重启网页服务-管理员.bat"
+bat = base & "\启动器\重启网页服务-管理员.bat"
 
 args = "/c " & Chr(34) & Chr(34) & bat & Chr(34) & " silent" & Chr(34)
 shellApp.ShellExecute "cmd.exe", args, base, "runas", 0

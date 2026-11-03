@@ -2,10 +2,10 @@
 rem Start the desktop tag editor without leaving a console window behind:
 rem the venv pythonw.exe uses the GUI subsystem, so no black box appears.
 rem Falls back to the console python only when the venv is missing.
-cd /d "%~dp0"
-set "PYW=%~dp0.tmp\tag-venv\Scripts\pythonw.exe"
+cd /d "%~dp0.."
+set "PYW=%~dp0..\.tmp\tag-venv\Scripts\pythonw.exe"
 if exist "%PYW%" (
-  start "" "%PYW%" "%~dp0启动打标器.py"
+  start "" "%PYW%" "%~dp0..\启动打标器.py"
   exit /b 0
 )
 set "PYTHON_CMD="

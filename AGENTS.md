@@ -21,7 +21,7 @@ python run_web.py --init
 
 # 启动（默认 0.0.0.0:8765，启动后约 7 秒才 bind 端口，别急着判失败）
 python run_web.py
-# 或双击「启动网页服务.bat」
+# 或双击「启动网页服务.vbs」
 ```
 
 Windows 上解释器通常是 `%USERPROFILE%\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe`；
