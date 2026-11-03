@@ -51,23 +51,42 @@
   /* -------------------------------------------------------------- 评分 */
   const RATING_MAX = 5;   // 0=未打分，1-5 星
 
-  /* 行内评分徽标：数字+星（如 4★），点击 +1 循环（5★ 再点清零） */
+  /* 校验输入的评分：空 → 0（清除）；1-5 → 数字；非法返回 null（调用方负责回退显示） */
+  function parseRatingValue(raw) {
+    const text = String(raw ?? '').trim();
+    if (!text) return 0;
+    const value = Math.round(Number(text));
+    if (!Number.isFinite(value) || value < 1 || value > RATING_MAX) return null;
+    return value;
+  }
+
+  /* 行内评分：数字输入框（1-5），清空即清除评分 */
   function buildRatingCell(video) {
     const cell = document.createElement('span');
     cell.className = 'tag-row-rating';
     const rating = Number(video.rating || 0);
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'rating-badge' + (rating ? ' is-on' : '');
-    btn.textContent = rating ? `${rating}★` : '—';
-    btn.title = rating
-      ? `${video.id} 当前 ${rating} 星，点击 +1（5★ 后再点清除）`
-      : `${video.id} 未打分，点击评 1 星`;
-    btn.addEventListener('click', (event) => {
-      event.stopPropagation();  // 别触发行点击 → 预览
-      rateVideos([video], (rating + 1) % 6);
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = '5';
+    input.step = '1';
+    input.value = rating ? String(rating) : '';
+    input.placeholder = '—';
+    input.className = 'rating-input' + (rating ? ' is-on' : '');
+    input.title = `${video.id} 评分：直接输入 1-5（清空 = 清除评分）`;
+    input.addEventListener('click', (event) => event.stopPropagation());  // 别触发行点击 → 预览
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') input.blur(); });
+    input.addEventListener('change', () => {
+      const value = parseRatingValue(input.value);
+      if (value === null) {
+        input.value = rating ? String(rating) : '';
+        toast('评分只能是 1-5 的整数');
+        return;
+      }
+      if (value === rating) return;
+      rateVideos([video], value);
     });
-    cell.append(btn);
+    cell.append(input);
     return cell;
   }
 
@@ -565,7 +584,7 @@
     updateEditorHint(rows);
   }
 
-  /* 编辑面板的打分组件：数字+星徽标 + ＋/－ 调节 + 清除，单条/批量都作用到当前编辑对象 */
+  /* 编辑面板的打分组件：数字输入 + 清除按钮，单条/批量都作用到当前编辑对象 */
   function renderEditorRating(rows) {
     const box = $('tag-editor-rating');
     const note = $('tag-editor-rating-note');
@@ -573,42 +592,34 @@
     if (!rows || !rows.length) { if (note) note.textContent = ''; return; }
     const ratings = rows.map(row => Number(row.rating || 0));
     const uniform = ratings.every(r => r === ratings[0]) ? ratings[0] : -1;
-    const base = uniform < 0 ? 0 : uniform;   // 评分不一致时按 0 起调
 
-    const badge = document.createElement('span');
-    badge.className = 'rating-badge rating-badge-lg' + (uniform > 0 ? ' is-on' : '');
-    badge.textContent = uniform < 0 ? '—' : (uniform ? `${uniform}★` : '—');
-    box.append(badge);
-
-    const plus = document.createElement('button');
-    plus.type = 'button';
-    plus.className = 'rating-step';
-    plus.textContent = '＋';
-    plus.title = `加一星（${rows.length} 条）`;
-    plus.disabled = base >= RATING_MAX;
-    plus.addEventListener('click', (event) => {
-      event.stopPropagation();
-      rateVideos(rows, Math.min(RATING_MAX, base + 1));
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = '5';
+    input.step = '1';
+    input.value = uniform > 0 ? String(uniform) : '';
+    input.placeholder = '—';
+    input.className = 'rating-input rating-input-lg' + (uniform > 0 ? ' is-on' : '');
+    input.title = `评分：直接输入 1-5（清空 = 清除评分，${rows.length} 条）`;
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') input.blur(); });
+    input.addEventListener('change', () => {
+      const value = parseRatingValue(input.value);
+      if (value === null) {
+        input.value = uniform > 0 ? String(uniform) : '';
+        toast('评分只能是 1-5 的整数');
+        return;
+      }
+      if (value === uniform) return;
+      rateVideos(rows, value);
     });
-    box.append(plus);
-
-    const minus = document.createElement('button');
-    minus.type = 'button';
-    minus.className = 'rating-step';
-    minus.textContent = '－';
-    minus.title = `减一星（0 为清除，${rows.length} 条）`;
-    minus.disabled = base <= 0;
-    minus.addEventListener('click', (event) => {
-      event.stopPropagation();
-      rateVideos(rows, Math.max(0, base - 1));
-    });
-    box.append(minus);
+    box.append(input);
 
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'quiet btn-sm';
     clear.textContent = '清除评分';
-    clear.disabled = base <= 0;
+    clear.disabled = !ratings.some(r => r > 0);
     clear.title = `清除评分（${rows.length} 条）`;
     clear.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -616,7 +627,7 @@
     });
     box.append(clear);
 
-    if (note) note.textContent = uniform < 0 ? '选中视频评分不一致' : '';
+    if (note) note.textContent = uniform < 0 ? '选中视频评分不一致，输入后将统一' : '';
   }
 
   function updateEditorHint(rows) {    const hint = $('tag-editor-hint');
