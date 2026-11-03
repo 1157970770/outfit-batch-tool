@@ -696,7 +696,7 @@
     finally { btn.disabled = false; btn.textContent = '生成下载链接（7 天有效）'; }
   });
   $('archive-copy-btn').addEventListener('click', async () => {
-    const text = state.archiveLinks.map(link => `${link.key}\n${link.url}`).join('\n\n');
+    const text = state.archiveLinks.map(link => link.url).join('\n');
     try { await copyText(text); toast(`已复制 ${state.archiveLinks.length} 条链接。`); }
     catch (_) { toast('复制失败，请手动选择链接文本。'); }
   });
