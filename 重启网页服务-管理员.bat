@@ -8,13 +8,15 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENI
   echo     taskkill /PID %%p
   taskkill /PID %%p /F
 )
-timeout /t 2 /nobreak >nul
+rem Use ping instead of timeout: timeout fails when this script is launched
+rem from a hidden window (no console input handle).
+ping -n 3 127.0.0.1 >nul
 echo [2/3] starting scheduled task OutfitWebServer ...
 schtasks /run /tn "OutfitWebServer"
-timeout /t 14 /nobreak >nul
+ping -n 16 127.0.0.1 >nul
 echo [3/3] current listener:
 netstat -ano | findstr ":%PORT%" | findstr "LISTENING"
 echo.
 echo If nothing is listed above, right-click this file and choose
 echo "Run as administrator", or reboot and log in again.
-pause
+if /i not "%~1"=="silent" pause

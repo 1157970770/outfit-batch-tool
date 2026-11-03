@@ -104,12 +104,16 @@ class TemplateCatalog:
         self._collect_tag_values()
 
     def _collect_tag_values(self):
-        self.tag_values = {category: [] for category in TAG_CATEGORIES}
+        self.tag_values = {category: [] for category in self.tag_categories}
         for item in self.items:
             categories = item.get("tag_categories", {})
             for tag in item.get("tags", []):
                 category = categories.get(tag, _infer_category(tag))
-                if category in self.tag_values and tag not in self.tag_values[category]:
+                if category not in self.tag_values:
+                    # 标签引用了清单里没登记的大类：补进来，别让标签在界面上消失
+                    self.tag_categories.append(category)
+                    self.tag_values[category] = []
+                if tag not in self.tag_values[category]:
                     self.tag_values[category].append(tag)
 
     def _reindex(self):
@@ -323,6 +327,7 @@ class TemplateCatalog:
         **绝不按模板 ID 匹配**。
         """
         categories = store.categories()
+        self.tag_categories = list(store.category_list()) if hasattr(store, "category_list") else list(TAG_CATEGORIES)
         source_index, fp_index = self._build_source_index()
         manifest_count = len(self.items)
         rows: list[dict] = []
@@ -457,7 +462,7 @@ class TemplateCatalog:
             raise TemplateError("标签筛选条件格式无效")
         selected = {}
         for category, values in tag_filters.items():
-            if category not in TAG_CATEGORIES:
+            if category not in self.tag_categories:
                 raise TemplateError(f"未知标签分类：{category}")
             if not isinstance(values, (list, tuple)):
                 raise TemplateError(f"{category} 筛选必须为标签列表")

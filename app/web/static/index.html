@@ -43,7 +43,7 @@
         <button class="tab" data-view="batch-view">大批量生产</button>
         <button class="tab" data-view="history-view">历史任务</button>
         <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
-        <button id="tag-tab" class="tab" data-view="tag-view">标签</button>
+        <button id="tag-tab" class="tab" data-view="tag-view">视频库</button>
         <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
 
@@ -299,7 +299,7 @@
 
       <section id="tag-view" class="view">
         <div class="section-head">
-          <div><h1>视频标签</h1><p class="muted">给视频打标签、批量改标签、标记弃用。弃用的视频不再出现在小批量/大批量候选里，随时可恢复；不会删除云端对象或本机文件。</p></div>
+          <div><h1>视频库</h1><p class="muted">给视频打标签、批量改标签、标记弃用。弃用的视频不再出现在小批量/大批量候选里，随时可恢复；不会删除云端对象或本机文件。</p></div>
           <div class="top-actions">
             <span id="tag-rev" class="tag-rev muted">未加载</span>
             <button id="tag-refresh" class="quiet" type="button">刷新</button>
@@ -308,6 +308,8 @@
             <button id="tag-library-btn" class="quiet" type="button">标签库管理</button>
           </div>
         </div>
+
+        <p id="tag-codec-hint" class="tag-codec-hint hidden"></p>
 
         <div class="tag-toolbar">
           <input id="tag-search" class="tag-search" maxlength="60" autocomplete="off" placeholder="搜索 模板ID / 文件名 / 相对路径">
@@ -406,6 +408,14 @@
           <div class="tag-drawer-head">
             <h3>标签库</h3>
             <button id="tag-drawer-close" class="quiet btn-sm" type="button">关闭</button>
+          </div>
+          <div class="tag-cat-block">
+            <div class="tag-cat-title"><b>大类</b><span class="muted">标签分组，可新增 / 改名 / 删除</span></div>
+            <div id="tag-cat-list" class="tag-cat-list"></div>
+            <form id="tag-cat-create" class="tag-cat-create">
+              <input id="tag-cat-name" maxlength="20" autocomplete="off" placeholder="新增大类，如 天气">
+              <button class="quiet btn-sm" type="submit">新增大类</button>
+            </form>
           </div>
           <form id="tag-lib-create" class="tag-lib-create">
             <input id="tag-lib-name" maxlength="64" autocomplete="off" placeholder="新标签名称" required>

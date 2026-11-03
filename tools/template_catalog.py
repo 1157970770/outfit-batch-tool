@@ -70,12 +70,17 @@ def default_tag_categories(tags: list[str]) -> dict[str, str]:
     return {tag: infer_tag_category(tag) for tag in tags}
 
 
-def normalize_tag_categories(tags: list[str], categories: dict | None = None) -> dict[str, str]:
+def normalize_tag_categories(tags: list[str], categories: dict | None = None,
+                             allowed: list[str] | tuple[str, ...] | None = None) -> dict[str, str]:
+    """把每个标签归到分类；`allowed` 给定时以它为准（支持自定义大类）。"""
+    allowed_list = [str(value).strip() for value in (allowed or TAG_CATEGORIES) if str(value).strip()]
     result = default_tag_categories(tags)
     for tag in tags:
         category = (categories or {}).get(tag)
-        if category in TAG_CATEGORIES:
+        if category in allowed_list:
             result[tag] = category
+        elif result.get(tag) not in allowed_list:
+            result[tag] = allowed_list[0] if allowed_list else "场景"
     return result
 
 

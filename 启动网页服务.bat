@@ -1,6 +1,11 @@
 @echo off
-chcp 65001 >nul
+rem Daily start: use "启动网页服务-无窗口.vbs" (no console window at all).
+rem This .bat is kept for the first-run init, which needs a typed password.
 cd /d "%~dp0"
+if exist "server\web.json" (
+  start "" wscript.exe //nologo "%~dp0启动网页服务-无窗口.vbs"
+  exit /b 0
+)
 echo ==========================================
 echo   Outfit LAN Web Service
 echo ==========================================

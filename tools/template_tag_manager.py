@@ -53,13 +53,16 @@ def _username() -> str:
 class TagLibraryDialog(QDialog):
     """查看、删除全局标签库中的标签。"""
 
-    def __init__(self, tags: list[str], usage: dict[str, int], categories: dict[str, str] | None = None, parent=None):
+    def __init__(self, tags: list[str], usage: dict[str, int],
+                 categories: dict[str, str] | None = None, parent=None,
+                 category_names: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("标签库管理")
         self.resize(520, 470)
         self.tags = list(tags)
         self.usage = dict(usage)
-        self.categories = normalize_tag_categories(self.tags, categories)
+        self.category_names = list(category_names or TAG_CATEGORIES)
+        self.categories = normalize_tag_categories(self.tags, categories, allowed=self.category_names)
         self.merge_map: dict[str, str] = {}
         layout = QVBoxLayout(self)
         hint = QLabel("删除标签会同时从当前项目移除；“合并到…”可把旧标签替换成另一个标签。不会改动本机视频文件。")
@@ -102,8 +105,9 @@ class TagLibraryDialog(QDialog):
         value, ok = QInputDialog.getText(self, "新建标签", "标签名称：")
         if not ok or not value.strip():
             return
-        category, ok = QInputDialog.getItem(self, "选择标签分类", "分类：", TAG_CATEGORIES,
-                                            TAG_CATEGORIES.index(infer_tag_category(value.strip())), False)
+        suggested = infer_tag_category(value.strip())
+        initial = self.category_names.index(suggested) if suggested in self.category_names else 0
+        category, ok = QInputDialog.getItem(self, "选择标签分类", "分类：", self.category_names, initial, False)
         if not ok or not category:
             return
         try:
@@ -123,9 +127,9 @@ class TagLibraryDialog(QDialog):
             return
         names = [str(item.data(Qt.ItemDataRole.UserRole)) for item in items]
         initial = self.categories.get(names[0], infer_tag_category(names[0]))
-        current = TAG_CATEGORIES.index(initial) if initial in TAG_CATEGORIES else 0
+        current = self.category_names.index(initial) if initial in self.category_names else 0
         category, ok = QInputDialog.getItem(self, "设置标签分类", f"为 {len(names)} 个标签设置分类：",
-                                            TAG_CATEGORIES, current, False)
+                                            self.category_names, current, False)
         if not ok or not category:
             return
         for name in names:
@@ -189,11 +193,13 @@ class BatchTagDialog(QDialog):
     """按标签分类批量添加、移除或替换标签。"""
 
     def __init__(self, tags: list[str], selected_count: int,
-                 categories: dict[str, str] | None = None, parent=None):
+                 categories: dict[str, str] | None = None, parent=None,
+                 category_names: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("批量打标签")
         self.resize(520, 500)
-        self.categories = normalize_tag_categories(tags, categories)
+        self.category_names = list(category_names or TAG_CATEGORIES)
+        self.categories = normalize_tag_categories(tags, categories, allowed=self.category_names)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"将对选中的 {selected_count} 条视频执行："))
         self.mode = QComboBox()
@@ -201,12 +207,13 @@ class BatchTagDialog(QDialog):
         self.mode.addItem("从现有标签移除", "remove")
         self.mode.addItem("替换为选中的标签", "replace")
         layout.addWidget(self.mode)
-        hint = QLabel("1 景别 · 2 适合季节 · 3 场景 · 4 姿势；W/S 移动，空格勾选标签。")
+        hint = QLabel("  ·  ".join(f"{index + 1} {name}" for index, name in enumerate(self.category_names[:9]))
+                      + "；W/S 移动，空格勾选标签。")
         hint.setStyleSheet("color:#687386;font-size:11px;")
         layout.addWidget(hint)
         self.tabs = QTabWidget()
         self.lists: dict[str, QListWidget] = {}
-        for category in TAG_CATEGORIES:
+        for category in self.category_names:
             tag_list = QListWidget()
             tag_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             for tag in tags:
@@ -249,7 +256,7 @@ class BatchTagDialog(QDialog):
         self.next_shortcut = QShortcut(QKeySequence("S"), self)
         self.next_shortcut.activated.connect(lambda: self._move(1))
         self.category_shortcuts = []
-        for index in range(len(TAG_CATEGORIES)):
+        for index in range(len(self.category_names)):
             shortcut = QShortcut(QKeySequence(str(index + 1)), self)
             shortcut.activated.connect(lambda i=index: self._select_category(i))
             self.category_shortcuts.append(shortcut)
@@ -315,6 +322,7 @@ class TagManager(QMainWindow):
         else:
             self.tag_library = load_tag_library()
             self.tag_categories = load_tag_categories()
+        self.category_names = self._category_names()
         state = load_state()
         self.recent = state.get("recent") if isinstance(state.get("recent"), list) else []
         self._build_ui()
@@ -450,7 +458,7 @@ class TagManager(QMainWindow):
         self.next_tag_shortcut = QShortcut(QKeySequence("S"), self)
         self.next_tag_shortcut.activated.connect(lambda: self._move_tag(1))
         self.category_shortcuts = []
-        for index in range(len(TAG_CATEGORIES)):
+        for index in range(len(self.category_names)):
             shortcut = QShortcut(QKeySequence(str(index + 1)), self)
             shortcut.activated.connect(lambda i=index: self._select_tag_category(i))
             self.category_shortcuts.append(shortcut)
@@ -476,7 +484,7 @@ class TagManager(QMainWindow):
         self.tag_tabs = QTabWidget()
         self.tag_tabs.setMaximumHeight(250)
         self.tag_lists: dict[str, QListWidget] = {}
-        for category in TAG_CATEGORIES:
+        for category in self.category_names:
             tag_list = QListWidget()
             tag_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             tag_list.setViewMode(QListWidget.ViewMode.IconMode)
@@ -493,7 +501,8 @@ class TagManager(QMainWindow):
             self.tag_tabs.addTab(tag_list, category)
         self.tag_tabs.currentChanged.connect(lambda index: self._current_tag_list().setFocus() if index >= 0 else None)
         right_layout.addWidget(self.tag_tabs)
-        self.tags_note = QLabel("1 景别 · 2 适合季节 · 3 场景 · 4 姿势；W/S 上下移动，空格键勾选/取消。")
+        self.tags_note = QLabel("  ·  ".join(f"{index + 1} {name}" for index, name in enumerate(self.category_names[:9]))
+                                + "；W/S 上下移动，空格键勾选/取消。")
         self.tags_note.setWordWrap(True)
         self.tags_note.setStyleSheet("color:#687386;font-size:11px;")
         right_layout.addWidget(self.tags_note)
@@ -570,10 +579,26 @@ class TagManager(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "无法打开标签清单", str(exc))
 
+    def _category_names(self) -> list[str]:
+        if self.store is not None:
+            try:
+                names = [str(name) for name in self.store.category_list() if str(name).strip()]
+                if names:
+                    return names
+            except Exception:  # noqa: BLE001 - 真源异常时退回默认四类
+                pass
+        names = list(TAG_CATEGORIES)
+        for name in self.tag_categories.values():
+            if name and name not in names:
+                names.append(name)
+        return names
+
     def _update_library_label(self):
-        normalized = normalize_tag_categories(self.tag_library, self.tag_categories)
-        counts = {category: sum(value == category for value in normalized.values()) for category in TAG_CATEGORIES}
-        summary = " · ".join(f"{category} {counts[category]}" for category in TAG_CATEGORIES)
+        normalized = normalize_tag_categories(self.tag_library, self.tag_categories,
+                                              allowed=self.category_names)
+        counts = {category: sum(value == category for value in normalized.values())
+                  for category in self.category_names}
+        summary = " · ".join(f"{category} {counts[category]}" for category in self.category_names)
         self.library_label.setText(f"当前标签库（{len(self.tag_library)}）：{summary}")
 
     @staticmethod
@@ -708,7 +733,8 @@ class TagManager(QMainWindow):
                 known.add(tag.casefold())
             self.tag_categories.setdefault(tag, infer_tag_category(tag))
         project["tags"] = tags
-        project["tag_categories"] = normalize_tag_categories(tags, self.tag_categories)
+        project["tag_categories"] = normalize_tag_categories(tags, self.tag_categories,
+                                                             allowed=self.category_names)
         if self.store is None:
             try:
                 save_tag_library(self.tag_library, categories=self.tag_categories)
@@ -869,7 +895,8 @@ class TagManager(QMainWindow):
         if not self.tag_library:
             QMessageBox.information(self, "标签库为空", "请先新建标签。")
             return
-        dialog = BatchTagDialog(self.tag_library, len(paths), self.tag_categories, self)
+        dialog = BatchTagDialog(self.tag_library, len(paths), self.tag_categories, self,
+                                category_names=self.category_names)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         chosen = dialog.selected_tags()
@@ -1084,6 +1111,7 @@ class TagManager(QMainWindow):
         categories = normalize_tag_categories(
             self.project.get("tags", []) if self.project else [],
             self.project.get("tag_categories", self.tag_categories) if self.project else self.tag_categories,
+            allowed=self.category_names,
         )
         for category, tag_list in self.tag_lists.items():
             tag_list.blockSignals(True)
@@ -1111,8 +1139,8 @@ class TagManager(QMainWindow):
                     tag_list.setCurrentRow(0)
             finally:
                 tag_list.blockSignals(False)
-        if current_category in TAG_CATEGORIES:
-            self.tag_tabs.setCurrentIndex(TAG_CATEGORIES.index(current_category))
+        if current_category in self.category_names:
+            self.tag_tabs.setCurrentIndex(self.category_names.index(current_category))
         active = self._current_tag_list()
         if active.count() and active.currentRow() < 0:
             active.setCurrentRow(0)
@@ -1157,8 +1185,8 @@ class TagManager(QMainWindow):
         if not ok or not value.strip():
             return
         suggested = self.tag_tabs.tabText(self.tag_tabs.currentIndex()) if self.project else infer_tag_category(value.strip())
-        initial = TAG_CATEGORIES.index(suggested) if suggested in TAG_CATEGORIES else 0
-        category, ok = QInputDialog.getItem(self, "选择标签分类", "分类：", TAG_CATEGORIES, initial, False)
+        initial = self.category_names.index(suggested) if suggested in self.category_names else 0
+        category, ok = QInputDialog.getItem(self, "选择标签分类", "分类：", self.category_names, initial, False)
         if not ok or not category:
             return
         try:
@@ -1198,7 +1226,8 @@ class TagManager(QMainWindow):
             for row in self.project.get("videos", []):
                 for tag in row.get("tags", []):
                     usage[tag] = usage.get(tag, 0) + 1
-        dialog = TagLibraryDialog(self.tag_library, usage, self.tag_categories, self)
+        dialog = TagLibraryDialog(self.tag_library, usage, self.tag_categories, self,
+                                  category_names=self.category_names)
         # 没有“取消”按钮：关闭窗口也要保留刚才的新建/删除/合并操作。
         dialog.exec()
         merge_map = dict(getattr(dialog, "merge_map", {}))
@@ -1210,7 +1239,8 @@ class TagManager(QMainWindow):
             return tag
         added = [tag for tag in dialog.tags if tag not in self.tag_library]
         removed = [tag for tag in self.tag_library if tag not in dialog.tags]
-        dialog_categories = normalize_tag_categories(dialog.tags, dialog.categories)
+        dialog_categories = normalize_tag_categories(dialog.tags, dialog.categories,
+                                                     allowed=self.category_names)
         categories_changed = dialog_categories != normalize_tag_categories(self.tag_library, self.tag_categories)
         if not added and not removed and not merge_map and not categories_changed:
             return
@@ -1227,7 +1257,8 @@ class TagManager(QMainWindow):
                 if tag not in project_tags:
                     project_tags.append(tag)
             self.project["tags"] = project_tags
-            self.project["tag_categories"] = normalize_tag_categories(project_tags, self.tag_categories)
+            self.project["tag_categories"] = normalize_tag_categories(project_tags, self.tag_categories,
+                                                                      allowed=self.category_names)
             for row in self.project.get("videos", []):
                 mapped_tags = []
                 for tag in row.get("tags", []):
@@ -1374,7 +1405,8 @@ class TagManager(QMainWindow):
                 if tag not in tags:
                     tags.append(tag)
             self.project["tags"] = tags
-            self.project["tag_categories"] = normalize_tag_categories(tags, self.tag_categories)
+            self.project["tag_categories"] = normalize_tag_categories(tags, self.tag_categories,
+                                                                      allowed=self.category_names)
         self._update_library_label()
 
     def _load_from_store(self) -> None:

@@ -195,6 +195,9 @@ _LIBRARY_PARAMS = {
     "set_category": ("name", "category"),
     "merge": ("source", "target"),
     "delete": ("name",),
+    "category_create": ("name",),
+    "category_rename": ("name", "new_name"),
+    "category_delete": ("name",),
 }
 
 
@@ -229,6 +232,15 @@ def library(app, data: dict, user: dict) -> dict:
         elif action == "merge":
             result = store.library_merge(params.get("source"), params.get("target") or "",
                                          user=username, revision=data.get("revision"))
+        elif action == "category_create":
+            result = store.category_create(params.get("name") or "", user=username,
+                                           revision=data.get("revision"))
+        elif action == "category_rename":
+            result = store.category_rename(params.get("name") or "", params.get("new_name") or "",
+                                           user=username, revision=data.get("revision"))
+        elif action == "category_delete":
+            result = store.category_delete(params.get("name") or "", user=username,
+                                           revision=data.get("revision"))
         else:
             result = store.library_delete(params.get("name"), user=username,
                                           revision=data.get("revision"))

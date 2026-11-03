@@ -425,6 +425,47 @@ def test_version_prune(tmp: Path) -> None:
     assert len(autos) <= AUTO_KEEP, (len(autos), AUTO_KEEP)
     assert len(autos) >= AUTO_KEEP - 1, len(autos)
 
+
+def test_categories(tmp: Path) -> None:
+    store = new_store(tmp)
+    assert store.category_list() == ["景别", "适合季节", "场景", "姿势"], store.category_list()
+
+    store.category_create("天气", user="alice")
+    assert "天气" in store.category_list()
+    store.library_create("下雨", "天气", user="alice")
+    assert store.categories()["下雨"] == "天气"
+
+    try:
+        store.library_create("刮风", "不存在的大类")
+    except StoreError as exc:
+        assert "分类不存在" in str(exc)
+    else:
+        raise AssertionError("未登记的大类必须拒绝")
+
+    store.category_rename("天气", "气候", user="alice")
+    assert "气候" in store.category_list() and "天气" not in store.category_list()
+    assert store.categories()["下雨"] == "气候"
+
+    try:
+        store.category_delete("气候")
+    except StoreError as exc:
+        assert "还有" in str(exc)
+    else:
+        raise AssertionError("下面还有标签的大类不能删")
+
+    store.library_set_category("下雨", "场景", user="alice")
+    store.category_delete("气候", user="alice")
+    assert "气候" not in store.category_list()
+    assert "下雨" in store.library()["tags"]
+
+    # 只剩最后一个大类时不允许删
+    for name in list(store.category_list())[:-1]:
+        try:
+            store.category_delete(name)
+        except StoreError:
+            pass
+    assert len(store.category_list()) >= 1
+
 def main() -> int:
     test_import(tempdir("tagstore-import-"))
     test_revision_and_idempotent(tempdir("tagstore-rev-"))
@@ -433,6 +474,7 @@ def main() -> int:
     test_library(tempdir("tagstore-lib-"))
     test_impact_read_only(tempdir("tagstore-impact-"))
     test_apply_project_diff(tempdir("tagstore-diff-"))
+    test_categories(tempdir("tagstore-cat-"))
     test_versions(tempdir("tagstore-ver-"))
     test_version_prune(tempdir("tagstore-prune-"))
     test_audit_limit(tempdir("tagstore-audit-"))

@@ -189,7 +189,7 @@ def _empty_data() -> dict:
         "revision": 0,
         "updated_at": 0.0,
         "updated_by": "",
-        "library": {"version": 2, "tags": [], "categories": {}},
+        "library": {"version": 2, "tags": [], "categories": {}, "category_order": list(TAG_CATEGORIES)},
         "project": {"project_id": "", "source_root": "", "roots": [], "next_id": 1},
         "videos": [],
         "audit": [],
@@ -247,7 +247,21 @@ def _normalize_data(raw: dict) -> dict:
             continue
         if name.casefold() not in {tag.casefold() for tag in tags}:
             tags.append(name)
-    categories = normalize_tag_categories(tags, library_raw.get("categories") or {})
+
+    # 大类（分类）是可增删的列表；老文件没有 category_order 时以默认四类为起点
+    order: list[str] = []
+    for value in library_raw.get("category_order") or []:
+        name = str(value or "").strip()
+        if name and name not in order:
+            order.append(name)
+    saved_categories = library_raw.get("categories") or {}
+    for value in saved_categories.values():
+        name = str(value or "").strip()
+        if name and name not in order:
+            order.append(name)
+    if not order:
+        order = list(TAG_CATEGORIES)
+    categories = normalize_tag_categories(tags, saved_categories, allowed=order)
 
     videos: list[dict] = []
     seen: set[str] = set()
@@ -260,7 +274,7 @@ def _normalize_data(raw: dict) -> dict:
         for tag in video["tags"]:
             if tag not in categories:
                 tags.append(tag)
-                categories[tag] = normalize_tag_categories([tag]).get(tag, "场景")
+                categories[tag] = normalize_tag_categories([tag], allowed=order).get(tag, order[0])
         videos.append(video)
     videos.sort(key=lambda row: (not row["id"].isdigit(), int(row["id"]) if row["id"].isdigit() else 0, row["id"]))
 
@@ -277,7 +291,7 @@ def _normalize_data(raw: dict) -> dict:
         "revision": int(raw.get("revision") or 0),
         "updated_at": float(raw.get("updated_at") or 0),
         "updated_by": str(raw.get("updated_by") or ""),
-        "library": {"version": 2, "tags": tags, "categories": categories},
+        "library": {"version": 2, "tags": tags, "categories": categories, "category_order": order},
         "project": project,
         "videos": videos,
         "audit": audit,
@@ -363,7 +377,18 @@ class TemplateStore:
 
     def library(self) -> dict:
         library = self.data["library"]
-        return {"version": 2, "tags": list(library["tags"]), "categories": dict(library["categories"])}
+        return {"version": 2, "tags": list(library["tags"]),
+                "categories": dict(library["categories"]),
+                "category_order": list(library.get("category_order") or TAG_CATEGORIES)}
+
+    def category_list(self) -> list[str]:
+        """可增删的大类顺序表；标签编辑器、筛选器都按它渲染。"""
+        with self._lock:
+            order = list(self.data["library"].get("category_order") or [])
+        return order or list(TAG_CATEGORIES)
+
+    def _allowed_categories(self) -> list[str]:
+        return self.category_list()
 
     def categories(self) -> dict[str, str]:
         return dict(self.data["library"]["categories"])
@@ -658,14 +683,18 @@ class TemplateStore:
                 updated.append(copy.deepcopy(target))
             library_changed = 0
             known = {tag.casefold() for tag in self.data["library"]["tags"]}
+            order = list(self.data["library"].get("category_order") or TAG_CATEGORIES)
             for tag in library_tags:
                 if tag.casefold() in known:
                     continue
+                category = str(library_categories.get(tag) or "").strip()
+                if category and category not in order:
+                    order.append(category)   # 桌面端带进来的新大类，一并登记
                 self.data["library"]["tags"].append(tag)
-                self.data["library"]["categories"][tag] = (
-                    library_categories.get(tag) if library_categories.get(tag) in TAG_CATEGORIES else "场景")
+                self.data["library"]["categories"][tag] = category if category in order else order[0]
                 known.add(tag.casefold())
                 library_changed += 1
+            self.data["library"]["category_order"] = order
             if updated or library_changed:
                 self.data["videos"].sort(key=lambda item: (not item["id"].isdigit(),
                                                            int(item["id"]) if item["id"].isdigit() else 0,
@@ -688,17 +717,19 @@ class TemplateStore:
     def library_create(self, name: str, category: str = "", *, user: str = "",
                        revision: int | None = None) -> dict:
         label = validate_tag_name(name)
-        category = str(category or "").strip() or "场景"
-        if category not in TAG_CATEGORIES:
-            raise StoreError(f"分类只能是：{' / '.join(TAG_CATEGORIES)}")
+        category = str(category or "").strip()
 
         def op() -> dict:
+            allowed = self._allowed_categories()
+            target = category or (allowed[0] if allowed else "场景")
+            if target not in allowed:
+                raise StoreError(f"分类不存在：{target}（请先在标签库里新增大类）")
             if label.casefold() in {tag.casefold() for tag in self.data["library"]["tags"]}:
                 raise StoreError("这个标签已经存在")
             self.data["library"]["tags"].append(label)
-            self.data["library"]["categories"][label] = category
+            self.data["library"]["categories"][label] = target
             return {"changed": 1, "library": self.library(), "affected": 0,
-                    "detail": {"name": label, "category": category}}
+                    "detail": {"name": label, "category": target}}
 
         return self._mutate(op, user=user, revision=revision, action="library_create")
 
@@ -734,10 +765,10 @@ class TemplateStore:
                              revision: int | None = None) -> dict:
         label = self._require_tag(name)
         category = str(category or "").strip()
-        if category not in TAG_CATEGORIES:
-            raise StoreError(f"分类只能是：{' / '.join(TAG_CATEGORIES)}")
 
         def op() -> dict:
+            if category not in self._allowed_categories():
+                raise StoreError(f"分类不存在：{category}（请先在标签库里新增大类）")
             if self.data["library"]["categories"].get(label) == category:
                 return {"changed": 0, "library": self.library(), "affected": 0}
             self.data["library"]["categories"][label] = category
@@ -804,6 +835,71 @@ class TemplateStore:
                                "becomes_untagged": becomes_untagged}}
 
         return self._mutate(op, user=user, revision=revision, action="library_delete")
+
+    # ------------------------------------------------------------------ 大类（分类）
+    def category_create(self, name: str, *, user: str = "", revision: int | None = None) -> dict:
+        """新增大类，例如「天气」「面料」。标签编辑器与筛选会立刻多出一栏。"""
+        category = validate_tag_name(name)
+        if len(category) > 20:
+            raise StoreError("大类名称最多 20 个字")
+
+        def op() -> dict:
+            order = list(self.data["library"].get("category_order") or [])
+            if category.casefold() in {item.casefold() for item in order}:
+                raise StoreError("这个大类已经存在")
+            order.append(category)
+            self.data["library"]["category_order"] = order
+            return {"changed": 1, "library": self.library(), "affected": 0,
+                    "detail": {"category": category}}
+
+        return self._mutate(op, user=user, revision=revision, action="category_create")
+
+    def category_rename(self, name: str, new_name: str, *, user: str = "",
+                        revision: int | None = None) -> dict:
+        source = str(name or "").strip()
+        target = validate_tag_name(new_name)
+        if len(target) > 20:
+            raise StoreError("大类名称最多 20 个字")
+
+        def op() -> dict:
+            order = list(self.data["library"].get("category_order") or [])
+            if source not in order:
+                raise StoreError(f"大类不存在：{source}")
+            if target.casefold() in {item.casefold() for item in order}:
+                raise StoreError("这个大类已经存在")
+            order[order.index(source)] = target
+            self.data["library"]["category_order"] = order
+            categories = self.data["library"]["categories"]
+            moved = 0
+            for tag, category in list(categories.items()):
+                if category == source:
+                    categories[tag] = target
+                    moved += 1
+            return {"changed": 1, "library": self.library(), "affected": moved,
+                    "detail": {"from": source, "to": target, "tags": moved}}
+
+        return self._mutate(op, user=user, revision=revision, action="category_rename")
+
+    def category_delete(self, name: str, *, user: str = "", revision: int | None = None) -> dict:
+        """只允许删空大类；下面还有标签时要求先把标签移走或删掉。"""
+        source = str(name or "").strip()
+
+        def op() -> dict:
+            order = list(self.data["library"].get("category_order") or [])
+            if source not in order:
+                raise StoreError(f"大类不存在：{source}")
+            if len(order) <= 1:
+                raise StoreError("至少要保留一个大类")
+            used = [tag for tag, category in self.data["library"]["categories"].items()
+                    if category == source]
+            if used:
+                raise StoreError(f"「{source}」下还有 {len(used)} 个标签（{used[0]}…），请先改分类或删除标签")
+            order.remove(source)
+            self.data["library"]["category_order"] = order
+            return {"changed": 1, "library": self.library(), "affected": 0,
+                    "detail": {"category": source}}
+
+        return self._mutate(op, user=user, revision=revision, action="category_delete")
 
     # ------------------------------------------------------------------ 只读推演
     def impact_preview(self, action: str, params: dict | None = None) -> dict:
@@ -978,7 +1074,19 @@ class TemplateStore:
             videos.append(row)
         library_raw = snapshot.get("library") if isinstance(snapshot.get("library"), dict) else {}
         target_tags = _clean_tags(library_raw.get("tags"))
-        target_categories = normalize_tag_categories(target_tags, library_raw.get("categories") or {})
+        target_order: list[str] = []
+        for value in library_raw.get("category_order") or []:
+            name = str(value or "").strip()
+            if name and name not in target_order:
+                target_order.append(name)
+        raw_categories = library_raw.get("categories") or {}
+        for value in raw_categories.values():
+            name = str(value or "").strip()
+            if name and name not in target_order:
+                target_order.append(name)
+        if not target_order:
+            target_order = list(TAG_CATEGORIES)
+        target_categories = normalize_tag_categories(target_tags, raw_categories, allowed=target_order)
 
         def op() -> dict:
             # 先备份当前状态（与回滚同一次持锁，避免中间被别的进程插队）
@@ -988,7 +1096,8 @@ class TemplateStore:
             current_ids = {row["id"] for row in self.data.get("videos") or []}
             target_ids = {row["id"] for row in videos}
             self.data["library"] = {"version": 2, "tags": target_tags,
-                                    "categories": target_categories}
+                                    "categories": target_categories,
+                                    "category_order": target_order}
             self.data["videos"] = videos
             if isinstance(snapshot.get("project"), dict) and snapshot["project"]:
                 self.data["project"] = copy.deepcopy(snapshot["project"])
@@ -1047,11 +1156,18 @@ class TemplateStore:
             return {**report, "dry_run": True, "written": False, "revision": self.revision}
 
         def op() -> dict:
+            project_tags = _clean_tags(project.get("tags"))
+            project_categories = project.get("tag_categories") or {}
+            order: list[str] = list(TAG_CATEGORIES)
+            for value in project_categories.values():
+                name = str(value or "").strip()
+                if name and name not in order:
+                    order.append(name)
             self.data["library"] = {
                 "version": 2,
-                "tags": _clean_tags(project.get("tags")),
-                "categories": normalize_tag_categories(_clean_tags(project.get("tags")),
-                                                       project.get("tag_categories") or {}),
+                "tags": project_tags,
+                "categories": normalize_tag_categories(project_tags, project_categories, allowed=order),
+                "category_order": order,
             }
             self.data["project"] = {
                 "project_id": str(project.get("project_id") or ""),
@@ -1089,6 +1205,7 @@ class TemplateStore:
             videos = copy.deepcopy(self.data["videos"])
         project["tags"] = library["tags"]
         project["tag_categories"] = library["categories"]
+        project["category_order"] = library.get("category_order") or list(TAG_CATEGORIES)
         project["videos"] = videos
         project.setdefault("roots", sorted({row["source_dir"] for row in videos if row["source_dir"]}))
         return project

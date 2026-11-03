@@ -264,6 +264,34 @@ def main() -> int:
         assert code == 200, body(raw)
         assert body(raw)["library"]["categories"]["特写"] == "姿势"
 
+        # ---------- 自定义大类 ----------
+        revision = body(call(alice, base, "/api/tags/snapshot")[2])["revision"]
+        code, _, raw = call(bob, base, "/api/tags/library", "POST",
+                            {"revision": revision, "action": "category_create", "name": "天气"})
+        assert code == 200, body(raw)
+        assert "天气" in body(raw)["library"]["category_order"], body(raw)
+        revision = body(raw)["revision"]
+
+        code, _, raw = call(bob, base, "/api/tags/library", "POST",
+                            {"revision": revision, "action": "create", "name": "下雨", "category": "天气"})
+        assert code == 200, body(raw)
+        revision = body(raw)["revision"]
+
+        code, _, raw = call(bob, base, "/api/tags/videos/tags", "POST",
+                            {"revision": revision, "ids": ["001"], "tags": ["下雨"], "mode": "add"})
+        assert code == 200, body(raw)
+        snap = body(call(alice, base, "/api/tags/snapshot")[2])
+        assert "天气" in snap["categories"], snap["categories"]
+        assert {v["id"]: v for v in snap["videos"]}["001"]["tag_categories"]["下雨"] == "天气"
+
+        # 大类改名后，标签跟着走
+        revision = snap["revision"]
+        code, _, raw = call(bob, base, "/api/tags/library", "POST",
+                            {"revision": revision, "action": "category_rename",
+                             "name": "天气", "new_name": "天气状况"})
+        assert code == 200, body(raw)
+        assert body(raw)["library"]["categories"]["下雨"] == "天气状况", body(raw)
+
         # ---------- 权限：普通用户能写标签，但 admin 接口仍 403 ----------
         code, _, _ = call(bob, base, "/api/admin/template-health")
         assert code == 403, code

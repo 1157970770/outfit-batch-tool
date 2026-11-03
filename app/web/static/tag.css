@@ -290,6 +290,37 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 
 .tag-lib-note { font-size: 12px; }
 
+/* ---------- 大类管理 ---------- */
+.tag-cat-block {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: #fbfcfd;
+}
+.tag-cat-title { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.tag-cat-title b { font-size: 13px; }
+.tag-cat-title .muted { font-size: 11.5px; }
+.tag-cat-list { display: grid; gap: 2px; }
+.tag-cat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 0;
+}
+.tag-cat-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-cat-name em { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 6px; }
+.tag-cat-actions { display: flex; gap: 2px; }
+.tag-cat-actions button { padding: 1px 6px; font-size: 11px; }
+.tag-cat-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: 6px;
+}
+.tag-cat-create input { min-height: 30px; }
+
 /* ---------- 版本历史抽屉 ---------- */
 .version-create {
   display: grid;
@@ -417,3 +448,16 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 
 .upload-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .upload-foot .primary { min-height: 34px; padding: 0 20px; }
+
+/* ---------- 编码能力提示（H.265 不受支持时） ---------- */
+.tag-codec-hint {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid #f0d9a8;
+  border-left: 3px solid var(--orange, #e6a23c);
+  border-radius: var(--radius-md);
+  background: #fdf7ea;
+  color: #8a5a00;
+  font-size: 12.5px;
+  line-height: 1.65;
+}

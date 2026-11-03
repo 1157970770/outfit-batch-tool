@@ -120,7 +120,14 @@
     if (!data) return;
     state.revision = Number(data.revision || state.revision);
     state.stats = data.stats || state.stats;
-    if (data.library) state.library = data.library;
+    if (data.library) {
+      state.library = data.library;
+      const order = data.library.category_order;
+      if (Array.isArray(order) && order.length) {
+        state.categories = order.slice();
+        renderCategoryOptions();
+      }
+    }
     replaceRows(data.updated);
     renderAll();
     if (app().reloadTemplates) Promise.resolve(app().reloadTemplates()).catch(() => {});
@@ -537,6 +544,19 @@
       note.classList.remove('hidden');
     } else {
       player.classList.remove('hidden');
+      note.classList.add('hidden');
+      // 浏览器解不了 H.265（这批素材约七成是 HEVC）时不要在空白播放器上干等
+      player.onloadeddata = () => {
+        note.classList.add('hidden');
+      };
+      player.onerror = () => {
+        const code = player.error && player.error.code;
+        player.classList.add('hidden');
+        note.textContent = code === 4
+          ? `${video.name || video.id} 的编码浏览器不支持（多为 H.265 / HEVC）。用桌面打标器可以预览，或请管理员转成 H.264。`
+          : `这条视频加载失败（${code || '未知原因'}），换一条试试或刷新页面。`;
+        note.classList.remove('hidden');
+      };
       player.src = `/api/templates/${encodeURIComponent(video.id)}/preview?allow_deprecated=1`;
       player.play().catch(() => {});
     }
@@ -616,11 +636,71 @@
   }
 
   function labelOf(action) {
-    return { create: '新建', rename: '改名', set_category: '改分类', merge: '合并', delete: '删除' }[action] || '更新';
+    return {
+      create: '新建', rename: '改名', set_category: '改分类', merge: '合并', delete: '删除',
+      category_create: '新增', category_rename: '改名', category_delete: '删除',
+    }[action] || '更新';
+  }
+
+  /* ---------------------------------------------------------------- 大类管理 */
+  function renderCategoryOptions() {
+    const select = $('tag-lib-cat');
+    if (!select) return;
+    const current = select.value;
+    select.replaceChildren();
+    for (const category of state.categories) {
+      const option = document.createElement('option');
+      option.value = category;
+      option.textContent = category;
+      select.append(option);
+    }
+    if (state.categories.includes(current)) select.value = current;
+  }
+
+  function renderCategoryList() {
+    const root = $('tag-cat-list');
+    if (!root) return;
+    root.replaceChildren();
+    for (const category of state.categories) {
+      const tagCount = activeLibrary().filter(tag => categoryOf(tag) === category).length;
+      const row = document.createElement('div');
+      row.className = 'tag-cat-row';
+
+      const name = document.createElement('span');
+      name.className = 'tag-cat-name';
+      name.textContent = category;
+      const count = document.createElement('em');
+      count.textContent = `${tagCount} 个标签`;
+      name.append(count);
+
+      const actions = document.createElement('span');
+      actions.className = 'tag-cat-actions';
+      const rename = document.createElement('button');
+      rename.type = 'button'; rename.className = 'quiet'; rename.textContent = '改名';
+      rename.addEventListener('click', () => {
+        const value = prompt(`把大类「${category}」改成：`, category);
+        if (!value || value.trim() === category) return;
+        libraryAction({ action: 'category_rename', name: category, new_name: value.trim() },
+          `大类改名为「${value.trim()}」？该大类下的 ${tagCount} 个标签会跟着改。`);
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'quiet'; remove.textContent = '删除';
+      remove.addEventListener('click', () => {
+        if (tagCount) { toast(`「${category}」下还有 ${tagCount} 个标签，先把标签改到别的类或删掉`); return; }
+        if (!confirm(`删除大类「${category}」？`)) return;
+        libraryAction({ action: 'category_delete', name: category }, `删除大类「${category}」？`);
+      });
+      actions.append(rename, remove);
+      row.append(name, actions);
+      root.append(row);
+    }
+    if (!root.childElementCount) root.append(emptyNode('还没有大类'));
   }
 
   /* ---------------------------------------------------------------- 标签库抽屉 */
   function renderLibrary() {
+    renderCategoryList();
+    renderCategoryOptions();
     const root = $('tag-lib-list');
     root.replaceChildren();
     const groups = tagsByCategory();
@@ -694,14 +774,7 @@
   function openDrawer() {
     state.drawerOpen = true;
     if (state.versionOpen) closeVersions();
-    const select = $('tag-lib-cat');
-    if (!select.childElementCount) {
-      for (const category of state.categories.length ? state.categories : ['景别', '适合季节', '场景', '姿势']) {
-        const option = document.createElement('option');
-        option.value = category; option.textContent = category;
-        select.append(option);
-      }
-    }
+    renderCategoryOptions();
     $('tag-drawer').classList.remove('hidden');
     renderLibrary();
   }
@@ -1111,6 +1184,17 @@
     event.preventDefault();
     addUploadFiles(event.dataTransfer ? event.dataTransfer.files : null);
   });
+  $('tag-cat-create').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const name = $('tag-cat-name').value.trim();
+    if (!name) return;
+    const data = await libraryAction({ action: 'category_create', name }, `新增大类「${name}」？`);
+    if (data) {
+      $('tag-cat-name').value = '';
+      renderLibrary();
+      toast(`已新增大类「${name}」`);
+    }
+  });
   $('tag-lib-create').addEventListener('submit', async (event) => {
     event.preventDefault();
     const error = $('tag-lib-error');
@@ -1133,9 +1217,31 @@
     if (player) player.pause();
   });
 
+  // 库里大部分素材是 H.265，Chrome 只有在系统装了 HEVC 解码器时才能播，
+  // 提前把这件事说清楚，免得同事以为是系统坏了
+  function canPlayHevc() {
+    const probe = document.createElement('video');
+    return ['video/mp4; codecs="hvc1.1.6.L93.B0"',
+            'video/mp4; codecs="hev1.1.6.L93.B0"']
+      .some(type => probe.canPlayType(type) !== '');
+  }
+
+  function checkCodec() {
+    const box = $('tag-codec-hint');
+    if (!box) return;
+    if (canPlayHevc()) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.textContent = '这个浏览器不支持 H.265（HEVC）解码，库里大部分视频点开会提示无法播放。'
+      + '在系统里安装 Microsoft Store 的「HEVC 视频扩展」后重启浏览器即可；也可以先用桌面打标器预览。';
+    box.classList.remove('hidden');
+  }
+
   window.TagUI = {
     enter() {
       // 每次进页面都做一次"带 revision 的探测"：没变化服务端只回 60 B，不轮询
+      checkCodec();
       load();
     },
   };
