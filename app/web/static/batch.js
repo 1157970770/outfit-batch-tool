@@ -748,9 +748,13 @@
         `已用${txt(usedInfo.batch_no) ? `·${txt(usedInfo.batch_no)}` : ''}`));
       tile.title += `\n款号已在批次「${txt(usedInfo.batch_no) || txt(usedInfo.batch_id) || '未知'}」用过该模板`;
     }
-    const tags = item.tags.slice(0, 4).join(' / ');
+    // 标签全部展示：>5 个缩字号（is-dense），>12 个再缩一档（is-tiny），换行铺开不截断
+    const tagCount = item.tags.length;
+    const tags = item.tags.join(' / ');
     const meta = el('div', 'batch-cand-meta', `${item.id}${tags ? ` · ${tags}` : ''}`);
-    meta.title = item.tags.length ? item.tags.join(' / ') : item.id;
+    if (tagCount > 12) meta.classList.add('is-tiny');
+    else if (tagCount > 5) meta.classList.add('is-dense');
+    meta.title = tagCount ? item.tags.join(' / ') : item.id;
     tile.append(pick, line, meta);
 
     const paint = () => {

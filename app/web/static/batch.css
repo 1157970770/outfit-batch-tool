@@ -118,7 +118,10 @@
 .batch-cand-badge{flex:none;padding:1px 4px;border-radius:4px;background:color-mix(in srgb,var(--amber) 14%,white);color:var(--amber);font-size:10px;font-weight:800;line-height:12px}
 /* 「已用」防重标记：与「未上传」同形不同色，一眼区分两种提示 */
 .batch-cand-badge-used{background:color-mix(in srgb,var(--red,#c2410c) 12%,white);color:var(--red,#c2410c)}
-.batch-cand-meta{grid-area:meta;min-width:0;font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-cand-meta{grid-area:meta;min-width:0;font-size:11px;line-height:14px;color:var(--muted);word-break:break-word}
+/* 标签多时缩字号并允许换行，保证视频卡完整展示全部标签 */
+.batch-cand-meta.is-dense{font-size:10px;line-height:12px}
+.batch-cand-meta.is-tiny{font-size:9px;line-height:11px}
 .batch-cand-empty{grid-column:1/-1}
 .batch-cand-note{font-size:11px;line-height:1.4;margin:6px 0 0}
 
