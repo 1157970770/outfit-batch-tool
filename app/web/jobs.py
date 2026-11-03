@@ -66,6 +66,12 @@ def clean_style_no(value) -> str:
     """旧款号字段（v0.9.0 及以前）：仅用于读取老数据，新提交一律走 clean_tags。"""
     text = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
     return text[:_STYLE_MAX]
+
+
+# 重试时认的非成功终态：skipped 是「被取消/批量放弃」的条目，重跑一次才有意义；
+# running 不算——它表示还在等云端出片（含等待超时），此时重试会和原任务抢同一份费用。
+_RETRYABLE_RECORD_STATES = frozenset({"failed", "invalid", "expired", "canceled", "skipped"})
+
 _SECRET_PATTERNS = [
     (re.compile(r"sk-[A-Za-z0-9._-]{12,}"), "[已隐藏密钥]"),
     (re.compile(r"(q-signature|q-ak|SecretId|SecretKey)=([^&\\s]+)", re.I), r"\1=[已隐藏]"),
@@ -132,12 +138,22 @@ class JobManager:
                 job = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
+            if not isinstance(job, dict):
+                continue
+            dirty = False
+            # 老版本/手改的文件可能没有 id：以文件名补回并落盘。
+            # 少了这一步，派发时 job["id"] 会 KeyError，整条调度线就断了。
+            job_id = str(job.get("id") or path.stem)
+            if job.get("id") != job_id:
+                job["id"] = job_id
+                dirty = True
             if job.get("status") == "running":
                 job["status"] = "interrupted"
                 job["message"] = "服务重启时任务正在运行；请核对阿里云任务后再重试。"
                 job["finished_at"] = time.time()
-            self.jobs[job.get("id", path.stem)] = job
-            if job.get("status") == "interrupted":
+                dirty = True
+            self.jobs[job_id] = job
+            if dirty:
                 self._save(job)
 
     def create(self, owner: str, image_path: Path, image_name: str,
@@ -229,6 +245,32 @@ class JobManager:
             return small_n < max_small and small_owner.get(owner, 0) < per_user_small
         return big_n < max_big and big_owner.get(owner, 0) < per_user_big
 
+    def _spawn(self, job_id: str) -> None:
+        """起一条工作线程。单独一个方法，测试里可以替换成会抛错的实现。"""
+        threading.Thread(target=self._run_job, args=(job_id,),
+                         name=f"web-job-{job_id}", daemon=True).start()
+
+    def _dispatch_failed(self, job: dict, exc: BaseException) -> None:
+        """派发阶段失败：把该 job 置为失败，异常绝不抛回调度线程。
+
+        调度线程是全站唯一的一条，抛出去就等于全站任务永久排队：新 job 能提交、
+        前端显示"已排队"，但再没有人派发。所以这里 swallow 掉，只牺牲这一个 job。
+        """
+        message = _redact(f"任务无法启动：{type(exc).__name__}: {exc}")[:500]
+        job_id = str(job.get("id") or "")
+        with self.changed:
+            # 没有 id 的任务落不了盘，但至少要在内存里置成失败，否则它会一直占着队列。
+            live = self.jobs.get(job_id) if job_id else job
+            if live is not None and live.get("status") == "queued":
+                live["status"] = "failed"
+                live["message"] = message
+                live["finished_at"] = time.time()
+                if job_id:
+                    self._save(live)
+            self.changed.notify_all()
+        if job_id:
+            self._append_log(job_id, message)
+
     def _dispatch(self) -> None:
         max_big = self.settings.max_active_jobs
         max_small = self.settings.max_active_small_jobs
@@ -240,27 +282,46 @@ class JobManager:
                     or self._has_dispatchable(max_big, max_small, per_user_big), timeout=1.0)
                 if self.stop_event.is_set():
                     return
-                big_owner, small_owner = self._active_counts()
-                big_n, small_n = sum(big_owner.values()), sum(small_owner.values())
-                # 小批量优先：即使它比大批量晚提交，也先放行。
-                queued = sorted(
-                    (j for j in self.jobs.values() if j.get("status") == "queued"),
-                    key=lambda j: (self._lane(j) != "small", j.get("created_at", 0)))
-                for job in queued:
-                    lane = self._lane(job)
-                    owner = str(job.get("owner") or "")
-                    if not self._lane_allowed(lane, owner, big_owner, small_owner,
-                                              big_n, small_n, max_big, max_small, per_user_big):
-                        continue
-                    self.active[job["id"]] = {"owner": owner, "lane": lane, "runner": None}
-                    if lane == "small":
-                        small_owner[owner] = small_owner.get(owner, 0) + 1
-                        small_n += 1
-                    else:
-                        big_owner[owner] = big_owner.get(owner, 0) + 1
-                        big_n += 1
-                    threading.Thread(target=self._run_job, args=(job["id"],),
-                                     name=f"web-job-{job['id']}", daemon=True).start()
+                self._dispatch_queued(max_big, max_small, per_user_big)
+
+    def _dispatch_queued(self, max_big: int, max_small: int, per_user_big: int) -> None:
+        """派发一轮（调用方已持锁）。抽成独立方法是为了能在测试里单步驱动。"""
+        big_owner, small_owner = self._active_counts()
+        big_n, small_n = sum(big_owner.values()), sum(small_owner.values())
+        # 小批量优先：即使它比大批量晚提交，也先放行。
+        queued = sorted(
+            (j for j in self.jobs.values() if j.get("status") == "queued"),
+            key=lambda j: (self._lane(j) != "small", j.get("created_at", 0)))
+        for job in queued:
+            lane = self._lane(job)
+            owner = str(job.get("owner") or "")
+            if not self._lane_allowed(lane, owner, big_owner, small_owner,
+                                      big_n, small_n, max_big, max_small, per_user_big):
+                continue
+            job_id = str(job.get("id") or "")
+            if not job_id:
+                # 没有 id 就没法建文件名/回写状态，只能就地判失败（不会阻塞后续 job）。
+                self._dispatch_failed(job, ValueError("任务缺少 id，无法派发"))
+                continue
+            self.active[job_id] = {"owner": owner, "lane": lane, "runner": None}
+            if lane == "small":
+                small_owner[owner] = small_owner.get(owner, 0) + 1
+                small_n += 1
+            else:
+                big_owner[owner] = big_owner.get(owner, 0) + 1
+                big_n += 1
+            try:
+                self._spawn(job_id)
+            except Exception as exc:  # 线程资源耗尽等：只影响这一个 job
+                # 先把占位和计数还回去，再判失败，否则后面的 job 会被这格空占而饿死。
+                self.active.pop(job_id, None)
+                if lane == "small":
+                    small_owner[owner] = max(0, small_owner.get(owner, 0) - 1)
+                    small_n = max(0, small_n - 1)
+                else:
+                    big_owner[owner] = max(0, big_owner.get(owner, 0) - 1)
+                    big_n = max(0, big_n - 1)
+                self._dispatch_failed(job, exc)
 
     def _has_dispatchable(self, max_big: int, max_small: int, per_user_big: int) -> bool:
         big_owner, small_owner = self._active_counts()
@@ -291,7 +352,10 @@ class JobManager:
 
     def _on_event(self, job_id: str, event: dict) -> None:
         with self.changed:
-            job = self.jobs[job_id]
+            job = self.jobs.get(job_id)
+            if job is None:
+                # 事件回调可能晚于 job 被清理（或来自上一个进程），不该把整批线程带崩。
+                return
             kind = event.get("type")
             if kind == "started":
                 job["total"] = int(event.get("total") or job["total"])
@@ -308,16 +372,23 @@ class JobManager:
             self.changed.notify_all()
 
     def _run_job(self, job_id: str) -> None:
-        with self.lock:
-            job = self.jobs[job_id]
-            job["status"] = "running"
-            job["started_at"] = time.time()
-            job["message"] = "正在生成，请稍候。"
-            out_dir = unique_batch_dir(self.output_root, job["batch_id"])
-            job["out_dir"] = str(out_dir)
-            self._save(job)
         runner = None
         try:
+            # 置 running / 建目录 / 落盘也放在 try 里：中间的 OSError 若逃出去，
+            # finally 就护不到 active 槽位，job 会永卡 running、且因状态不是终态而不能重试。
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is None:
+                    return
+                if job.get("cancel_requested") or job.get("status") != "queued":
+                    # 排队期间被取消：不要再把它改回 running 跑一遍（取消竞态）。
+                    return
+                job["status"] = "running"
+                job["started_at"] = time.time()
+                job["message"] = "正在生成，请稍候。"
+                out_dir = unique_batch_dir(self.output_root, job["batch_id"])
+                job["out_dir"] = str(out_dir)
+                self._save(job)
             template_store, output_store = build_storages(self.settings.config)
             cfg = self.settings.config
             # 线程数只是工作线程，不再与 API 并发/速率绑在一起；上限 50 防止误配。
@@ -351,36 +422,60 @@ class JobManager:
                 if self.jobs[job_id].get("cancel_requested") or self.stop_event.is_set():
                     runner.stop()
             summary = runner.run()
-            with self.changed:
-                job = self.jobs[job_id]
-                job["summary"] = summary
-                if job.get("cancel_requested"):
-                    job["status"] = "canceled"
-                    job["message"] = "已停止继续提交；已提交的任务已处理完成。"
-                elif summary.get("success", 0) and summary.get("failed", 0):
-                    job["status"] = "partial"
-                    job["message"] = "部分完成，请检查失败项。"
-                elif summary.get("success", 0):
-                    job["status"] = "succeeded"
-                    job["message"] = "全部完成。"
-                else:
-                    job["status"] = "failed"
-                    job["message"] = "任务未能完成，请查看失败原因。"
-                job["done"] = int(summary.get("total") or job["done"])
-                job["finished_at"] = time.time()
-                self._save(job)
+            self._finish_job(job_id, summary)
         except Exception as exc:
             with self.changed:
-                job = self.jobs[job_id]
-                job["status"] = "failed"
-                job["message"] = str(exc)[:500]
-                job["finished_at"] = time.time()
-                self._save(job)
+                job = self.jobs.get(job_id)
+                if job is not None:
+                    job["status"] = "failed"
+                    job["message"] = _redact(str(exc))[:500]
+                    job["finished_at"] = time.time()
+                    self._save(job)
+                self.changed.notify_all()
             self._append_log(job_id, f"任务启动失败：{exc}")
         finally:
             with self.changed:
                 self.active.pop(job_id, None)
                 self.changed.notify_all()
+
+    @staticmethod
+    def _job_outcome(summary: dict) -> tuple[str, str, int]:
+        """把引擎汇总换算成 job 状态：只有每一条都成功，才算「全部完成」。
+
+        引擎侧的非成功终态有 failed / invalid / expired / canceled / skipped 五种，
+        以前只数 failed，于是「5 成功 + 5 无效」被显示成 succeeded + 100%。
+        running 只在等待超时时出现（P1-19），这里按「未完成」处理，不拉满进度条。
+        """
+        total = max(0, int(summary.get("total") or 0))
+        success = max(0, int(summary.get("success") or 0))
+        running = max(0, int(summary.get("running") or 0))
+        done = max(0, min(total, total - running))
+        if total and success >= total:
+            return "succeeded", "全部完成。", done
+        if success:
+            return ("partial",
+                    f"部分完成：成功 {success}/{total}，另有 {total - success} 条未成功"
+                    "（失败/无效/超时/取消/跳过），请检查失败项。",
+                    done)
+        return "failed", "任务未能完成，请查看失败原因。", done
+
+    def _finish_job(self, job_id: str, summary: dict) -> None:
+        status, message, done = self._job_outcome(summary)
+        with self.changed:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return
+            job["summary"] = summary
+            if job.get("cancel_requested"):
+                job["status"] = "canceled"
+                job["message"] = "已停止继续提交；已提交的任务已处理完成。"
+            else:
+                job["status"] = status
+                job["message"] = message
+            job["done"] = done
+            job["finished_at"] = time.time()
+            self._save(job)
+            self.changed.notify_all()
 
     def retry_failed(self, job_id: str, owner: str) -> dict:
         with self.lock:
@@ -390,9 +485,11 @@ class JobManager:
             if source.get("status") not in {"partial", "failed", "canceled"}:
                 raise ValueError("任务尚未结束，暂时不能重试")
             failed_ids = {str(r.get("id")) for r in source.get("records", [])
-                          if r.get("status") in {"failed", "invalid", "expired", "canceled"}}
+                          if r.get("status") in _RETRYABLE_RECORD_STATES}
             selected = [dict(t) for t in source.get("templates", []) if str(t.get("id")) in failed_ids]
             if not selected:
+                if any(str(r.get("status")) == "running" for r in source.get("records", [])):
+                    raise ValueError("还有条目在等云端出片（或等待超时），请稍后再重试")
                 raise ValueError("该任务没有可重试的失败项")
             image_path = Path(source["image_path"])
             if not image_path.is_file():

@@ -8,17 +8,21 @@
 3. 落盘持久化：新实例从磁盘读回；
 4. 不同款号互不串账。
 """
+import contextlib
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _tmpdir  # noqa: E402
 from app.web.style_usage import StyleUsageLedger
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory() as tmp:
+    # 不用 tempfile.TemporaryDirectory：它在 Windows 上以 0o700 建目录（显式 DACL），
+    # 沙箱/受限账户下清理时会 PermissionError；_tmpdir 用 0o777 + atexit 清理。
+    with contextlib.nullcontext(_tmpdir.tempdir("styleusage-")) as tmp:
         data_dir = Path(tmp)
 
         ledger = StyleUsageLedger(data_dir)

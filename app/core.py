@@ -150,6 +150,22 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
+def status_counts(records) -> dict:
+    """按 status 汇总记录数。
+
+    非成功终态必须分列：下游只看 success/failed 时，「5 成功 + 5 无效」会被
+    报成「全部完成」。running 也单独计数 —— 它表示还在等云端出片（含等待超时）。
+    """
+    counts = {"total": 0, "success": 0, "failed": 0, "invalid": 0,
+              "expired": 0, "canceled": 0, "skipped": 0, "running": 0}
+    for record in records:
+        counts["total"] += 1
+        status = str((record or {}).get("status") or "")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
 def _as_seconds(value) -> float | None:
     if value is None or value == "":
         return None
@@ -338,13 +354,11 @@ class BatchRunner:
 
         self._export_csv()
         self._save_state()
-        summary = {
+        counts = status_counts(self.state.records.values())
+        summary = dict(counts)
+        summary.update({
             "total": total,
-            "success": sum(1 for r in self.state.records.values() if r.get("status") == "success"),
-            "failed": sum(1 for r in self.state.records.values() if r.get("status") == "failed"),
-            "running": sum(1 for r in self.state.records.values() if r.get("status") == "running"),
-            "expired": sum(1 for r in self.state.records.values() if r.get("status") == "expired"),
-            "canceled": sum(1 for r in self.state.records.values() if r.get("status") == "canceled"),
+            "unsuccessful": max(0, total - counts["success"]),
             "billable_seconds": round(sum(
                 float(r.get("billable_seconds") or 0) for r in self.state.records.values()
             ), 2),
@@ -355,7 +369,7 @@ class BatchRunner:
             "model": spec.model,
             "archived": sum(1 for r in self.state.records.values() if r.get("cos_key")),
             "archive_failed": sum(1 for r in self.state.records.values() if r.get("archive_error")),
-        }
+        })
         self._emit("finished", summary=summary)
         return summary
 

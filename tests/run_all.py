@@ -33,6 +33,7 @@ REQUIRED = [
     "test_cos_rest",
     "test_style_usage",
     "test_web_auth",
+    "test_jobs_state",
     "test_web_tags",
     "test_web",
     "test_web_tag_api",
