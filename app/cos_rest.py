@@ -184,8 +184,12 @@ class CosRestClient:
                 raise StorageError(f"COS 列举失败：HTTP {exc.code} {body}") from None
             except urllib.error.URLError as exc:
                 raise StorageError(f"COS 列举网络错误：{exc.reason}") from None
-            ns = root.tag.split("}")[0].lstrip("{")
-            ns_prefix = f"{{{ns}}}" if ns else ""
+            # COS 的 ListBucketResult 实际不带 namespace（根标签就是 ListBucketResult）。
+            # 早期写法把根标签当 namespace 拼成 {ListBucketResult}Contents，导致 findall
+            # 永远匹配不到 → list_prefix 恒返回空（去重/清理/列举全部静默失效）。
+            ns_prefix = ""
+            if root.tag.startswith("{") and "}" in root.tag:
+                ns_prefix = root.tag[: root.tag.index("}") + 1]
             for contents in root.findall(f"{ns_prefix}Contents"):
                 node = contents.find(f"{ns_prefix}Key")
                 if node is None or not (node.text or "").strip():
