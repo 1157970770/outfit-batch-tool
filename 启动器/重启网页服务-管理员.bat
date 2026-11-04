@@ -19,4 +19,13 @@ netstat -ano | findstr ":%PORT%" | findstr "LISTENING"
 echo.
 echo If nothing is listed above, right-click this file and choose
 echo "Run as administrator", or reboot and log in again.
+rem Write a completion stamp for the VBS launcher (it shows the message box):
+rem OK + PID when port is listening, otherwise FAIL.
+set "READY="
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do set "READY=%%p"
+if defined READY (
+  >"%TEMP%\outfit_web_restart.stamp" echo OK %READY%
+) else (
+  >"%TEMP%\outfit_web_restart.stamp" echo FAIL
+)
 if /i not "%~1"=="silent" pause
