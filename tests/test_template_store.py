@@ -477,6 +477,36 @@ def test_versions(tmp: Path) -> None:
         raise AssertionError("不存在的版本必须 404")
 
 
+def test_version_carries_rating(tmp: Path) -> None:
+    """版本快照必须带上评分：备份能查、回滚能还原。"""
+    store = new_store(tmp)
+    store.set_rating(["001"], 4, user="alice")
+    store.set_rating(["002"], 3, user="alice")
+
+    # 自动快照（每次写操作后）也要记录评分数
+    auto = store.list_versions()[0]
+    assert auto["kind"] == "auto" and auto["rated"] == 2, auto
+
+    manual = store.create_version("含评分", user="alice")
+    assert manual["rated"] == 2, manual
+    payload = store.read_version(manual["name"])
+    rated = {row["id"]: row["rating"] for row in payload["videos"] if row.get("rating")}
+    assert rated == {"001": 4, "002": 3}, rated
+    row = next(item for item in payload["videos"] if item["id"] == "001")
+    assert row["rating_by"] == "alice" and row["rating_at"] > 0
+
+    # 之后再改评分，回滚到该版本应恢复当时的评分
+    store.set_rating(["001"], 2, user="bob")
+    store.set_rating(["003"], 5, user="bob")
+    result = store.restore_version(manual["name"], user="bob", revision=store.revision)
+    assert store.row("001")["rating"] == 4
+    assert store.row("002")["rating"] == 3
+    assert store.row("003")["rating"] == 0, "该版本没有 003 的评分，回滚后应为未打分"
+    backup = store.read_version(result["backup"])
+    backup_rated = {item["id"]: item["rating"] for item in backup["videos"] if item.get("rating")}
+    assert backup_rated == {"001": 2, "002": 3, "003": 5}, backup_rated
+
+
 def test_version_prune(tmp: Path) -> None:
     store = new_store(tmp, name="pruned.json")
     for index in range(55):

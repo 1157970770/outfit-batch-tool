@@ -1081,10 +1081,13 @@ class TemplateStore:
             handle.write(raw)
         os.replace(tmp, target)
 
+        # 视频行是整行快照，评分（rating/rating_at/rating_by）随之入库；
+        # 这里额外把“该版本带多少条评分”写进 meta，版本列表不必解压快照就能看出评分覆盖度
+        rated = sum(1 for row in payload["videos"] if int(row.get("rating") or 0) > 0)
         meta = {
             "name": name, "kind": kind, "action": payload["action"], "note": payload["note"],
             "revision": payload["revision"], "at": payload["at"], "user": payload["user"],
-            "count": len(payload["videos"]), "bytes": target.stat().st_size,
+            "count": len(payload["videos"]), "rated": rated, "bytes": target.stat().st_size,
         }
         meta_path = folder / (name + ".meta.json")
         meta_tmp = folder / (name + ".meta.json.tmp")

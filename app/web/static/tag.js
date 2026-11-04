@@ -965,7 +965,13 @@
       time.textContent = fmtDateTime(version.at);
       const count = document.createElement('span');
       count.className = 'version-meta';
-      count.textContent = `r${version.revision} · ${version.count} 条`;
+      // rated 是“该版本带多少条评分”；老版本（修复前生成的）没有这个字段，就不显示
+      const rated = Number(version.rated || 0);
+      count.textContent = `r${version.revision} · ${version.count} 条`
+        + (version.rated === undefined ? '' : ` · ${rated} 评分`);
+      count.title = version.rated === undefined
+        ? '该版本生成于评分字段上线前，未记录评分数'
+        : `该版本内含 ${rated} 条视频评分，回滚时会一并恢复`;
       head.append(badge, time, count);
 
       const meta = document.createElement('div');
@@ -989,7 +995,9 @@
   async function restoreVersion(version) {
     const stamp = fmtDateTime(version.at);
     const ok = confirm(
-      `把视频库与标签回滚到 ${stamp}（r${version.revision}，${version.count} 条）？\n\n`
+      `把视频库、标签与评分回滚到 ${stamp}（r${version.revision}，${version.count} 条，`
+      + `${Number(version.rated || 0)} 条评分）？\n\n`
+      + '注意：评分也会一起回滚——该版本之后打的分别会保留在当前状态里，\n'
       + '当前状态会先自动备份成「回滚前备份」版本，随时可以再撤回。');
     if (!ok) return;
     try {
