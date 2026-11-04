@@ -472,6 +472,11 @@ def make_handler(app: WebApplication):
                 template_id = path.split("/")[-2]
                 query = urllib.parse.parse_qs(parsed.query)
                 return self._preview(template_id, allow_deprecated=query.get("allow_deprecated", ["0"])[0] == "1")
+            if path.startswith("/api/templates/") and path.endswith("/download"):
+                if not self._user():
+                    return
+                template_id = path.split("/")[-2]
+                return self._download_video(template_id)
             if path == "/api/tags/snapshot":
                 if not self._user():
                     return
@@ -1430,6 +1435,48 @@ def make_handler(app: WebApplication):
                 response.close()
             except (TemplateError, OSError, urllib.error.URLError, RuntimeError) as exc:
                 return self._error(f"模板预览失败：{exc}", 502)
+
+        def _download_video(self, template_id):
+            """把候选视频原样代理给浏览器下载（Content-Disposition: attachment）。"""
+            try:
+                # 已弃用的视频同样允许下载（与预览一致，恢复前也要能拿到文件）
+                item = app.catalog.resolve(template_id, include_retired=True)
+                url = str(item.get("url") or "")
+                if not url and not item.get("key"):
+                    return self._error("该视频尚未上传到云端，无法下载。", 404)
+                if not url and item.get("key"):
+                    store = app.template_store()
+                    if store is None:
+                        return self._error("下载暂不可用。", 503)
+                    url = store.sign_url(item["key"], 3600)
+                parsed = urllib.parse.urlsplit(url)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                    return self._error("下载地址无效。", 502)
+                req = urllib.request.Request(url, headers={"User-Agent": "OutfitLocal/1"})
+                try:
+                    response = urllib.request.urlopen(req, timeout=60)
+                except urllib.error.HTTPError as exc:
+                    response = exc
+                status = getattr(response, "status", 200)
+                filename = (str(item.get("name") or "").strip()
+                            or str(item.get("relative_path") or "").strip()
+                            or f"{template_id}.mp4")
+                quoted = urllib.parse.quote(filename)
+                self.send_response(status)
+                self.send_header("Content-Type", response.headers.get("Content-Type", "video/mp4"))
+                for header in ("Content-Length", "Content-Range"):
+                    value = response.headers.get(header)
+                    if value:
+                        self.send_header(header, value)
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted}")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if self.command != "HEAD":
+                    shutil.copyfileobj(response, self.wfile, length=64 * 1024)
+                response.close()
+            except (TemplateError, OSError, urllib.error.URLError, RuntimeError) as exc:
+                return self._error(f"下载失败：{exc}", 502)
 
         def _static(self, relative):
             target = (static_root / relative).resolve()

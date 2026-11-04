@@ -75,8 +75,8 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 
 .tag-row {
   display: grid;
-  /* 文件名列再压缩（132→104），给新的评分列腾位置：标签仍拿剩余宽度 */
-  grid-template-columns: 26px 54px 104px minmax(0, 1fr) 78px 76px 68px 34px;
+  /* 文件名列再压缩（132→104），给新的评分列腾位置：标签仍拿剩余宽度；末列放「下载+弃」两个小按钮 */
+  grid-template-columns: 26px 54px 104px minmax(0, 1fr) 78px 76px 68px 68px;
   gap: 8px;
   align-items: center;
   padding: 5px 10px;
@@ -179,7 +179,7 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-editor-rating .muted { font-size: 12px; }
 
 /* 行内「弃 / 恢」：和右下角大按钮同一套语义，只是省去先选中那一步 */
-.tag-row-act { display: flex; align-items: center; justify-content: center; }
+.tag-row-act { display: flex; align-items: center; justify-content: center; gap: 4px; }
 .tag-mini {
   width: 26px;
   height: 22px;
@@ -195,6 +195,9 @@ body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 .tag-mini:hover { background: var(--red); color: #fff; }
 .tag-mini.is-restore { border-color: var(--green); color: var(--green); }
 .tag-mini.is-restore:hover { background: var(--green); color: #fff; }
+/* 行内下载按钮：蓝色系，和弃用(红)/恢复(绿)区分 */
+.tag-mini.is-dl { width: 34px; border-color: var(--blue); color: var(--blue); }
+.tag-mini.is-dl:hover { background: var(--blue); color: #fff; }
 
 .tag-empty { padding: 40px 16px; text-align: center; color: var(--muted); }
 

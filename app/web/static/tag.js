@@ -98,6 +98,38 @@
     if (data) toast(value ? `已评 ${value} 星（${videos.length} 条）` : `已清除评分（${videos.length} 条）`);
   }
 
+  /* 下载：单条走同一函数；批量逐条拉到本地再触发保存（可感知失败、不依赖多下载授权） */
+  async function downloadVideos(videos) {
+    if (!videos || !videos.length) return;
+    let ok = 0;
+    for (let i = 0; i < videos.length; i++) {
+      const video = videos[i];
+      const label = video.name || video.id;
+      if (videos.length > 1) toast(`正在下载 ${i + 1}/${videos.length}：${label}`);
+      try {
+        const resp = await fetch(`/api/templates/${encodeURIComponent(video.id)}/download`);
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => '');
+          toast(`下载失败：${label}（HTTP ${resp.status}${detail ? ` ${detail.slice(0, 80)}` : ''}）`);
+          continue;
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = label.endsWith('.mp4') ? label : `${label}.mp4`;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        ok += 1;
+      } catch (err) {
+        toast(`下载失败：${label}（${err && err.message ? err.message : err}）`);
+      }
+    }
+    if (videos.length > 1) toast(`批量下载完成：成功 ${ok} / ${videos.length} 条`);
+  }
+
   function activeLibrary() {
     return state.library && Array.isArray(state.library.tags) ? state.library.tags : [];
   }
@@ -461,9 +493,18 @@
       sizeCell.className = 'tag-row-state';
       sizeCell.textContent = fmtSize(video.size_mb);
 
-      // 行内快捷「弃 / 恢」：不用先选中，点一下就和大按钮走同一套确认与接口
+      // 行内快捷「下载 / 弃(恢)」：不用先选中，点一下就走同一套接口
       const actCell = document.createElement('span');
       actCell.className = 'tag-row-act';
+      const dl = document.createElement('button');
+      dl.type = 'button';
+      dl.className = 'tag-mini is-dl';
+      dl.textContent = '下载';
+      dl.title = `下载 ${video.name || video.id}（${fmtSize(video.size_mb)}）`;
+      dl.addEventListener('click', (event) => {
+        event.stopPropagation();
+        downloadVideos([video]);
+      });
       const act = document.createElement('button');
       act.type = 'button';
       act.className = 'tag-mini' + (video.deprecated ? ' is-restore' : '');
@@ -475,7 +516,7 @@
         event.stopPropagation();
         setDeprecated(!video.deprecated, [video.id]);
       });
-      actCell.append(act);
+      actCell.append(dl, act);
 
       row.append(checkCell, idCell, nameCell, tagsCell, ratingCell, stateCell, sizeCell, actCell);
       row.addEventListener('click', () => selectPreview(video.id));
@@ -1325,6 +1366,12 @@
   $('tag-restore-btn').addEventListener('click', () => setDeprecated(false));
   $('tag-bulk-deprecate').addEventListener('click', () => setDeprecated(true));
   $('tag-bulk-restore').addEventListener('click', () => setDeprecated(false));
+  $('tag-bulk-download').addEventListener('click', () => {
+    const videos = state.matched.filter(video => state.selected.has(video.id));
+    if (!videos.length) { toast('先勾选要下载的视频'); return; }
+    if (!confirm(`逐条下载选中的 ${videos.length} 条视频到浏览器默认下载目录？`)) return;
+    downloadVideos(videos);
+  });
   $('tag-library-btn').addEventListener('click', openDrawer);
   $('tag-drawer-close').addEventListener('click', closeDrawer);
   $('tag-versions-btn').addEventListener('click', openVersions);
