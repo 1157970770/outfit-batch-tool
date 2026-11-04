@@ -5,8 +5,8 @@
  */
 
 /* ---------- 步骤条 ---------- */
-.batch-steps{display:grid;grid-template-columns:repeat(4,minmax(0,220px));justify-content:start;gap:8px;list-style:none;margin:0 0 18px;padding:0}
-.batch-step{display:flex;align-items:center;gap:9px;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--muted);font-size:12px}
+.batch-steps{display:grid;grid-template-columns:repeat(4,minmax(0,220px));justify-content:start;gap:8px;list-style:none;margin:0 0 10px;padding:0}
+.batch-step{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--muted);font-size:12px}
 .batch-step-no{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue);font-size:11px;font-weight:800}
 .batch-step b{display:block;font-size:13px;color:var(--ink)}
 .batch-step small{display:block;font-size:11px;color:var(--muted);margin-top:1px}
@@ -23,7 +23,8 @@
 .batch-card-side{display:flex;align-items:center;gap:8px}
 
 /* ---------- 面板 ---------- */
-.batch-panel{margin-bottom:18px}
+.batch-panel{margin-bottom:12px;padding:14px 16px}
+#batch-view .step-title{margin-bottom:10px}
 .batch-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .batch-form-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .batch-drop{min-height:190px;margin-top:2px}
@@ -174,16 +175,16 @@
 
 /* ---------- 锁定摘要 ---------- */
 /* 定妆图一格放大成竖图卡：minmax 拉宽到 260px 保证缩略图有地方放 */
-.batch-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
-.batch-summary-grid .batch-summary-image{grid-column:span 1;min-width:220px}
-.batch-summary-cell{min-width:0;padding:10px 12px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
+.batch-summary-grid .batch-summary-image{grid-column:span 1;min-width:200px}
+.batch-summary-cell{min-width:0;padding:6px 10px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
 .batch-summary-cell small{display:block;font-size:11px;color:var(--muted)}
-.batch-summary-cell b{display:block;margin-top:3px;font-size:13px;font-weight:700;overflow-wrap:anywhere}
-.batch-summary-hint{font-size:12px;margin:12px 0 0}
+.batch-summary-cell b{display:block;margin-top:2px;font-size:12.5px;font-weight:700;overflow-wrap:anywhere}
+.batch-summary-hint{font-size:12px;margin:8px 0 0}
 .batch-image-link{display:block;margin-top:3px;line-height:0}
-.batch-image-thumb{width:100%;max-width:150px;max-height:200px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+.batch-image-thumb{width:100%;max-width:110px;max-height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
 /* 提示词块：完整展示，编辑时换成 textarea */
-.batch-prompt-block{margin-top:10px;padding:12px 14px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-prompt-block{margin-top:8px;padding:10px 12px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
 .batch-prompt-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between}
 .batch-prompt-head small{font-size:11px;color:var(--muted)}
 .batch-prompt-text{margin:8px 0 0;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit}
