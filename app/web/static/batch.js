@@ -1177,13 +1177,25 @@
     // 服务端给了档位就按它的渲染（配置可能把单次上限调到小于 100），否则用本地三档。
     const limits = serviceLimits();
     const counts = plan.source === 'server' && plan.counts.length ? plan.counts : limits.choices;
-    for (const count of counts) {
+    // 按钮按"实际会提交多少条"来显示：档位大于剩余待生产时截断为剩余数。
+    // 例如选了 54 条：显示 生产 20 / 生产 50 / 生产剩余 54；
+    // 点完 20 再剩 34：显示 生产 20 / 生产 34（50 和 100 截断后都是 34，只留一个按钮）。
+    // 这样按钮永远不会虚报数量，也不会出现几个一模一样的按钮。
+    const seen = new Set();
+    for (const tier of counts) {
+      const count = Math.min(tier, pending);
+      if (count <= 0) continue;
+      if (seen.has(count)) continue;
+      seen.add(count);
+      const clamped = count < tier;
       const btn = el('button', 'primary batch-produce-btn');
       btn.type = 'button';
-      btn.textContent = `生产 ${count} 条`;
+      btn.textContent = clamped ? `生产剩余 ${count} 条` : `生产 ${count} 条`;
       btn.disabled = b.busy || !!activeId || closed || pending === 0;
       btn.title = activeId ? '当前批次还有任务在跑，跑完再点下一批'
-        : closed ? '批次已关闭' : '点下去会立刻提交，不可撤回';
+        : closed ? '批次已关闭'
+        : clamped ? `清单只剩 ${pending} 条，本次会把剩余的全部提交`
+        : '点下去会立刻提交，不可撤回';
       btn.addEventListener('click', () => produce(count, batch));
       actions.append(btn);
     }
