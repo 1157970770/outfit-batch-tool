@@ -1281,6 +1281,7 @@
       + b.items.map((item) => `${txt(item.template_id)}:${txt(item.state)}:${txt(item.job_id)}:${txt(item.error) ? 1 : 0}:${txt(item.verify_warn) ? 1 : 0}`).join(',');
     if (signature === b.itemsSignature && root.childElementCount) return;
     b.itemsSignature = signature;
+    hideHoverPreview(); // 卡片要重建：正悬停的那张会被移走，小窗先收起
     root.replaceChildren();
     const filtered = b.itemFilter === 'all' ? b.items : b.items.filter((item) => txt(item.state) === b.itemFilter);
     if (!b.items.length) {
@@ -1301,51 +1302,79 @@
     more.classList.toggle('hidden', rest === 0);
     more.textContent = `加载更多条目（还有 ${rest} 条）`;
   }
-  /* 清单条目：宫格视频卡。
-     60 张卡不能各挂一个 <video>（等于一次拉 60 条流），默认只放播放按钮，
-     点了才在该卡里建播放器；同一时刻只留一个在播，避免一片声音。 */
-  function playItemCard(media, tid, name) {
-    const existing = media.querySelector('video');
-    if (existing) {
-      if (existing.paused) {
-        const retry = existing.play();
-        if (retry && typeof retry.catch === 'function') retry.catch(() => {});
-      } else {
-        existing.pause();
-      }
-      return;
-    }
-    document.querySelectorAll('.batch-item-media video').forEach((node) => node.pause());
+  /* ---------- 清单条目：悬浮预览 ----------
+     卡片保持原大小与排布，播放改成悬浮小窗：悬停媒体区 250ms 后出现，
+     离开/滚动即停。全页只有一个悬浮播放器，src 用完即清，不会多路并发拉流。 */
+  const hoverPreview = { box: null, video: null, note: null, timer: null, tid: '' };
+
+  function ensureHoverPreview() {
+    if (hoverPreview.box) return;
+    const box = el('div', 'batch-hover-preview');
+    box.classList.add('hidden');
     const video = document.createElement('video');
-    video.className = 'batch-item-video';
-    video.controls = true;
+    video.muted = true;      // 悬浮预览静音自动播，避免浏览器的自动播放拦截
     video.loop = true;
     video.playsInline = true;
-    video.preload = 'metadata';
-    video.setAttribute('aria-label', `${name} 预览`);
-    video.addEventListener('play', () => media.classList.add('is-playing'));
-    video.addEventListener('pause', () => media.classList.remove('is-playing'));
-    video.addEventListener('error', () => {
-      media.classList.add('is-error');
-      media.classList.remove('is-playing');
-      // 失败也给个重试入口：H.265 这类是硬伤，但网络抖动 / 云端 404 抖一下还能再试
-      const box = el('div', 'batch-item-error');
-      box.append(el('span', 'batch-item-media-note',
-        '无法播放：素材未上传到云端，或视频是 H.265 编码（浏览器不支持）'));
-      const again = el('button', 'batch-item-play', '▶');
-      again.type = 'button';
-      again.title = '重试播放';
-      again.addEventListener('click', () => {
-        media.classList.remove('is-error');
-        playItemCard(media, tid, name);
-      });
-      box.append(again);
-      media.replaceChildren(box);
-    });
+    video.preload = 'auto';
+    const note = el('div', 'batch-hover-note hidden');
+    box.append(video, note);
+    document.body.append(box);
+    hoverPreview.box = box;
+    hoverPreview.video = video;
+    hoverPreview.note = note;
+  }
+
+  function hideHoverPreview() {
+    if (hoverPreview.timer) { clearTimeout(hoverPreview.timer); hoverPreview.timer = null; }
+    const box = hoverPreview.box;
+    const video = hoverPreview.video;
+    if (!box) return;
+    try { video.pause(); } catch (_) { /* 已释放时 pause 可能抛错，忽略 */ }
+    video.removeAttribute('src');
+    if (video.load) video.load();
+    box.classList.add('hidden');
+    hoverPreview.note.classList.add('hidden');
+    hoverPreview.tid = '';
+  }
+
+  function showHoverPreview(media, tid, name) {
+    if (!tid) return;
+    ensureHoverPreview();
+    if (hoverPreview.tid === tid && !hoverPreview.box.classList.contains('hidden')) return;
+    hideHoverPreview();
+    hoverPreview.tid = tid;
+    const box = hoverPreview.box;
+    const video = hoverPreview.video;
+    const note = hoverPreview.note;
+    video.setAttribute('aria-label', `${name} 悬浮预览`);
+    video.onerror = () => {
+      note.textContent = '无法预览：素材未上传到云端，或视频是 H.265 编码（浏览器不支持）';
+      note.classList.remove('hidden');
+    };
+    // 摆位：贴着媒体区，默认在其上方放不下就换到下方，左右不出视口
+    const rect = media.getBoundingClientRect();
+    const width = Math.min(280, window.innerWidth - 16);
+    const estHeight = width * 10 / 16;
+    const left = Math.min(Math.max(8, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - 8);
+    let top = rect.top - estHeight - 8;
+    if (top < 8) top = rect.bottom + 8;
+    if (top + estHeight > window.innerHeight - 8) top = Math.max(8, window.innerHeight - estHeight - 8);
+    box.style.left = `${Math.round(left)}px`;
+    box.style.top = `${Math.round(top)}px`;
+    box.style.width = `${width}px`;
+    box.classList.remove('hidden');
     video.src = `/api/templates/${encodeURIComponent(tid)}/preview`;
-    media.replaceChildren(video);
     const promise = video.play();
-    if (promise && typeof promise.catch === 'function') promise.catch(() => { /* 自动播放被拦：控件一直在，手动点即可 */ });
+    if (promise && typeof promise.catch === 'function') promise.catch(() => { /* 静音被拦的概率极低，移开再悬停即可 */ });
+  }
+
+  function scheduleHoverPreview(media, tid, name) {
+    if (!tid) return;
+    if (hoverPreview.timer) clearTimeout(hoverPreview.timer);
+    hoverPreview.timer = setTimeout(() => {
+      hoverPreview.timer = null;
+      showHoverPreview(media, tid, name);
+    }, 250);
   }
 
   function itemCard(item) {
@@ -1357,12 +1386,15 @@
 
     const media = el('div', 'batch-item-media');
     if (tid) {
+      // ▶ 只做视觉提示，不再可点：悬停媒体区 250ms 自动浮出预览小窗
       const play = el('button', 'batch-item-play', '▶');
       play.type = 'button';
-      play.title = `预览 ${name}`;
-      play.setAttribute('aria-label', `预览 ${name}`);
-      play.addEventListener('click', () => playItemCard(media, tid, name));
+      play.tabIndex = -1;
+      play.setAttribute('aria-hidden', 'true');
+      play.title = '悬停在此处自动预览';
       media.append(play);
+      media.addEventListener('mouseenter', () => scheduleHoverPreview(media, tid, name));
+      media.addEventListener('mouseleave', hideHoverPreview);
     } else {
       media.append(el('span', 'batch-item-media-note', '无素材编号'));
     }
@@ -1892,6 +1924,9 @@
     video.addEventListener('loadeddata', () => showPreviewNote(''));
     video.addEventListener('playing', () => showPreviewNote(''));
     window.addEventListener('resize', queueCandLayout);
+    // 悬浮预览小窗跟着鼠标走：页面滚动（含内层容器）或窗口缩放时直接收起
+    window.addEventListener('scroll', hideHoverPreview, true);
+    window.addEventListener('resize', hideHoverPreview);
     watchCandGrid();
   }
 

@@ -224,14 +224,15 @@
 .batch-item-card[data-state="done"]{border-left-color:var(--green)}
 .batch-item-card[data-state="failed"]{border-left-color:var(--red)}
 .batch-item-card[data-state="producing"]{border-left-color:var(--blue)}
-.batch-item-media{position:relative;display:grid;place-items:center;aspect-ratio:16/10;background:color-mix(in srgb,var(--bg) 65%,white);border-bottom:1px solid var(--line)}
-.batch-item-media.is-playing{background:#000}
-.batch-item-play{display:grid;place-items:center;width:32px;height:32px;padding:0;border:1px solid var(--line-strong);border-radius:50%;background:var(--paper);color:var(--blue);font-size:11px;line-height:1;cursor:pointer}
-.batch-item-play:hover{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 8%,white)}
-.batch-item-video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
+.batch-item-media{position:relative;display:grid;place-items:center;aspect-ratio:16/10;background:color-mix(in srgb,var(--bg) 65%,white);border-bottom:1px solid var(--line);cursor:default}
+/* ▶ 现在只是"可悬浮预览"的视觉提示，不参与交互（悬停整块媒体区即出预览） */
+.batch-item-play{display:grid;place-items:center;width:32px;height:32px;padding:0;border:1px solid var(--line-strong);border-radius:50%;background:var(--paper);color:var(--blue);font-size:11px;line-height:1;pointer-events:none}
 .batch-item-media-note{padding:0 10px;font-size:11px;line-height:1.5;color:var(--muted);text-align:center}
-.batch-item-error{display:flex;flex-direction:column;align-items:center;gap:6px;padding:0 8px}
-.batch-item-media.is-error .batch-item-media-note{color:var(--amber)}
+/* 悬浮预览小窗：挂在 body 上、position:fixed，不占卡片布局；pointer-events:none
+   保证鼠标穿过小窗也不会触发 mouseleave 抖动 */
+.batch-hover-preview{position:fixed;z-index:60;pointer-events:none;background:#000;border:1px solid var(--line-strong);border-radius:10px;overflow:hidden;box-shadow:0 10px 28px rgba(15,30,60,.28)}
+.batch-hover-preview video{display:block;width:100%;aspect-ratio:16/10;object-fit:contain;background:#000}
+.batch-hover-note{padding:8px 10px;font-size:11px;line-height:1.5;color:var(--amber);background:var(--paper);text-align:center}
 .batch-item-body{display:flex;flex-direction:column;gap:3px;min-width:0;padding:7px 8px}
 .batch-item-title{display:flex;align-items:baseline;gap:5px;min-width:0}
 .batch-item-title b{min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
