@@ -7,10 +7,10 @@
   <title>换装视频工作台</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
-  <link rel="stylesheet" href="/static/batch.css?v=20261104a">
+  <link rel="stylesheet" href="/static/batch.css?v=20261104b">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <script defer src="/static/app.js?v=20261104e"></script>
-  <script defer src="/static/batch.js?v=20261103j"></script>
+  <script defer src="/static/batch.js?v=20261104b"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
 <body>
@@ -276,9 +276,14 @@
                 <button id="batch-d-exit-btn" class="quiet batch-exit hidden" type="button" title="回到批次列表；批次数据不变，随时可以再打开">退出批次</button>
               </div>
             </div>
-            <div id="batch-counters" class="batch-counters"></div>
-            <div class="batch-progress-line"><div class="progress"><span id="batch-progress-fill"></span></div><p id="batch-progress-text" class="muted">等待开始</p></div>
-            <div id="batch-produce-actions" class="batch-produce-actions"></div>
+            <!-- 生产控制条：左边计数+进度，右边生产按钮，一行放完 -->
+            <div class="batch-produce-bar">
+              <div class="batch-produce-main">
+                <div id="batch-counters" class="batch-counters"></div>
+                <div class="batch-progress-line"><div class="progress"><span id="batch-progress-fill"></span></div><p id="batch-progress-text" class="muted">等待开始</p></div>
+              </div>
+              <div id="batch-produce-actions" class="batch-produce-actions"></div>
+            </div>
             <div id="batch-retry" class="batch-retry hidden"></div>
             <p id="batch-produce-error" class="error hidden"></p>
             <div class="batch-items-head">

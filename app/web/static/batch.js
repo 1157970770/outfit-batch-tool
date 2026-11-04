@@ -47,6 +47,7 @@
     busy: false, pollTimer: null, activeJob: null,
     promptEditing: false,    // 锁定摘要里「修改提示词」的编辑态；切批次/退出时复位
     promptDraft: '',         // 编辑中的草稿文本（与 batch.prompt 分离，避免误覆盖）
+    promptOpen: false,       // 提示词是否展开全文（默认折叠两行，页面更紧凑；4 秒轮询重渲染也靠它保持）
     groups: [], openGroups: new Set(), groupDetails: new Map(), groupSig: new Map(),
     historyMode: 'groups', flatWarned: false,
     styleUsed: {},           // 当前批次上衣款号已用过的模板（{id: {batch_no,...}}），防重标记
@@ -997,6 +998,8 @@
   }
 
   /* ---------- 步骤 C / D：锁定摘要、分批生产 ---------- */
+  // 摘要收成一条横条：左边定妆图缩略（48px），右边一排 chip。
+  // 原来 8 个格子铺满整行、被定妆图撑到 200px 高，是这页最占地方的一块。
   function renderSummary(batch) {
     const root = $('batch-summary');
     root.replaceChildren();
@@ -1014,55 +1017,59 @@
       ['批次号', txt(batch.batch_no) || '—'],
       ['状态', BATCH_STATE_TEXT[txt(batch.state)] || txt(batch.state) || '—'],
       // 本页建出来的批次恒为 duration=7；-1 只可能来自接口直建的老批次，文案别硬说成 7 秒。
-      ['画质 / 时长', `${txt(batch.resolution) || '—'} · ${durationValue > 0 ? `输出 ${durationValue} 秒` : `输出跟随素材时长（估算按 ${OUTPUT_SECONDS} 秒上限，实际可能更低）`}`],
-      ['清单条数', `${total} 条`],
+      ['画质 / 时长', `${txt(batch.resolution) || '—'} · ${durationValue > 0 ? `输出 ${durationValue} 秒` : '跟随素材时长'}`],
+      ['清单', `${total} 条`],
       ['进度', `已结束 ${done + failed} / ${total}（成功 ${done} · 失败 ${failed}）`],
       ['锁定时间', fmtTime(batch.locked_at)],
       ['标签快照', filterText || '锁定前未选标签'],
     ];
-    const grid = el('div', 'batch-summary-grid');
-    for (const [label, value] of rows) {
-      const cell = el('div', 'batch-summary-cell');
-      cell.append(el('small', null, label), el('b', null, value));
-      grid.append(cell);
-    }
-    // 定妆图：真图 + 文件名，点图看原图；没有 upload_id 的老批次退化为纯文件名
-    const imageCell = el('div', 'batch-summary-cell batch-summary-image');
-    imageCell.append(el('small', null, '定妆图'));
+
+    const bar = el('div', 'batch-sum-bar');
+    // 定妆图缩略：有图才占位，点开看原图；整批共用这一张，缩略图 48px 够认人
     const imageUrl = txt(batch.image_url);
     if (imageUrl) {
-      const link = el('a', 'batch-image-link');
+      const link = el('a', 'batch-sum-thumb');
       link.href = imageUrl;
       link.target = '_blank';
       link.rel = 'noopener';
-      link.title = '点击查看原图';
-      const img = el('img', 'batch-image-thumb');
+      link.title = `查看定妆图原图：${txt(batch.image_name) || '—'}`;
+      const img = el('img', null);
       img.src = imageUrl;
       img.alt = txt(batch.image_name) || '定妆图';
       img.loading = 'lazy';
       link.append(img);
-      imageCell.append(link, el('b', null, txt(batch.image_name) || '—'));
-    } else {
-      imageCell.append(el('b', null, txt(batch.image_name) || '—'));
+      bar.append(link);
     }
-    grid.append(imageCell);
-    root.append(grid);
 
-    // 提示词：完整展示（不再截 110 字），锁定后仍可修改 —— 生产时才读取批次提示词，
+    const chips = el('div', 'batch-sum-chips');
+    for (const [label, value] of rows) {
+      const chip = el('span', 'batch-sum-chip');
+      chip.append(el('small', null, label), el('b', null, value));
+      chips.append(chip);
+    }
+    if (txt(batch.image_name)) {
+      const chip = el('span', 'batch-sum-chip');
+      chip.append(el('small', null, '定妆图'), el('b', null, txt(batch.image_name)));
+      chips.append(chip);
+    }
+    bar.append(chips);
+    root.append(bar);
+
+    // 提示词：默认折叠两行，点「展开」看全文；锁定后仍可修改 —— 生产时才读取批次提示词，
     // 改完只影响之后的分批生产，已生成的视频不变。
     root.append(buildPromptBlock(batch, prompt));
     root.append(el('p', 'muted batch-summary-hint',
-      '清单已锁定：条目不可增删，定妆图 / 画质 / 时长都用批次创建时的设置；提示词可在上方修改，之后的分批生产会用最新一份，已生成的视频不受影响。'));
+      '清单已锁定：条目不可增删，定妆图 / 画质 / 时长都用批次创建时的设置；提示词可改，只影响之后的分批生产。'));
   }
 
   function buildPromptBlock(batch, prompt) {
     const block = el('div', 'batch-prompt-block');
     const head = el('div', 'batch-prompt-head');
-    head.append(el('small', null, `提示词（完整，${prompt.length} 字）`));
+    head.append(el('small', null, `提示词 · ${prompt.length} 字`));
     const editable = txt(batch.state) !== 'closed' && !txt(batch.active_job_id);
     if (b.promptEditing) {
       const body = el('textarea', 'batch-prompt-edit');
-      body.rows = 8;
+      body.rows = 6;
       body.maxLength = 4000;
       body.spellcheck = false;
       body.value = b.promptDraft;
@@ -1073,9 +1080,9 @@
         count.textContent = `${body.value.length} / 4000`;
       });
       const actions = el('div', 'batch-prompt-actions');
-      const save = el('button', 'primary', '保存提示词');
+      const save = el('button', 'primary btn-sm', '保存提示词');
       save.type = 'button';
-      const cancel = el('button', 'quiet', '取消');
+      const cancel = el('button', 'quiet btn-sm', '取消');
       cancel.type = 'button';
       cancel.addEventListener('click', () => {
         b.promptEditing = false;
@@ -1104,7 +1111,17 @@
       actions.append(save, cancel, count);
       block.append(head, body, actions);
     } else {
-      const edit = el('button', 'quiet batch-prompt-edit-btn', '修改提示词');
+      const tools = el('div', 'batch-prompt-tools');
+      // 折叠/展开：默认只露两行，长提示词不再把页面顶下去
+      const toggle = el('button', 'quiet btn-sm batch-prompt-toggle', b.promptOpen ? '收起' : '展开');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', b.promptOpen ? 'true' : 'false');
+      toggle.title = b.promptOpen ? '收起提示词' : '展开看完整提示词';
+      toggle.addEventListener('click', () => {
+        b.promptOpen = !b.promptOpen;
+        renderSummary(batch);
+      });
+      const edit = el('button', 'quiet btn-sm batch-prompt-edit-btn', '修改提示词');
       edit.type = 'button';
       edit.disabled = !editable;
       edit.title = editable ? '改完只影响之后的分批生产' : '有任务在跑或批次已关闭时不能改';
@@ -1116,8 +1133,9 @@
         const body = document.querySelector('.batch-prompt-edit');
         if (body) { body.focus(); body.setSelectionRange(body.value.length, body.value.length); }
       });
-      head.append(edit);
-      const text = el('p', 'batch-prompt-text', prompt || '—');
+      tools.append(toggle, edit);
+      head.append(tools);
+      const text = el('p', 'batch-prompt-text' + (b.promptOpen ? '' : ' is-clamped'), prompt || '—');
       block.append(head, text);
     }
     return block;
@@ -1263,7 +1281,7 @@
       root.append(el('div', 'empty', '该状态下没有条目。'));
     } else {
       const fragment = document.createDocumentFragment();
-      for (const item of slice) fragment.append(itemRow(item));
+      for (const item of slice) fragment.append(itemCard(item));
       root.append(fragment);
     }
     const more = $('batch-items-more');
@@ -1271,41 +1289,113 @@
     more.classList.toggle('hidden', rest === 0);
     more.textContent = `加载更多条目（还有 ${rest} 条）`;
   }
-  function itemRow(item) {
+  /* 清单条目：宫格视频卡。
+     60 张卡不能各挂一个 <video>（等于一次拉 60 条流），默认只放播放按钮，
+     点了才在该卡里建播放器；同一时刻只留一个在播，避免一片声音。 */
+  function playItemCard(media, tid, name) {
+    const existing = media.querySelector('video');
+    if (existing) {
+      if (existing.paused) {
+        const retry = existing.play();
+        if (retry && typeof retry.catch === 'function') retry.catch(() => {});
+      } else {
+        existing.pause();
+      }
+      return;
+    }
+    document.querySelectorAll('.batch-item-media video').forEach((node) => node.pause());
+    const video = document.createElement('video');
+    video.className = 'batch-item-video';
+    video.controls = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.setAttribute('aria-label', `${name} 预览`);
+    video.addEventListener('play', () => media.classList.add('is-playing'));
+    video.addEventListener('pause', () => media.classList.remove('is-playing'));
+    video.addEventListener('error', () => {
+      media.classList.add('is-error');
+      media.classList.remove('is-playing');
+      // 失败也给个重试入口：H.265 这类是硬伤，但网络抖动 / 云端 404 抖一下还能再试
+      const box = el('div', 'batch-item-error');
+      box.append(el('span', 'batch-item-media-note',
+        '无法播放：素材未上传到云端，或视频是 H.265 编码（浏览器不支持）'));
+      const again = el('button', 'batch-item-play', '▶');
+      again.type = 'button';
+      again.title = '重试播放';
+      again.addEventListener('click', () => {
+        media.classList.remove('is-error');
+        playItemCard(media, tid, name);
+      });
+      box.append(again);
+      media.replaceChildren(box);
+    });
+    video.src = `/api/templates/${encodeURIComponent(tid)}/preview`;
+    media.replaceChildren(video);
+    const promise = video.play();
+    if (promise && typeof promise.catch === 'function') promise.catch(() => { /* 自动播放被拦：控件一直在，手动点即可 */ });
+  }
+
+  function itemCard(item) {
     const state = txt(item.state) || 'pending';
-    const row = el('div', 'batch-record');
-    const nameCell = el('div', 'batch-record-name');
-    nameCell.append(el('b', null, txt(item.name) || txt(item.template_id) || '未命名场景'), el('small', null, txt(item.template_id)));
-    const stateCell = el('div', 'batch-record-state');
-    stateCell.append(el('span', `status ${itemStateClass(state)}`, ITEM_STATE_TEXT[state] || state));
-    const infoCell = el('div', 'batch-record-info');
+    const tid = txt(item.template_id);
+    const name = txt(item.name) || tid || '未命名场景';
+    const card = el('article', 'batch-item-card');
+    card.dataset.state = state;
+
+    const media = el('div', 'batch-item-media');
+    if (tid) {
+      const play = el('button', 'batch-item-play', '▶');
+      play.type = 'button';
+      play.title = `预览 ${name}`;
+      play.setAttribute('aria-label', `预览 ${name}`);
+      play.addEventListener('click', () => playItemCard(media, tid, name));
+      media.append(play);
+    } else {
+      media.append(el('span', 'batch-item-media-note', '无素材编号'));
+    }
+
+    const body = el('div', 'batch-item-body');
+    const title = el('div', 'batch-item-title');
+    title.append(el('b', null, name), el('small', null, tid || '—'));
+    const tags = el('div', 'batch-item-tags');
+    tags.append(el('span', `status ${itemStateClass(state)}`, ITEM_STATE_TEXT[state] || state));
+    // 一行只说一件事：错误 / 归档提醒 / 任务号，放不下就省略，悬停看全文
     const info = txt(item.error) || txt(item.archive_warning) || (item.job_id ? `任务 ${txt(item.job_id)}` : '');
-    if (info) infoCell.append(el('small', null, info));
-    // verify_warn：模型实际输出偏离预期（时长不符/文件过小）的质量提示。
-    // 它是提示不是失败 —— 状态徽标仍然是 done，颜色用 --amber。
+    if (info) {
+      const line = el('small', 'batch-item-info', info);
+      line.title = info;
+      tags.append(line);
+    }
+    // verify_warn：模型实际输出偏离预期（时长不符/文件过小）的质量提示，是提示不是失败
     const warn = txt(item.verify_warn);
-    if (warn) infoCell.append(el('small', 'batch-verify-warn', `质量提示：${warn}`));
-    if (!infoCell.childNodes.length) infoCell.append(el('small', null, ''));
-    const actions = el('div', 'record-actions');
-    // items 契约里没有 download_url；done 条目按历史分组同一套路径拼（/api/jobs/{job}/download/{template_id}），
-    // 后端若以后直接返回 download_url，这里优先用返回值。
-    const downloadUrl = txt(item.download_url) || (state === 'done' && txt(item.job_id) && txt(item.template_id)
-      ? `/api/jobs/${encodeURIComponent(txt(item.job_id))}/download/${encodeURIComponent(txt(item.template_id))}`
+    if (warn) {
+      const line = el('small', 'batch-item-info batch-verify-warn', `质量提示：${warn}`);
+      line.title = warn;
+      tags.append(line);
+    }
+    body.append(title, tags);
+
+    const actions = el('div', 'batch-item-actions');
+    // items 契约里没有 download_url；done 条目按历史分组同一套路径拼，后端若以后直接返回就优先用。
+    const downloadUrl = txt(item.download_url) || (state === 'done' && txt(item.job_id) && tid
+      ? `/api/jobs/${encodeURIComponent(txt(item.job_id))}/download/${encodeURIComponent(tid)}`
       : '');
     if (downloadUrl) {
-      const link = el('a', 'link-btn', '下载');
+      const link = el('a', 'link-btn btn-sm', '下载');
       link.href = downloadUrl;
       actions.append(link);
     }
     if (txt(item.job_id)) {
-      const btn = el('button', 'quiet', '任务详情');
+      const btn = el('button', 'quiet btn-sm', '任务详情');
       btn.type = 'button';
       btn.addEventListener('click', () => openJobDetail(txt(item.job_id)));
       actions.append(btn);
     }
-    if (!actions.childNodes.length) actions.append(el('span', 'muted', '—'));
-    row.append(nameCell, stateCell, infoCell, actions);
-    return row;
+    if (!actions.childNodes.length) actions.append(el('span', 'muted batch-item-none', '—'));
+
+    card.append(media, body, actions);
+    return card;
   }
 
   /* ---------- 批次详情与轮询 ---------- */
@@ -1492,6 +1582,7 @@
   function resetItemsView() {
     b.itemFilter = 'all';
     b.itemLimit = ITEM_PAGE;
+    b.promptOpen = false;     // 换批次时提示词回到折叠态
     if ($('batch-item-filter')) $('batch-item-filter').value = 'all';
   }
   function newBatch() {

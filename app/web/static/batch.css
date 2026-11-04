@@ -173,52 +173,80 @@
   .batch-preview{gap:6px}
 }
 
-/* ---------- 锁定摘要 ---------- */
-/* 定妆图一格放大成竖图卡：minmax 拉宽到 260px 保证缩略图有地方放 */
-.batch-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
-.batch-summary-grid .batch-summary-image{grid-column:span 1;min-width:200px}
-.batch-summary-cell{min-width:0;padding:6px 10px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
-.batch-summary-cell small{display:block;font-size:11px;color:var(--muted)}
-.batch-summary-cell b{display:block;margin-top:2px;font-size:12.5px;font-weight:700;overflow-wrap:anywhere}
+/* ---------- 锁定摘要：收成一条横条，不再一格一格铺满整行 ---------- */
+.batch-sum-bar{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-sum-thumb{flex:none;display:block;width:48px;height:48px;border-radius:6px;overflow:hidden;border:1px solid var(--line);line-height:0}
+.batch-sum-thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.batch-sum-chips{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 16px;min-width:0;font-size:12.5px}
+.batch-sum-chip{display:flex;align-items:baseline;gap:5px;min-width:0}
+.batch-sum-chip small{flex:none;font-size:11px;color:var(--muted)}
+.batch-sum-chip b{min-width:0;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34ch}
 .batch-summary-hint{font-size:12px;margin:8px 0 0}
-.batch-image-link{display:block;margin-top:3px;line-height:0}
-.batch-image-thumb{width:100%;max-width:110px;max-height:120px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
-/* 提示词块：完整展示，编辑时换成 textarea */
-.batch-prompt-block{margin-top:8px;padding:10px 12px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
-.batch-prompt-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between}
+
+/* 提示词块：默认折叠两行，点「展开」看全文；编辑时换成 textarea */
+.batch-prompt-block{margin-top:8px;padding:8px 10px;border-radius:6px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-prompt-head{display:flex;align-items:center;gap:10px;justify-content:space-between}
 .batch-prompt-head small{font-size:11px;color:var(--muted)}
-.batch-prompt-text{margin:8px 0 0;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit}
+.batch-prompt-tools{display:flex;flex:none;align-items:center;gap:6px}
+.batch-prompt-text{margin:6px 0 0;font-size:12.5px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit}
+.batch-prompt-text.is-clamped{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .batch-prompt-edit-btn{flex:none}
-.batch-prompt-edit{width:100%;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:13px;line-height:1.6;resize:vertical;min-height:140px;background:var(--paper);color:inherit;box-sizing:border-box}
+.batch-prompt-edit{width:100%;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:12.5px;line-height:1.6;resize:vertical;min-height:110px;background:var(--paper);color:inherit;box-sizing:border-box}
 .batch-prompt-edit:focus{outline:2px solid color-mix(in srgb,var(--blue) 35%,transparent);border-color:var(--blue)}
-.batch-prompt-actions{display:flex;align-items:center;gap:10px;margin-top:8px}
+.batch-prompt-actions{display:flex;align-items:center;gap:8px;margin-top:8px}
 .batch-prompt-count{margin-left:auto;font-size:12px}
 
-/* ---------- 生产区 ---------- */
-.batch-counters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
-.batch-progress-line{margin-top:12px}
-.batch-progress-line .progress{margin-top:6px}
-.batch-progress-line p{font-size:12px;margin:6px 0 0}
-.batch-produce-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
-.batch-produce-btn{min-height:50px;font-size:14px;line-height:1.3}
+/* ---------- 生产区：计数 + 进度 + 按钮挤成一行 ---------- */
+.batch-produce-bar{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,460px);gap:14px;align-items:center;padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-produce-main{min-width:0}
+.batch-counters{display:flex;align-items:baseline;gap:20px}
+.batch-counters .stat{padding:0;border:0}
+.batch-counters .stat b{font-size:17px;line-height:1.2}
+.batch-counters .stat small{font-size:11px}
+.batch-progress-line{margin-top:8px}
+.batch-progress-line .progress{margin-top:4px}
+.batch-progress-line p{font-size:11.5px;margin:5px 0 0}
+.batch-produce-actions{display:flex;gap:8px;margin:0}
+.batch-produce-btn{flex:1 1 0;min-height:40px;padding:6px 10px;font-size:13px;line-height:1.25}
 .batch-produce-btn:disabled{opacity:.55;cursor:not-allowed}
-.batch-retry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
-.batch-retry .quiet{min-height:38px;padding:6px 12px;font-size:12px}
+.batch-retry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+.batch-retry .quiet{min-height:32px;padding:4px 12px;font-size:12px}
 .batch-retry .muted{font-size:12px}
-.batch-items-head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin:18px 0 4px}
-.batch-items-head h3{margin:0;font-size:15px}
+.batch-items-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:12px 0 6px}
+.batch-items-head h3{margin:0;font-size:14px}
 .batch-filter-field{margin:0;flex:none;font-size:12px}
-.batch-filter-field select{min-height:36px}
-.batch-item-list{display:grid}
-.batch-record{display:grid;grid-template-columns:minmax(0,1.2fr) 88px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:13px}
-.batch-record-name b{display:block;font-size:13px;overflow-wrap:anywhere}
-.batch-record-name small{display:block;font-size:11px;color:var(--muted)}
-.batch-record-info small{display:block;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
-.batch-record .record-actions{display:flex;gap:6px;justify-content:flex-end}
+.batch-filter-field select{min-height:32px}
+
+/* ---------- 清单条目：宫格视频卡 ---------- */
+.batch-item-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.batch-item-list > .empty{grid-column:1/-1}
+.batch-item-card{display:flex;flex-direction:column;min-width:0;border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;background:var(--paper);overflow:hidden}
+.batch-item-card[data-state="done"]{border-left-color:var(--green)}
+.batch-item-card[data-state="failed"]{border-left-color:var(--red)}
+.batch-item-card[data-state="producing"]{border-left-color:var(--blue)}
+.batch-item-media{position:relative;display:grid;place-items:center;aspect-ratio:16/10;background:color-mix(in srgb,var(--bg) 65%,white);border-bottom:1px solid var(--line)}
+.batch-item-media.is-playing{background:#000}
+.batch-item-play{display:grid;place-items:center;width:32px;height:32px;padding:0;border:1px solid var(--line-strong);border-radius:50%;background:var(--paper);color:var(--blue);font-size:11px;line-height:1;cursor:pointer}
+.batch-item-play:hover{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 8%,white)}
+.batch-item-video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
+.batch-item-media-note{padding:0 10px;font-size:11px;line-height:1.5;color:var(--muted);text-align:center}
+.batch-item-error{display:flex;flex-direction:column;align-items:center;gap:6px;padding:0 8px}
+.batch-item-media.is-error .batch-item-media-note{color:var(--amber)}
+.batch-item-body{display:flex;flex-direction:column;gap:3px;min-width:0;padding:7px 8px}
+.batch-item-title{display:flex;align-items:baseline;gap:5px;min-width:0}
+.batch-item-title b{min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-item-title small{flex:none;font-size:11px;color:var(--muted)}
+.batch-item-tags{display:flex;flex-wrap:wrap;align-items:center;gap:4px;min-width:0}
+.batch-item-tags .status{height:18px;padding:0 5px;font-size:10.5px}
+.batch-item-info{flex:1 1 100%;min-width:0;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-item-info.batch-verify-warn{color:var(--amber)}
+.batch-item-actions{display:flex;align-items:center;gap:6px;margin-top:auto;padding:5px 8px;border-top:1px solid var(--line);font-size:11.5px}
+.batch-item-actions .link-btn,.batch-item-actions .quiet{min-height:26px;padding:2px 8px;font-size:11.5px}
+.batch-item-none{font-size:11.5px}
 .batch-more{margin-top:6px}
 .batch-more .quiet{min-height:28px;padding:3px 10px;font-size:11px}
 /* done 条目的质量提示（verify_warn）：是提示，不是失败，状态徽标仍是 done */
-.batch-record-info .batch-verify-warn,.history-record-info .history-verify-warn{color:var(--amber)}
+.history-record-info .history-verify-warn{color:var(--amber)}
 
 /* ---------- 条目 / 分组用状态徽标 ---------- */
 .status.batch-draft{background:color-mix(in srgb,var(--muted) 12%,white);color:var(--muted)}
@@ -307,7 +335,10 @@
   .tag-input-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .batch-card{grid-template-columns:minmax(0,1fr)}
   .batch-card-side{justify-content:flex-end}
-  .batch-produce-actions{grid-template-columns:minmax(0,1fr)}
+  .batch-produce-bar{grid-template-columns:minmax(0,1fr);gap:10px}
+  .batch-produce-actions{flex-wrap:wrap}
+  .batch-produce-btn{flex:1 1 45%}
+  .batch-item-list{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
   .batch-drop{min-height:170px}
   /* 手机上「锁定清单」是主操作，独占一行、点得准 */
   .batch-cand-foot{display:grid;gap:8px}
@@ -330,11 +361,11 @@
   /* 手机上标题和右上角按钮挤在一行会把按钮压成竖排，改成上下堆 */
   #batch-view .section-head{flex-direction:column;align-items:stretch;gap:10px}
   #batch-view .section-head .top-actions{justify-content:flex-end}
-  .batch-record,.history-record{grid-template-columns:minmax(0,1fr) auto}
-  .batch-record-name,.history-record-name{grid-column:1}
-  .batch-record-state,.history-record-state{grid-column:2;justify-self:end}
-  .batch-record-info,.history-record-info{grid-column:1}
-  .batch-record .record-actions,.history-record .record-actions{grid-column:2;justify-self:end}
+  .history-record{grid-template-columns:minmax(0,1fr) auto}
+  .history-record-name{grid-column:1}
+  .history-record-state{grid-column:2;justify-self:end}
+  .history-record-info{grid-column:1}
+  .history-record .record-actions{grid-column:2;justify-self:end}
   .batch-items-head{flex-direction:column;align-items:stretch}
   .history-group-head{padding:12px}
   .history-group-body{padding:0 12px 12px}
