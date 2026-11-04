@@ -168,10 +168,12 @@ def status_counts(records) -> dict:
     """按 status 汇总记录数。
 
     非成功终态必须分列：下游只看 success/failed 时，「5 成功 + 5 无效」会被
-    报成「全部完成」。running 也单独计数 —— 它表示还在等云端出片（含等待超时）。
+    报成「全部完成」。running 也单独计数 —— 它表示还在等云端出片；
+    等待超时是独立终态 timeout，不混进 running。
     """
     counts = {"total": 0, "success": 0, "failed": 0, "invalid": 0,
-              "expired": 0, "canceled": 0, "skipped": 0, "running": 0, "unknown": 0}
+              "expired": 0, "canceled": 0, "skipped": 0, "running": 0,
+              "unknown": 0, "timeout": 0}
     for record in records:
         counts["total"] += 1
         status = str((record or {}).get("status") or "")
@@ -295,8 +297,25 @@ class BatchRunner:
 
     def __init__(self, spec: BatchSpec, on_event=None, log=None):
         self.spec = spec
-        self.on_event = on_event or (lambda evt: None)
-        self.log = log or (lambda msg: None)
+        # P2 回调隔离：jobs._on_event / _append_log 若抛 OSError（盘满、路径失效），
+        # 会被上层的兜底 except 误判成「该条 failed」，甚至打断整批。回调异常只吞掉。
+        event_cb = on_event or (lambda evt: None)
+        log_cb = log or (lambda msg: None)
+
+        def _safe_event(evt):
+            try:
+                event_cb(evt)
+            except Exception:  # noqa: BLE001 - 回调不能影响主流程
+                pass
+
+        def _safe_log(msg):
+            try:
+                log_cb(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.on_event = _safe_event
+        self.log = _safe_log
         self.pause_event = threading.Event()
         self.pause_event.set()          # set = 运行中
         self.stop_event = threading.Event()
@@ -532,7 +551,9 @@ class BatchRunner:
             rec["stopped"] = True
             rec["error"] = str(exc)
         except WaitTimeout as exc:
-            rec["status"] = "running"
+            # 终态 timeout（P1-19）：等待超时≠还在跑，云端大概率已出片并计费。
+            # 保留 task_id 供控制台核对，纳入重试白名单；不再落 running 永久卡死。
+            rec["status"] = "timeout"
             rec["error"] = str(exc)
         except TaskExpired as exc:
             rec["status"] = "expired"

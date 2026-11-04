@@ -682,6 +682,10 @@ def _request_json(method: str, url: str, api_key: str, payload: dict | None = No
         data_obj = json.loads(raw)
     except json.JSONDecodeError:
         raise WanError("server", f"响应不是 JSON：{raw[:300]}", http_status=status) from None
+    # 服务端异常时可能回 JSON 数组/null：统一按 server 错误处理，
+    # 不能让 AttributeError 绕过 classify_error 的重试分类。
+    if not isinstance(data_obj, dict):
+        raise WanError("server", f"响应 JSON 结构异常：{raw[:300]}", http_status=status) from None
     if isinstance(data_obj.get("code"), str) and data_obj.get("code") and not data_obj.get("output"):
         # 官方错误体：{"code","message","request_id"}
         raise _error_from_body(raw, status)

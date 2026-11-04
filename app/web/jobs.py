@@ -70,7 +70,21 @@ def clean_style_no(value) -> str:
 
 # 重试时认的非成功终态：skipped 是「被取消/批量放弃」的条目，重跑一次才有意义；
 # running 不算——它表示还在等云端出片（含等待超时），此时重试会和原任务抢同一份费用。
-_RETRYABLE_RECORD_STATES = frozenset({"failed", "invalid", "expired", "canceled", "skipped"})
+# 可重试的记录状态。unknown/running 不可重试：云端可能已建任务，重试会二次计费。
+# timeout（等待超时）可重试：云端大概率已出片，但重试是用户核对后的显式选择。
+_RETRYABLE_RECORD_STATES = frozenset({"failed", "invalid", "expired", "canceled", "skipped", "timeout"})
+
+# 统计口径里的「失败侧」：非成功终态全部计入，保证 items = success + failed + unfinished。
+# unknown（提交结果未知/停止等待）云端可能已建任务并计费，必须算失败侧而非静默消失；
+# skipped 与 timeout 一样在重试白名单里，同属失败侧。
+_FAILED_RECORD_STATES = frozenset(
+    {"failed", "invalid", "expired", "canceled", "unknown", "timeout", "skipped"})
+
+# P1-5：金额相关字段只下发给管理员。普通用户可反推 wan.price_per_second，
+# 违反硬约束 5（金额统一走 /api/admin/usage 与 /api/admin/accounts/<owner>/work）。
+_MONEY_KEYS = frozenset({"billable_seconds", "estimated_cost", "cost",
+                         "total_billable_seconds", "total_cost",
+                         "unit_price", "price_source", "amount"})
 
 _SECRET_PATTERNS = [
     (re.compile(r"sk-[A-Za-z0-9._-]{12,}"), "[已隐藏密钥]"),
@@ -160,7 +174,8 @@ class JobManager:
                templates: list[dict], prompt_id: str, resolution: str = "480P",
                duration: int = 5, prompt_body: str | None = None, *,
                batch_ref: str = "", limit_items: int | None = None,
-               tags: dict | None = None, style_no: str = "") -> dict:
+               tags: dict | None = None, style_no: str = "",
+               admin: bool = False) -> dict:
         """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。
 
         tags：6 栏位标签（上衣必填）；style_no：v0.9.0 旧字段，读老批次时兜底，
@@ -215,7 +230,7 @@ class JobManager:
             self.jobs[job_id] = job
             self._save(job)
             self.changed.notify_all()
-        return self.public(job)
+        return self.public(job, admin)
 
     @staticmethod
     def _lane(job: dict) -> str:
@@ -477,7 +492,7 @@ class JobManager:
             self._save(job)
             self.changed.notify_all()
 
-    def retry_failed(self, job_id: str, owner: str) -> dict:
+    def retry_failed(self, job_id: str, owner: str, admin: bool = False) -> dict:
         with self.lock:
             source = self.jobs.get(job_id)
             if not source:
@@ -489,7 +504,7 @@ class JobManager:
             selected = [dict(t) for t in source.get("templates", []) if str(t.get("id")) in failed_ids]
             if not selected:
                 if any(str(r.get("status")) == "running" for r in source.get("records", [])):
-                    raise ValueError("还有条目在等云端出片（或等待超时），请稍后再重试")
+                    raise ValueError("还有条目在等云端出片，请稍后再重试")
                 unknown = sum(1 for r in source.get("records", []) if str(r.get("status")) == "unknown")
                 if unknown:
                     raise ValueError(
@@ -500,9 +515,13 @@ class JobManager:
             image_path = Path(source["image_path"])
             if not image_path.is_file():
                 raise ValueError("原服装图片已不存在，请重新上传后新建任务")
-            return self.create(owner, image_path, source.get("image_name", "服装图"), selected,
+            # P1-20：用量与结果归属**原 owner**（管理员重试他人任务不记账到自己头上），
+            # batch_ref 透传，批次 history 回查不断链。权限判断留在 server 层。
+            return self.create(str(source.get("owner") or owner), image_path, source.get("image_name", "服装图"), selected,
                                source["prompt_id"], source["resolution"], source["duration"], source.get("prompt"),
-                               tags=dict(source.get("tags") or {}), style_no=str(source.get("style_no") or ""))
+                               batch_ref=str(source.get("batch_ref") or ""),
+                               tags=dict(source.get("tags") or {}), style_no=str(source.get("style_no") or ""),
+                               admin=admin)
 
     def cancel(self, job_id: str) -> bool:
         with self.changed:
@@ -529,10 +548,10 @@ class JobManager:
             self.changed.notify_all()
             return True
 
-    def get(self, job_id: str) -> dict | None:
+    def get(self, job_id: str, admin: bool = False) -> dict | None:
         with self.lock:
             job = self.jobs.get(job_id)
-            return self.public(job) if job else None
+            return self.public(job, admin) if job else None
 
     def list_for(self, username: str, admin: bool = False, owner: str = "") -> list[dict]:
         """owner 只对管理员生效：按账户筛选，不传则沿用原口径（mine / all）。"""
@@ -542,7 +561,7 @@ class JobManager:
                      if (admin or j.get("owner") == username)
                      and (not filter_owner or j.get("owner") == filter_owner)]
             items.sort(key=lambda j: j.get("created_at", 0), reverse=True)
-            return [self.public(j) for j in items]
+            return [self.public(j, admin) for j in items]
 
     def _record_cost(self, rec: dict, job: dict) -> tuple[float, str]:
         """单条记录的费用：优先用生成时落下的金额，否则按当前单价回算。
@@ -577,7 +596,8 @@ class JobManager:
         """
         # unknown = 提交结果未知（云端可能已建任务并计费），必须计入失败侧，
         # 否则账上既不算成功也不算失败，会从统计里静默消失。
-        failed_states = {"failed", "invalid", "expired", "canceled", "unknown"}
+        # 口径统一走 _FAILED_RECORD_STATES，与 work_for / 重试白名单对齐。
+        failed_states = _FAILED_RECORD_STATES
 
         def blank(name: str, role: str = "user", enabled: bool = True) -> dict:
             return {"owner": name, "role": role, "enabled": enabled,
@@ -690,9 +710,11 @@ class JobManager:
             status = row.get("status")
             if status == "success":
                 success += 1
-            elif status in {"failed", "invalid", "expired", "canceled"}:
+            elif status in _FAILED_RECORD_STATES:
                 failed += 1
-            elif status == "running":
+            else:
+                # 剩余的只有 running：用 else 兜底而不是白名单，保证
+                # items = success + failed + unfinished 恒成立（新状态不会漏计）。
                 unfinished += 1
             try:
                 billable += float(row.get("billable_seconds") or 0)
@@ -716,7 +738,7 @@ class JobManager:
             "total_cost": round(cost, 2),
         }
 
-    def public(self, job: dict) -> dict:
+    def public(self, job: dict, admin: bool = False) -> dict:
         with self.lock:
             safe = {k: job.get(k) for k in (
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
@@ -729,14 +751,17 @@ class JobManager:
             safe["log_tail"] = [_redact(line) for line in (safe.get("log_tail") or [])]
             summary = job.get("summary")
             if isinstance(summary, dict):
-                safe["summary"] = {k: v for k, v in summary.items() if k != "out_dir"}
+                safe["summary"] = {k: v for k, v in summary.items()
+                                   if k != "out_dir" and (admin or k not in _MONEY_KEYS)}
             else:
                 safe["summary"] = None
             safe["records"] = []
+            record_keys = ("id", "status", "seconds", "error", "task_id", "request_id",
+                           "billable_seconds", "estimated_cost", "verify", "cos_key")
+            if not admin:
+                record_keys = tuple(k for k in record_keys if k not in _MONEY_KEYS)
             for rec in job.get("records", []):
-                public_record = {k: rec.get(k) for k in (
-                    "id", "status", "seconds", "error", "task_id", "request_id",
-                    "billable_seconds", "estimated_cost", "verify", "cos_key") if k in rec}
+                public_record = {k: rec.get(k) for k in record_keys if k in rec}
                 if public_record.get("error"):
                     public_record["error"] = _redact(public_record["error"])
                 safe["records"].append(public_record)

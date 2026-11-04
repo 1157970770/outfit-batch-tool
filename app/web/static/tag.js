@@ -425,19 +425,10 @@
       box.setAttribute('aria-label', `选择 ${video.id}`);
       box.addEventListener('click', (event) => event.stopPropagation());
       box.addEventListener('change', () => {
-        const before = state.selected.size;
-        if (box.checked) state.selected.add(video.id); else state.selected.delete(video.id);
+        const next = new Set(state.selected);
+        if (box.checked) next.add(video.id); else next.delete(video.id);
+        setSelection(next);
         row.classList.toggle('is-picked', box.checked);
-        // 单条 → 批量时清空勾选，避免把预览那条的标签带到别人身上
-        if (before <= 1 && state.selected.size > 1) state.pending = new Set();
-        if (state.selected.size === 1 && before !== 1) {
-          const only = state.byId.get([...state.selected][0]);
-          state.pending = new Set(only ? only.tags : []);
-        }
-        if (!state.selected.size) {
-          const current = state.byId.get(state.previewId);
-          state.pending = new Set(current ? current.tags : []);
-        }
         renderBulk();
         renderEditor();
       });
@@ -551,6 +542,31 @@
     const count = state.selected.size;
     $('tag-bulk').classList.toggle('hidden', count === 0);
     $('tag-bulk-count').textContent = `已选 ${count} 条`;
+  }
+
+  let lastMulti = false;
+
+  // P1-23：所有改变勾选的入口（行勾选框 / 全选本页 / 反选 / 全选全部 / 清空）
+  // 统一走这里重置 pending：0 条取预览行、1 条取该行、≥2 条清空。
+  // 之前只有行勾选框会重置，「点开一条 → 全选全部 → 保存」会把那条的标签追加给全库。
+  function setSelection(nextIds) {
+    state.selected = nextIds instanceof Set ? nextIds : new Set(nextIds);
+    const size = state.selected.size;
+    if (size === 0) {
+      const current = state.byId.get(state.previewId);
+      state.pending = new Set(current ? current.tags : []);
+    } else if (size === 1) {
+      const only = state.byId.get([...state.selected][0]);
+      state.pending = new Set(only ? only.tags : []);
+    } else {
+      state.pending = new Set();
+    }
+    // mode 只在「单条 ↔ 批量」边界切换时改，不覆盖用户在 select 里的手动选择
+    const multi = size > 1;
+    if (multi !== lastMulti) {
+      state.mode = multi ? 'add' : 'replace';
+      lastMulti = multi;
+    }
   }
 
   function editorTargets() {
@@ -735,6 +751,7 @@
     // 单条编辑时默认带上它现有的标签；批量时清空，避免误覆盖
     state.pending = new Set(state.selected.size ? [] : video.tags);
     state.mode = state.selected.size ? 'add' : 'replace';
+    lastMulti = state.selected.size > 1;
     // 不重绘整表：长列表里点一行就跳回顶部很难用
     renderEditor();
     // 光标自动落到打分输入框并全选原值：选中即打分，不用再特意点一下输入框
@@ -1237,6 +1254,15 @@
         renderUploadList();
         resolve();
       };
+      // P1-24：连接挂起时 onload/onerror 都不会触发，Promise 永不 resolve，
+      // busy 永久卡死、弹窗关不掉。2 分钟无响应按超时失败处理。
+      xhr.timeout = 120000;
+      xhr.ontimeout = () => {
+        item.status = '失败';
+        item.error = '上传超时（2 分钟无响应），可重试';
+        renderUploadList();
+        resolve();
+      };
       xhr.send(item.file);
     });
   }
@@ -1245,21 +1271,27 @@
     if (state.upload.busy) return;
     const tags = [...state.upload.tags];
     if (!tags.length) { toast('请至少选择一个标签'); return; }
-    const queue = state.upload.items.filter(item => item.status === '等待');
+    // 失败项（含超时）可以再次点「开始上传」重试；队列在循环前取快照，不会本轮内自动重试
+    const queue = state.upload.items.filter(item => item.status === '等待' || item.status === '失败');
     if (!queue.length) return;
     state.upload.busy = true;
     $('upload-error').classList.add('hidden');
     renderUploadList();
     let ok = 0;
     let failed = 0;
-    for (const item of queue) {
-      item.status = '上传中';
+    try {
+      for (const item of queue) {
+        item.status = '上传中';
+        item.error = '';
+        renderUploadList();
+        await uploadOne(item, tags);
+        if (item.status === '完成') ok += 1; else failed += 1;
+      }
+    } finally {
+      // 无条件清 busy：上传中任何异常都不能把弹窗永久锁死（P1-24）
+      state.upload.busy = false;
       renderUploadList();
-      await uploadOne(item, tags);
-      if (item.status === '完成') ok += 1; else failed += 1;
     }
-    state.upload.busy = false;
-    renderUploadList();
     const error = $('upload-error');
     if (failed) {
       error.textContent = `${failed} 个失败：${state.upload.items.filter(i => i.status === '失败')
@@ -1336,21 +1368,23 @@
     renderAll();
   });
   $('tag-select-page').addEventListener('click', () => {
-    pageIds().forEach(id => state.selected.add(id));
+    setSelection(new Set([...state.selected, ...pageIds()]));
     renderAll();
   });
   $('tag-invert').addEventListener('click', () => {
+    const next = new Set(state.selected);
     pageIds().forEach(id => {
-      if (state.selected.has(id)) state.selected.delete(id); else state.selected.add(id);
+      if (next.has(id)) next.delete(id); else next.add(id);
     });
+    setSelection(next);
     renderAll();
   });
   $('tag-select-all').addEventListener('click', () => {
-    state.matched.forEach(video => state.selected.add(video.id));
+    setSelection(new Set(state.matched.map(video => video.id)));
     renderAll();
   });
   $('tag-clear-sel').addEventListener('click', () => {
-    state.selected.clear();
+    setSelection(new Set());
     renderAll();
   });
   $('tag-mode').addEventListener('change', (event) => {

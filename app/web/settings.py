@@ -70,12 +70,16 @@ class WebSettings:
 
     @property
     def small_lane_items(self) -> int:
-        """条数 ≤ 该值的 job 走快速通道，不跟大批量抢 job 槽位与在飞名额。"""
+        """条数 ≤ 该值的 job 走快速通道，不跟大批量抢 job 槽位与在飞名额。
+
+        上限钳死 3：配大它就静默突破「快速通道 ≤3 条」的契约
+        （12 条的批次被当小任务插队，大批量全饿死）。要调并发改 max_active_small_jobs。
+        """
         try:
             value = int(self.web.get("small_lane_items", 3))
         except (TypeError, ValueError):
             value = 3
-        return max(1, min(20, value))
+        return max(1, min(3, value))
 
     @property
     def max_active_small_jobs(self) -> int:

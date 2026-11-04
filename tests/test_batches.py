@@ -337,9 +337,16 @@ def main() -> int:
         assert payload["ready_count"] == READY_COUNT, payload["ready_count"]
         assert not next(item for item in payload["items"] if item["id"] == "051")["ready"]
         estimate = payload["cost_estimate"]
-        assert estimate["unit_price"] == UNIT_PRICE and estimate["price_source"] == "default", estimate
+        # P1-5：普通用户的估算不带单价与金额；档位 count 保留（前端生产按钮靠它）
+        assert "unit_price" not in estimate and "amount" not in estimate and "price_source" not in estimate, estimate
         assert [option["count"] for option in estimate["options"]] == [20, 50, 100], estimate
-        assert abs(estimate["amount"] - 51 * (TEMPLATE_SECONDS + 7) * UNIT_PRICE) < 0.05, estimate
+        assert all("amount" not in option for option in estimate["options"]), estimate
+        code, _, admin_cands = call(admin, base, f"/api/batches/{batch_id}/candidates", "POST",
+                                    {"tag_filters": {}, "limit": 1000})
+        assert code == 200, admin_cands
+        admin_estimate = body(admin_cands)["cost_estimate"]
+        assert admin_estimate["unit_price"] == UNIT_PRICE and admin_estimate["price_source"] == "default", admin_estimate
+        assert abs(admin_estimate["amount"] - 51 * (TEMPLATE_SECONDS + 7) * UNIT_PRICE) < 0.05, admin_estimate
         code, _, bad = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
                             {"tag_filters": {"景别": ["不存在的标签"]}})
         assert code == 400, (code, bad)
@@ -363,8 +370,7 @@ def main() -> int:
         code, _, locked_detail = call(alice, base, f"/api/batches/{batch_id}")
         locked_estimate = body(locked_detail)["batch"]["cost_estimate"]
         assert locked_estimate["count"] == READY_COUNT, locked_estimate
-        assert abs(locked_estimate["amount"]
-                   - READY_COUNT * (TEMPLATE_SECONDS + 7) * UNIT_PRICE) < 0.05, locked_estimate
+        assert "amount" not in locked_estimate, locked_estimate   # P1-5：alice 非 admin 不回金额
         code, _, swap = call(alice, base, f"/api/batches/{batch_id}/image", "POST", {"upload_id": upload_id})
         assert code == 409 and "新开批次" in body(swap)["error"], swap
         code, _, noconfirm = call(alice, base, f"/api/batches/{batch_id}/lock", "POST",
@@ -420,9 +426,9 @@ def main() -> int:
         assert produced["job"]["batch_ref"] == batch_id, produced["job"]
         assert produced["job"]["duration"] == 7, produced["job"]["duration"]   # 输出固定 7 秒
         cost = produced["cost_estimate"]
-        assert abs(cost["amount"] - 20 * (TEMPLATE_SECONDS + 7) * UNIT_PRICE) < 0.05, cost
+        assert "amount" not in cost and "unit_price" not in cost, cost   # P1-5：普通用户不回金额
         job_ids = [produced["job"]["id"]]
-        print(f"  ✓ 并发两次 /produce：一次 201（取 20 条，duration=7，预估 {cost['amount']} 元），一次 409")
+        print(f"  ✓ 并发两次 /produce：一次 201（取 20 条，duration=7），一次 409；普通用户响应无金额")
 
         run1_job = wait_job(alice, base, job_ids[0])
         assert run1_job["status"] == "succeeded", run1_job
@@ -491,10 +497,14 @@ def main() -> int:
         assert patched_items[warn_tid]["state"] == "done", "质量提示不能改变条目状态"
         # 详情要能直接给「重开已锁定批次」的金额，不必再拉候选
         detail_estimate = body(filtered)["batch"]["cost_estimate"]
-        assert detail_estimate["unit_price"] == UNIT_PRICE, detail_estimate
+        assert "unit_price" not in detail_estimate, detail_estimate     # P1-5：alice 非 admin
         assert detail_estimate["count"] == 0, detail_estimate          # 已无待生产
         assert [option["count"] for option in detail_estimate["options"]] == [20, 50, 100]
-        assert detail_estimate["options"][0]["amount"] is not None, detail_estimate
+        assert all(option.get("amount") is None for option in detail_estimate["options"]), detail_estimate
+        code, _, admin_detail = call(admin, base, f"/api/batches/{batch_id}")
+        admin_estimate = body(admin_detail)["batch"]["cost_estimate"]
+        assert admin_estimate["unit_price"] == UNIT_PRICE, admin_estimate
+        assert admin_estimate["options"][0]["amount"] is not None, admin_estimate
         code, _, filtered = call(alice, base, f"/api/batches/{batch_id}?item_state=pending")
         assert code == 200 and body(filtered)["items"] == []
         code, _, invalid = call(alice, base, f"/api/batches/{batch_id}/produce", "POST", {"count": 30})

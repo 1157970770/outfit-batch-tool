@@ -35,11 +35,11 @@ python run_web.py
 | 文件 | 行数 | 职责 | 关键入口 |
 | --- | --- | --- | --- |
 | `app/web/cli.py` | 190 | 命令行：初始化、增删账号、自检、启动 | `main()` |
-| `app/web/server.py` | 1161 | 路由、鉴权、静态文件、CSV/ZIP/视频下载 | `WebApplication`、`make_handler`、`serve` |
-| `app/web/jobs.py` | 601 | 任务队列、调度、事件回写、用量统计 | `JobManager.create/_dispatch/_run_job` |
-| `app/web/batches.py` | 822 | 批次生命周期、候选筛选、锁定、多轮生产、历史分组 | `BatchManager.create/candidates/lock/produce` |
-| `app/web/templates.py` | 400 | 模板目录：标签工作簿 + 云端 manifest 交叉索引 | `TemplateCatalog` |
-| `app/web/settings.py` | 227 | 配置读取与上限裁剪、单价兜底 | `load_settings`、`WebSettings` |
+| `app/web/server.py` | 1696 | 路由、鉴权、静态文件、CSV/ZIP/视频下载 | `WebApplication`、`make_handler`、`serve` |
+| `app/web/jobs.py` | 800 | 任务队列、调度、事件回写、用量统计 | `JobManager.create/_dispatch/_run_job` |
+| `app/web/batches.py` | 959 | 批次生命周期、候选筛选、锁定、多轮生产、历史分组 | `BatchManager.create/candidates/lock/produce` |
+| `app/web/templates.py` | 557 | 模板目录：标签工作簿 + 云端 manifest 交叉索引 | `TemplateCatalog` |
+| `app/web/settings.py` | 234 | 配置读取与上限裁剪、单价兜底 | `load_settings`、`WebSettings` |
 | `app/web/auth.py` | 95 | 密码哈希、HMAC 会话、登录限流 | `SessionSigner`、`LoginLimiter` |
 | `app/web/__init__.py` | 2 | `WEB_VERSION` | — |
 
@@ -56,9 +56,9 @@ python run_web.py
 
 ### 3.1 鉴权
 
-- 登录 `POST /api/login` → 校验 scrypt 哈希 → `SessionSigner.issue()` 签 HMAC Cookie；
+- 登录 `POST /api/login` → 校验 PBKDF2-HMAC-SHA256 哈希（310,000 轮 + 随机盐）→ `SessionSigner.issue()` 签 HMAC Cookie；
 - 每个请求 `user_for_token()` 验签 + 查 `web.json` 里的 `version`（改密码后旧会话立即失效）；
-- 同一 IP 连续失败由 `LoginLimiter` 限制（默认 8 次 / 10 分钟）。
+- 登录失败限流是双桶：IP 桶 30 次 + 账号桶 8 次 / 10 分钟；未知账号也执行一次等价 PBKDF2，抹平时序差。
 
 ### 3.2 小批量试跑
 

@@ -37,6 +37,7 @@ REQUIRED = [
     "test_jobs_state",
     "test_billing",
     "test_web_hardening",
+    "test_batch5",
     "test_web_tags",
     "test_web",
     "test_web_tag_api",

@@ -372,7 +372,9 @@ def make_handler(app: WebApplication):
             return data
 
         def _host_ok(self):
-            host = self.headers.get("Host", "").split(":", 1)[0].strip("[]").lower()
+            # [::1]:8765 经 split(":",1) 会得到 "["，IPv6 字面量与 mDNS 名全站 421；
+            # urlsplit 的 hostname 才是可靠的取法。
+            host = (urllib.parse.urlsplit("//" + (self.headers.get("Host") or "")).hostname or "").lower()
             return host in allowed_hosts
 
         def _origin_ok(self):
@@ -490,7 +492,11 @@ def make_handler(app: WebApplication):
                 from app.web import tag_api
                 query = urllib.parse.parse_qs(parsed.query)
                 raw_limit = str(query.get("limit", ["100"])[0] or "")
-                limit = int(raw_limit) if raw_limit.isdigit() else 100
+                # isdigit 对 "²" 等上标也为真，int() 会炸；统一 try 解析
+                try:
+                    limit = int(raw_limit)
+                except ValueError:
+                    limit = 100
                 return self._tags(lambda: tag_api.versions(app, limit))
             if path.startswith("/api/uploads/"):
                 user = self._user()
@@ -503,7 +509,13 @@ def make_handler(app: WebApplication):
                     return
                 query = urllib.parse.parse_qs(parsed.query)
                 top = str(query.get("top", [""])[0] or "").strip()
-                return self._json({"ok": True, "top": top, "used": app.batches.usage.used(top)})
+                used = app.batches.usage.used(top)
+                if user.get("role") != "admin":
+                    # 硬约束边界（P2）：batch_no/batch_id 是他人批次的内部编号；
+                    # 普通用户只需知道「该模板对这个款号用过没有、什么时候用的」。
+                    used = {tid: {"at": (info or {}).get("at")}
+                            for tid, info in used.items() if isinstance(info, dict)}
+                return self._json({"ok": True, "top": top, "used": used})
             if path == "/api/batches":
                 user = self._user()
                 if not user:
@@ -682,7 +694,8 @@ def make_handler(app: WebApplication):
                 if not source:
                     return self._error("找不到该任务。", 404)
                 try:
-                    retry = app.jobs.retry_failed(job_id, user["username"])
+                    retry = app.jobs.retry_failed(job_id, user["username"],
+                                                  user.get("role") == "admin")
                     return self._json({"ok": True, "job": retry}, 201)
                 except ValueError as exc:
                     return self._error(exc, 409)
@@ -935,7 +948,8 @@ def make_handler(app: WebApplication):
                                       prompt_id, str(data.get("resolution") or "480P"),
                                       int(data.get("duration") or 5), str(data.get("prompt") or ""),
                                       tags=data.get("tags") if isinstance(data.get("tags"), dict) else None,
-                                      style_no=str(data.get("style_no") or ""))
+                                      style_no=str(data.get("style_no") or ""),
+                                      admin=(user.get("role") == "admin"))
                 return self._json({"ok": True, "job": job}, 201)
             except (ValueError, TemplateError) as exc:
                 return self._error(exc)
@@ -1226,6 +1240,14 @@ def make_handler(app: WebApplication):
             return self._send_account_csv(owner, data)
 
         def _send_account_csv(self, owner, data):
+            def _csv_safe(value):
+                # 模板名可来自普通用户上传的文件名：= + - @ 开头的单元格会被 Excel
+                # 当公式执行（DDE 下载、命令注入）。前置 ' 使其按文本处理。
+                text = str(value)
+                if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+                    return "'" + text
+                return text
+
             labels = {"success": "成功", "failed": "失败", "invalid": "无效",
                       "expired": "过期", "canceled": "已取消", "running": "进行中"}
             buffer = io.StringIO()
@@ -1237,16 +1259,16 @@ def make_handler(app: WebApplication):
                 created = float(item.get("created_at") or 0)
                 writer.writerow([
                     time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created)) if created else "",
-                    item.get("batch_no") or "",
-                    item.get("template_id") or "",
-                    item.get("template_name") or "",
-                    labels.get(str(item.get("status")), str(item.get("status") or "")),
+                    _csv_safe(item.get("batch_no") or ""),
+                    _csv_safe(item.get("template_id") or ""),
+                    _csv_safe(item.get("template_name") or ""),
+                    _csv_safe(labels.get(str(item.get("status")), str(item.get("status") or ""))),
                     item.get("billable_seconds") if item.get("billable_seconds") is not None else "",
                     item.get("estimated_cost") if item.get("estimated_cost") is not None else "",
-                    cost_labels.get(str(item.get("cost_source")), ""),
-                    item.get("resolution") or "",
+                    _csv_safe(cost_labels.get(str(item.get("cost_source")), "")),
+                    _csv_safe(item.get("resolution") or ""),
                     item.get("duration") if item.get("duration") is not None else "",
-                    item.get("job_id") or "",
+                    _csv_safe(item.get("job_id") or ""),
                 ])
             # BOM 让 Excel 直接认出 UTF-8，避免中文乱码
             raw = ("\ufeff" + buffer.getvalue()).encode("utf-8")
@@ -1326,7 +1348,7 @@ def make_handler(app: WebApplication):
             return self._json({"ok": True, "username": username})
 
         def _job_detail(self, job_id, user):
-            job = app.jobs.get(job_id)
+            job = app.jobs.get(job_id, user.get("role") == "admin")
             if not job:
                 return self._error("找不到该任务。", 404)
             if user.get("role") != "admin" and job.get("owner") != user.get("username"):
@@ -1334,7 +1356,7 @@ def make_handler(app: WebApplication):
             return self._json({"ok": True, "job": job})
 
         def _authorized_job(self, job_id, user):
-            job = app.jobs.get(job_id)
+            job = app.jobs.get(job_id, user.get("role") == "admin")
             if not job:
                 return None
             if user.get("role") != "admin" and job.get("owner") != user.get("username"):

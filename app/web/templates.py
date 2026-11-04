@@ -182,7 +182,10 @@ class TemplateCatalog:
 
     @staticmethod
     def _read_tag_dictionary(sheet) -> dict[str, str]:
-        header = [str(value or "").strip() for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
+        header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            raise TemplateError("标签字典是空表：请用 --export-tags 导出的模板填写")
+        header = [str(value or "").strip() for value in header_row]
         tag_col = {name: i for i, name in enumerate(header)}
         if "标签值" not in tag_col:
             raise TemplateError("标签字典缺少“标签值”列")
@@ -216,7 +219,10 @@ class TemplateCatalog:
         仅当整张表一行可用的都没有时才报错（说明清单本身没打标）。
         第三个返回值用于统计"目录里有、清单里没有"的文件，不能被排除项污染。
         """
-        header = [str(value or "").strip() for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
+        header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            raise TemplateError("视频标签清单是空表：请用 --export-tags 导出的模板填写")
+        header = [str(value or "").strip() for value in header_row]
         columns = {name: i for i, name in enumerate(header)}
         needed = ("模板ID", "相对路径", "文件名", "标签")
         if any(name not in columns for name in needed):

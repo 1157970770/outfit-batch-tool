@@ -29,17 +29,21 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
 try:                      # 作为包导入
-    from .storage import StorageConfig, StorageError
+    from .storage import StorageConfig, StorageError, _with_retry
 except ImportError:       # 直接运行时
-    from storage import StorageConfig, StorageError  # type: ignore
+    from storage import StorageConfig, StorageError, _with_retry  # type: ignore
 
 
 class CosRestClient:
-    def __init__(self, bucket: str, region: str, secret_id: str, secret_key: str):
+    def __init__(self, bucket: str, region: str, secret_id: str, secret_key: str,
+                 token: str = ""):
         self.bucket = bucket
         self.region = region
         self.secret_id = secret_id
         self.secret_key = secret_key
+        # P1-22：STS 临时凭证（tccli OAuth / AssumeRole）必须随请求携带安全令牌，
+        # 否则签名再对也会全量 AccessDenied。
+        self.token = str(token or "")
         self.host = f"{bucket}.cos.{region}.myqcloud.com"
 
     def _path(self, key: str) -> str:
@@ -80,17 +84,23 @@ class CosRestClient:
             "q-signature": signature,
         }
 
-    def _authorization(self, method: str, key: str) -> str:
-        return "&".join(f"{k}={v}" for k, v in self._auth(method, key).items())
+    def _authorization(self, method: str, key: str, params: dict | None = None) -> str:
+        return "&".join(f"{k}={v}" for k, v in self._auth(method, key, params=params).items())
+
+    def _headers(self, method: str, key: str, extra: dict | None = None,
+                 params: dict | None = None) -> dict:
+        """带安全令牌的请求头：临时凭证时缺 x-cos-security-token 必然 403。"""
+        headers = {"Host": self.host, "Authorization": self._authorization(method, key, params=params)}
+        if self.token:
+            headers["x-cos-security-token"] = self.token
+        if extra:
+            headers.update(extra)
+        return headers
 
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream",
             headers: dict | None = None) -> str:
         url = f"https://{self.host}{self._path(key)}"
-        merged = {
-            "Host": self.host,
-            "Content-Type": content_type,
-            "Authorization": self._authorization("put", key),
-        }
+        merged = self._headers("put", key, {"Content-Type": content_type})
         merged.update(headers or {})
         req = urllib.request.Request(url, data=data, method="PUT", headers=merged)
         try:
@@ -126,14 +136,15 @@ class CosRestClient:
         url = f"https://{self.host}{self._path(key)}?tagging"
         req = urllib.request.Request(
             url, data=body, method="PUT",
-            headers={
-                "Host": self.host,
-                "Content-Type": "application/xml",
-                "Content-MD5": __import__("base64").b64encode(
-                    __import__("hashlib").md5(body).digest()).decode(),
-                "Authorization": "&".join(
-                    f"{k}={v}" for k, v in self._auth("put", key, params=params).items()),
-            },
+            headers=self._headers(
+                "put", key,
+                {
+                    "Content-Type": "application/xml",
+                    "Content-MD5": __import__("base64").b64encode(
+                        __import__("hashlib").md5(body).digest()).decode(),
+                },
+                params=params,
+            ),
         )
         try:
             with urllib.request.urlopen(req, timeout=60):
@@ -160,6 +171,9 @@ class CosRestClient:
                 f"{name}={urllib.parse.quote(value, safe='')}" for name, value in sorted(params.items())
             )
             auth = self._auth("get", "", params=params)
+            if self.token:
+                # query 签名路径（列举 / 签名 URL）：令牌必须作为 query 参数携带
+                auth["x-cos-security-token"] = self.token
             url = f"https://{self.host}/?{query}&" + urllib.parse.urlencode(auth)
             req = urllib.request.Request(url, headers={"Host": self.host})
             try:
@@ -192,6 +206,8 @@ class CosRestClient:
 
     def sign_url(self, key: str, expires: int = 7 * 24 * 3600) -> str:
         params = self._auth("get", key, expires)
+        if self.token:
+            params["x-cos-security-token"] = self.token
         query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         return f"https://{self.host}{self._path(key)}?{query}"
 
@@ -199,7 +215,7 @@ class CosRestClient:
         url = f"https://{self.host}{self._path(key)}"
         req = urllib.request.Request(
             url, method="DELETE",
-            headers={"Host": self.host, "Authorization": self._authorization("delete", key)},
+            headers=self._headers("delete", key),
         )
         try:
             with urllib.request.urlopen(req, timeout=60):
@@ -217,7 +233,8 @@ class CosRestStorage:
     def __init__(self, cfg: StorageConfig):
         cfg.validate()
         self.cfg = cfg
-        self.client = CosRestClient(cfg.bucket, cfg.region, cfg.secret_id, cfg.secret_key)
+        self.client = CosRestClient(cfg.bucket, cfg.region, cfg.secret_id, cfg.secret_key,
+                                    token=str(getattr(cfg, "token", "") or ""))
 
     @property
     def provider(self) -> str:
@@ -226,7 +243,8 @@ class CosRestStorage:
     def tag_object(self, key: str, tags: dict) -> None:
         if not tags:
             return
-        self.client.put_tagging(key.lstrip("/"), tags)
+        _with_retry(lambda: self.client.put_tagging(key.lstrip("/"), tags),
+                    f"打标签 {key}")
 
     def put_path(self, path: str | Path, key: str, *, content_type: str = "",
                  meta: dict | None = None) -> str:
@@ -241,11 +259,15 @@ class CosRestStorage:
             # COS 自定义头值必须是 ASCII：中文款号留在路径与标签里，元数据不强行塞
             if text and text.isascii():
                 headers[f"x-cos-meta-{name}"] = text[:100]
-        self.client.put_file(key.lstrip("/"), src, content_type, headers or None)
+        # P1-22：与 SDK 路径一致，网络动作统一走 _with_retry（指数退避，可重试错误）
+        _with_retry(lambda: self.client.put_file(key.lstrip("/"), src, content_type, headers or None),
+                    f"上传 {key}")
         return key
 
     def put_bytes(self, data: bytes, key: str, *, content_type: str = "") -> str:
-        self.client.put(key.lstrip("/"), data, content_type or "application/octet-stream")
+        _with_retry(lambda: self.client.put(key.lstrip("/"), data,
+                                            content_type or "application/octet-stream"),
+                    f"上传 {key}")
         return key
 
     def _range_stat(self, key: str) -> dict | None:
@@ -300,8 +322,8 @@ class CosRestStorage:
         return f"{self.cfg.scheme}://{self.cfg.bucket}.cos.{self.cfg.region}.myqcloud.com/{quoted}"
 
     def delete(self, key: str) -> None:
-        self.client.delete(key.lstrip("/"))
+        _with_retry(lambda: self.client.delete(key.lstrip("/")), f"删除 {key}")
 
     def list_prefix(self, prefix: str, limit: int = 1000) -> list[dict]:
         base = prefix.strip().lstrip("/")
-        return self.client.list_prefix(base, limit)
+        return _with_retry(lambda: self.client.list_prefix(base, limit), "列举对象")

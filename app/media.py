@@ -43,6 +43,9 @@ VIDEO_EXT = {".mp4", ".mov", ".m4v"}
 AUDIO_EXT = {".wav", ".mp3"}
 IMAGE_FORMATS = {"JPEG", "PNG", "BMP", "WEBP"}
 SOURCE_EXPIRES = 7 * 24 * 3600
+# 解压炸弹守卫（P1-21）：官方单边上限 8000px，8000×8000=64MP 之外直接拒绝，
+# 防止 _flatten_to_jpeg 解码时数百 MB 的内存峰值。
+MAX_IMAGE_PIXELS = 64_000_000
 
 
 class MediaError(RuntimeError):
@@ -58,20 +61,38 @@ def inspect_image(path: str | Path) -> dict:
     src = Path(path)
     info: dict = {"path": str(src), "size_mb": round(src.stat().st_size / 1024 / 1024, 3)}
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
+        # 收紧 Pillow 默认的解压炸弹阈值（89M 像素才告警）到官方上限内。
+        Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     except ImportError:
         info["warn"] = "未安装 Pillow，跳过图片格式/尺寸预检"
         return info
 
     try:
         with Image.open(src) as img:
-            info.update({
-                "format": (img.format or "").upper(),
-                "mode": img.mode,
-                "width": img.width,
-                "height": img.height,
-                "has_alpha": ("A" in img.getbands()) or ("transparency" in img.info),
-            })
+            try:
+                orientation = int(img.getexif().get(274, 1) or 1)
+            except Exception:  # noqa: BLE001 - EXIF 缺损不算坏图
+                orientation = 1
+            # P1-21：EXIF Orientation 决定真实方向，竖拍图 size 是横的；
+            # 校验与后续处理都必须基于转正后的尺寸。
+            transposed = ImageOps.exif_transpose(img) if orientation not in (0, 1, None) else img
+            try:
+                info.update({
+                    "format": (img.format or "").upper(),
+                    "mode": transposed.mode,
+                    "width": transposed.width,
+                    "height": transposed.height,
+                    "orientation": orientation,
+                    "has_alpha": ("A" in transposed.getbands()) or ("transparency" in transposed.info),
+                })
+            finally:
+                if transposed is not img:
+                    transposed.close()
+    except Image.DecompressionBombError:
+        raise MediaError(
+            f"图片 {src.name} 像素总量超过 {MAX_IMAGE_PIXELS // 1_000_000}MP 解压上限，已拒绝处理"
+        ) from None
     except Exception as exc:  # noqa: BLE001 - 坏图直接给用户原因
         raise MediaError(f"图片打不开：{src.name}（{exc}）") from None
     return info
@@ -108,7 +129,10 @@ def _flatten_to_jpeg(src: Path) -> Path:
     os.close(fd)
     dest = Path(raw)
     try:
+        from PIL import ImageOps
         with Image.open(src) as img:
+            # P1-21：转码前先按 EXIF 转正，竖拍图不再横躺着送进模型。
+            img = ImageOps.exif_transpose(img)
             if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
                 rgba = img.convert("RGBA")
                 background = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -124,10 +148,15 @@ def _flatten_to_jpeg(src: Path) -> Path:
 
 
 def prepare_image(path: str | Path) -> tuple[Path, str]:
-    """返回 (可上传的本地路径, content_type)。带 alpha 的图会转成临时 JPEG。"""
+    """返回 (可上传的本地路径, content_type)。带 alpha 的图会转成临时 JPEG。
+
+    P1-21：EXIF 方向 ≠ 1 的图（手机竖拍）也走转码，转正后再上传——
+    RGB JPEG 直接透传会把方向元数据原样带给模型，模型侧不保证认 EXIF。
+    """
     src = Path(path)
     info = validate_image(src)
-    if info.get("has_alpha") or info.get("mode") not in (None, "RGB", "L"):
+    needs_transpose = int(info.get("orientation") or 1) not in (0, 1)
+    if info.get("has_alpha") or needs_transpose or info.get("mode") not in (None, "RGB", "L"):
         tmp = _flatten_to_jpeg(src)
         return tmp, "image/jpeg"
     ctype = guess_content_type(src.name)
@@ -199,10 +228,14 @@ def probe_video(path: str | Path) -> dict:
 
 
 def validate_video(path: str | Path) -> dict:
-    info = probe_video(path)
     src = Path(path)
+    info = probe_video(path)
     if src.suffix.lower() not in VIDEO_EXT:
         raise MediaError(f"视频 {src.name} 扩展名不支持（只收 mp4/mov）")
+    # 改扩展名混进来的非视频（如 .txt 改 .mp4）：ffprobe 正常跑但解不出容器 → 拒绝。
+    # ffprobe 本身缺失时只告警放行，不误伤没装 ffprobe 的机器。
+    if not info.get("warn") and not info.get("format"):
+        raise MediaError(f"视频 {src.name} 内容不是有效的 mp4/mov 容器，请检查文件")
     if info.get("size_mb", 0) > MAX_VIDEO_MB:
         raise MediaError(f"视频 {src.name} 有 {info['size_mb']:.1f}MB，超过官方 100MB 上限")
     duration = info.get("duration")

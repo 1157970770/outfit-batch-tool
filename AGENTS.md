@@ -133,7 +133,7 @@ python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分
 
 ## 8. 已知债（别当成 bug 修）
 
-- `server.py` 1161 行、`wan_api.py` 1060 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
+- `server.py` 1696 行、`wan_api.py` 1120 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
 - 测试是独立脚本，没有 pytest 夹具；`tests/run_all.py` 只是顺序执行器。
 - `wan.price_per_second` 三档均为 `null`，金额用公开价目表兜底，与真实账单有偏差。
 - 本仓库只维护网页端与引擎；不要再引入 GUI 界面或桌面打包相关代码。

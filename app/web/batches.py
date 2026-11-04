@@ -299,6 +299,21 @@ class BatchManager:
         return job_id if isinstance(job, dict) else ""
 
     # ------------------------------------------------------------------ 估算金额
+    @staticmethod
+    def _money_view(user: dict, estimate: dict) -> dict:
+        """P1-5：金额与单价只对管理员下发，普通用户剥离（可反推 wan.price_per_second）。
+
+        options 的 count 档位保留：前端生产按钮的档位靠它（batch.js:84），只剥金额。
+        """
+        if str((user or {}).get("role") or "") == "admin":
+            return estimate
+        view = {k: v for k, v in estimate.items()
+                if k not in ("unit_price", "price_source", "amount")}
+        if isinstance(view.get("options"), list):
+            view["options"] = [{k: v for k, v in opt.items() if k != "amount"}
+                               for opt in view["options"] if isinstance(opt, dict)]
+        return view
+
     def estimate(self, live_items: list[dict], resolution: str,
                  output_seconds: float | None = None) -> dict:
         """按（模板时长 + 输出秒数）× 单价预估；单价缺失时 amount 为 null。
@@ -523,7 +538,7 @@ class BatchManager:
             "total": len(rows),
             "filtered_total": len(matched),
             "ready_count": ready_count,
-            "cost_estimate": self.estimate(matched[:limit], resolution, out_seconds),
+            "cost_estimate": self._money_view(user, self.estimate(matched[:limit], resolution, out_seconds)),
         }
 
     # ------------------------------------------------------------------ #4 锁定清单
@@ -668,7 +683,7 @@ class BatchManager:
             "batch": self.public(batch),
             "taken": len(taken),
             "blocked": blocked,
-            "cost_estimate": self.estimate([live for _, live in taken], resolution),
+            "cost_estimate": self._money_view(user, self.estimate([live for _, live in taken], resolution)),
         }
 
     def produce(self, batch_id: str, user: dict, data: dict) -> dict:
@@ -791,7 +806,7 @@ class BatchManager:
             self._reconcile(batch)
             data = self.public(batch)
             # 详情页要能直接显示「再生产这批大概多少钱」，不必先拉候选。
-            data["cost_estimate"] = self.estimate_for_pending(batch)
+            data["cost_estimate"] = self._money_view(user, self.estimate_for_pending(batch))
             return data, self.public_items(batch, item_state)
 
     # ------------------------------------------------------------------ #10 打包
