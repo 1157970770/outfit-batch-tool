@@ -147,6 +147,21 @@ textarea {
   background: var(--bg);
 }
 
+/* 首屏占位：只做极轻的过渡，避免闪一下登录卡片 */
+.boot-wrap {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  min-height: 100vh;
+  background: var(--bg);
+}
+.boot-note {
+  color: var(--muted);
+  font-size: 12.5px;
+  letter-spacing: .06em;
+}
+
 .login-card {
   width: min(100%, 380px);
   padding: 28px;

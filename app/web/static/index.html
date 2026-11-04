@@ -9,12 +9,18 @@
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
-  <script defer src="/static/app.js"></script>
+  <script defer src="/static/app.js?v=20261104e"></script>
   <script defer src="/static/batch.js?v=20261103j"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
 <body>
-  <main id="login-view" class="login-wrap">
+  <!-- 首屏占位：session 判定回来前先显示它，避免登录卡片一闪而过 -->
+  <div id="boot-view" class="boot-wrap">
+    <span class="brand-mark" aria-hidden="true">换</span>
+    <span class="boot-note">正在载入…</span>
+  </div>
+
+  <main id="login-view" class="login-wrap hidden">
     <section class="login-card">
       <div class="login-brand"><span class="brand-mark" aria-hidden="true">换</span><div><strong>换装视频生产</strong><small>局域网工作台</small></div></div>
       <form id="login-form">

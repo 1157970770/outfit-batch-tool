@@ -41,8 +41,10 @@
     return data;
   }
   function toast(text) { const el = $('toast'); el.textContent = text; el.classList.remove('hidden'); clearTimeout(el._timer); el._timer = setTimeout(() => el.classList.add('hidden'), 3200); }
-  function showLogin() { $('app-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); state.user = null; state.showAll = false; clearInterval(state.timer); }
-  function showApp() { $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
+  // 首屏占位在 session 判定后立刻撤掉，登录页/主界面才有机会显示
+  function hideBoot() { const el = $('boot-view'); if (el) el.classList.add('hidden'); }
+  function showLogin() { hideBoot(); $('app-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); state.user = null; state.showAll = false; clearInterval(state.timer); }
+  function showApp() { hideBoot(); $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
   // 管理员"查看全部"时的账户维度：scope=all 再加 owner 过滤，普通账号永远只看自己。
   function scopeQuery() {
     if (!(state.user && state.user.role === 'admin' && state.showAll)) return 'mine';
