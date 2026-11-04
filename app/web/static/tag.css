@@ -14,6 +14,22 @@
 .tag-compact select { min-height: 32px; }
 .tag-compact > span { display: none; }
 
+/* 跳页输入框：分页条里的小数字框，回车跳转 */
+.tag-page-jump {
+  width: 58px;
+  min-height: 28px;
+  padding: 3px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  text-align: center;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.tag-page-jump::-webkit-outer-spin-button,
+.tag-page-jump::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.tag-page-jump:focus { border-color: var(--blue); outline: none; }
+
 /* 标签页是表格+预览的重工作区，宽屏上用满宽度，避免左右两片空白 */
 body:has(#tag-view.active-view) .shell { width: min(100% - 32px, 1760px); }
 

@@ -8,10 +8,10 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css">
-  <link rel="stylesheet" href="/static/tag.css?v=20261103k">
+  <link rel="stylesheet" href="/static/tag.css?v=20261104b">
   <script defer src="/static/app.js"></script>
   <script defer src="/static/batch.js?v=20261103j"></script>
-  <script defer src="/static/tag.js?v=20261104a"></script>
+  <script defer src="/static/tag.js?v=20261104b"></script>
 </head>
 <body>
   <main id="login-view" class="login-wrap">
@@ -362,6 +362,9 @@
               <div id="tag-pager" class="batch-cand-pager">
                 <button id="tag-page-prev" class="quiet" type="button">‹ 上一页</button>
                 <span id="tag-page-info" class="batch-page-info" role="status" aria-live="polite">第 1 / 1 页</span>
+                <input id="tag-page-jump" class="tag-page-jump" type="number" min="1" step="1" value="1"
+                       aria-label="输入页码跳转" title="输入页码，回车跳转">
+                <span class="batch-page-info">页</span>
                 <button id="tag-page-next" class="quiet" type="button">下一页 ›</button>
                 <label class="field tag-compact">每页<select id="tag-page-size">
                   <option value="50" selected>50</option>

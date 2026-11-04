@@ -483,13 +483,21 @@
     }
   }
 
+  function totalPages() {
+    return Math.max(1, Math.ceil(state.matched.length / state.pageSize));
+  }
+
   function renderPager() {
-    const pages = Math.max(1, Math.ceil(state.matched.length / state.pageSize));
+    const pages = totalPages();
     $('tag-page-info').textContent = `第 ${state.page} / ${pages} 页`;
     $('tag-pager').classList.toggle('hidden', state.matched.length <= state.pageSize);
     $('tag-count').textContent = `筛选命中 ${state.matched.length} 条 / 共 ${state.videos.length} 条`;
     $('tag-page-prev').disabled = state.page <= 1;
     $('tag-page-next').disabled = state.page >= pages;
+    // 跳页输入框：同步页码与上限；正在输入时不打扰
+    const jump = $('tag-page-jump');
+    jump.max = pages;
+    if (document.activeElement !== jump) jump.value = state.page;
     $('tag-select-all').textContent = `全选筛选结果 ${state.matched.length} 条`;
   }
 
@@ -1263,8 +1271,23 @@
     if (state.page > 1) { state.page -= 1; renderAll(); }
   });
   $('tag-page-next').addEventListener('click', () => {
-    const pages = Math.max(1, Math.ceil(state.matched.length / state.pageSize));
-    if (state.page < pages) { state.page += 1; renderAll(); }
+    if (state.page < totalPages()) { state.page += 1; renderAll(); }
+  });
+  /* 跳页：输入页码后回车或失焦生效，超出范围自动收敛到 1 / 末页 */
+  function jumpToPage(raw) {
+    const pages = totalPages();
+    const target = Math.min(pages, Math.max(1, Math.floor(Number(raw) || 0)));
+    const jump = $('tag-page-jump');
+    if (target === state.page) { jump.value = state.page; return; }
+    state.page = target;
+    renderAll();
+  }
+  $('tag-page-jump').addEventListener('change', (event) => jumpToPage(event.target.value));
+  $('tag-page-jump').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    jumpToPage(event.target.value);
+    event.target.blur();
   });
   $('tag-page-size').addEventListener('change', (event) => {
     state.pageSize = Number(event.target.value) || 50;
