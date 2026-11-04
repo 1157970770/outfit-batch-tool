@@ -22,6 +22,7 @@
 | [adr-002-aliyun-wan3-official-api.md](adr-002-aliyun-wan3-official-api.md) | 从 RunningHub 切到官方 API 的决策、风险与回滚 |
 | [adr-001-cos-client-credential.md](adr-001-cos-client-credential.md) | 客户端持有 COS 密钥的已接受风险与收口方式 |
 | [cos-setup.md](cos-setup.md) | 建桶、CAM 最小权限、报错对照、费用 |
+| [backup-tag-store.md](backup-tag-store.md) | **标签库真源备份**：每日导出到 COS、保留策略、恢复步骤 |
 | [template-tagging.md](template-tagging.md) | 视频打标工具：标签、导入导出、与网页共用真源 |
 | [templates-500.md](templates-500.md) | 模板从本地视频到「程序能用的清单」 |
 | [prompt-library.md](prompt-library.md) | 提示词模板库（网页「提示词」下拉的数据来源） |

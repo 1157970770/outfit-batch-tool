@@ -194,4 +194,5 @@ python scripts/cos_check.py
 | [docs/web-lan.md](docs/web-lan.md) | 局域网部署与排障 |
 | [docs/wan-3.0-reference-to-video.md](docs/wan-3.0-reference-to-video.md) | 官方接口规格 |
 | [docs/cos-setup.md](docs/cos-setup.md) | COS 接入手册 |
+| [docs/backup-tag-store.md](docs/backup-tag-store.md) | 标签库真源每日备份到 COS、恢复步骤 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
