@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Register a daily Windows Scheduled Task that backs up the tag store
     (web-data/template_tags.json) to Tencent COS.
