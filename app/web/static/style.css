@@ -834,3 +834,11 @@ footer { padding: 24px 0 8px; color: #98a1af; font-size: 11.5px; text-align: cen
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
 }
+
+/* ---------- 小批量「我来挑选」：最多挑 3 个的点选网格 ---------- */
+.template-pick{display:flex;flex-wrap:wrap;gap:6px;max-height:168px;overflow:auto;padding:2px}
+.template-pick-item{padding:5px 10px;border:1px solid var(--line-strong);border-radius:999px;background:var(--paper);color:var(--ink-2);font-size:12px;line-height:1.35;cursor:pointer;text-align:left;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.template-pick-item:hover{border-color:var(--blue)}
+.template-pick-item.is-on{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue-dark);font-weight:700}
+.template-pick-item.is-unready{color:var(--muted);background:var(--bg);cursor:not-allowed;text-decoration:line-through}
+.template-pick-item.is-used::after{content:"【已用】";color:var(--amber);font-size:11px}

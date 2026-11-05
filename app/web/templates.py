@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -503,10 +504,24 @@ class TemplateCatalog:
             raise TemplateError("当前标签筛选没有匹配的视频场景")
         mode = (mode or "random").lower()
         if mode == "selected":
-            item = next((item for item in candidates if str(item.get("id")) == _normalize_id(template_id)), None)
-            if not item:
+            # template_id 支持逗号/分号/空白分隔的多个编号：小批量「我来挑选」
+            # 现在允许一次点选最多 3 个场景（前端限制 3，这里按 max_items 兜底）。
+            raw_ids = re.split(r"[,;，；\s]+", str(template_id or ""))
+            wanted_ids: list[str] = []
+            for raw in raw_ids:
+                tid = _normalize_id(raw)
+                if tid and tid not in wanted_ids:
+                    wanted_ids.append(tid)
+            if not wanted_ids:
                 raise TemplateError("请选择符合当前标签筛选的视频场景")
-            selected = [item]
+            cap = max(1, min(int(max_items), len(candidates)))
+            if len(wanted_ids) > cap:
+                raise TemplateError(f"一次最多挑选 {cap} 个视频场景")
+            by_id = {str(item.get("id")): item for item in candidates}
+            missing = next((tid for tid in wanted_ids if tid not in by_id), None)
+            if missing:
+                raise TemplateError(f"场景 {missing} 不在当前标签筛选结果里，请调整筛选后重选")
+            selected = [dict(by_id[tid]) for tid in wanted_ids]
         elif mode == "random":
             try:
                 count = int(count)

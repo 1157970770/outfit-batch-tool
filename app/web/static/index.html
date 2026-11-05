@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20261105a">
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css?v=20261105d">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
-  <script defer src="/static/app.js?v=20261105c"></script>
+  <script defer src="/static/app.js?v=20261105d"></script>
   <script defer src="/static/batch.js?v=20261105d"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
@@ -90,7 +90,10 @@
               <label class="segment"><input type="radio" name="selection" value="selected"><span>我来挑选</span></label>
             </div>
 
-            <label id="template-wrap" class="field hidden">视频场景<select id="template-select"></select></label>
+            <div id="template-wrap" class="field hidden">
+              <span>视频场景（点击选中 / 取消，最多挑 3 个）</span>
+              <div id="template-pick" class="template-pick" role="group" aria-label="挑选视频场景"></div>
+            </div>
 
             <div id="count-wrap" class="field">
               <span>生成数量（上限 3 条）</span>

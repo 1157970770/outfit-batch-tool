@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, detailTimer: null, showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
+  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, detailTimer: null, picked: new Set(), showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
   const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', unknown: '结果未知', timeout: '等待超时', success: '成功' };
   const esc = (s) => String(s ?? '');
   // 6 栏位款号标签：读取容器内 [data-tag-slot]，返回 {top:...} 形式（空值丢弃）。
@@ -138,15 +138,10 @@
     );
   }
 
-  // 款号-模板防重标记：按上衣款号查已用模板（批次生产才记账，小批量不计入），选项尾部加【已用】。
+  // 款号-模板防重标记：按上衣款号查已用模板（批次生产才记账，小批量不计入）。
+  // 挑选网格由 renderPickGrid 重建，已用过的场景自动挂【已用】徽标。
   function paintTemplateUsed() {
-    const select = $('template-select');
-    if (!select) return;
-    [...select.options].forEach(option => {
-      if (!option.dataset.base) option.dataset.base = option.textContent;
-      const used = state.styleUsed[option.value];
-      option.textContent = used ? `${option.dataset.base}【已用】` : option.dataset.base;
-    });
+    renderPickGrid();
   }
   async function refreshStyleUsed() {
     const top = collectTagSlots('style-tags').top || '';
@@ -203,17 +198,10 @@
   function refreshFilteredTemplates() {
     state.tagFilters = collectTagFilters();
     state.filteredTemplates = state.templates.filter(template => matchesTagFilters(template, state.tagFilters));
-    const select = $('template-select');
-    const previous = select.value;
-    select.replaceChildren();
-    state.filteredTemplates.forEach(template => {
-      const option = document.createElement('option');
-      option.value = template.id;
-      option.textContent = `${template.name}（${template.id}）`;
-      select.append(option);
-    });
-    if (state.filteredTemplates.some(template => String(template.id) === previous)) select.value = previous;
-    else if (select.options.length) select.selectedIndex = 0;
+    // 挑选网格跟着筛选走：已不在筛选结果里的选中项剔除
+    const validIds = new Set(state.filteredTemplates.map(template => String(template.id)));
+    for (const id of [...state.picked]) if (!validIds.has(id)) state.picked.delete(id);
+    renderPickGrid();
     const count = state.filteredTemplates.length;
     const readyCount = state.filteredTemplates.filter(template => template.ready).length;
     const filterActive = Object.keys(state.tagFilters).length > 0;
@@ -231,6 +219,54 @@
     updateSummary();
     syncCountButtons();
     paintTemplateUsed();
+  }
+
+  /* 我来挑选：从筛选结果里点选，最多 3 个（与生成数量上限一致，1–3 条走快速通道）。
+     未上传云端的场景置灰不可选；款号用过的挂【已用】徽标提醒但不拦。 */
+  const PICK_MAX = 3;
+  function renderPickGrid() {
+    const root = $('template-pick');
+    if (!root) return;
+    root.replaceChildren();
+    if (!state.filteredTemplates.length) {
+      const empty = document.createElement('span');
+      empty.className = 'muted';
+      empty.textContent = '当前筛选没有匹配的视频场景。';
+      root.append(empty);
+      return;
+    }
+    for (const template of state.filteredTemplates) {
+      const id = String(template.id);
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'template-pick-item';
+      item.dataset.id = id;
+      item.textContent = `${template.name}（${id}）`;
+      if (!template.ready) {
+        item.classList.add('is-unready');
+        item.disabled = true;
+        item.title = '尚未上传云端，不能生成';
+      } else {
+        if (state.styleUsed[id]) { item.classList.add('is-used'); item.title = `${template.name}（${id}）\n款号已用过该模板（仅提醒，可重复使用）`; }
+        item.setAttribute('aria-pressed', state.picked.has(id) ? 'true' : 'false');
+        item.addEventListener('click', () => {
+          if (state.picked.has(id)) state.picked.delete(id);
+          else {
+            if (state.picked.size >= PICK_MAX) return toast(`一次最多挑 ${PICK_MAX} 个视频场景，先取消一个再选。`);
+            state.picked.add(id);
+          }
+          root.querySelectorAll('.template-pick-item').forEach((node) => {
+            const on = state.picked.has(node.dataset.id);
+            node.classList.toggle('is-on', on);
+            node.setAttribute('aria-pressed', on ? 'true' : 'false');
+          });
+          updateTemplatePreview();
+          updateSummary();
+        });
+      }
+      item.classList.toggle('is-on', state.picked.has(id));
+      root.append(item);
+    }
   }
 
   $('clear-tag-filter').addEventListener('click', () => {
@@ -266,13 +302,14 @@
   $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
   document.querySelectorAll('#style-tags input[data-tag-slot]').forEach(input => input.addEventListener('input', () => { updateSummary(); scheduleStyleUsed(); }));
   function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }
-  $('template-select').addEventListener('change', () => { updateTemplatePreview(); updateSummary(); });
   function updateTemplatePreview() {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
     const video = $('template-preview');
-    if (!selected || !$('template-select').value) { video.pause(); video.removeAttribute('src'); video.classList.add('hidden'); return; }
-    video.src = `/api/templates/${encodeURIComponent($('template-select').value)}/preview`;
+    const first = [...state.picked][0] || '';
+    if (!selected || !first) { video.pause(); video.removeAttribute('src'); video.classList.add('hidden'); return; }
+    video.src = `/api/templates/${encodeURIComponent(first)}/preview`;
     video.classList.remove('hidden');
+    video.title = first ? '预览第一个选中场景' : '';
     // 选中场景即自动播放 + 循环：muted 是浏览器允许自动播放的前提（模板视频本身无音轨）。
     video.loop = true;
     video.muted = true;
@@ -282,7 +319,7 @@
   }
   function selectedCount() {
     return document.querySelector('input[name="selection"]:checked').value === 'selected'
-      ? ($('template-select').value ? 1 : 0) : Number($('count-select').value);
+      ? state.picked.size : Number($('count-select').value);
   }
   function updateSummary() {
     const count = selectedCount(); const prompt = state.prompts.find(p => p.id === $('prompt-select').value);
@@ -343,15 +380,17 @@
   $('submit-btn').addEventListener('click', async () => {
     const file = fileInput.files[0]; if (!file) return showCreateError('请先上传服装图片。');
     const selection = document.querySelector('input[name="selection"]:checked').value; const count = selectedCount();
+    const pickedIds = [...state.picked];
     const promptBody = $('prompt-body').value.trim();
     if (!state.filteredTemplates.length) return showCreateError('当前标签筛选没有匹配的视频场景，请清除或调整筛选条件。');
+    if (selection === 'selected' && !pickedIds.length) return showCreateError('请先在「视频场景」里点选 1–3 个场景。');
     if (!count || count > state.filteredTemplates.length) return showCreateError(`当前筛选只有 ${state.filteredTemplates.length} 个视频场景，请减少生成数量。`);
     if (!promptBody) return showCreateError('提示词不能为空，请选择模板或填写内容。');
     if (promptBody.length > 4000) return showCreateError('提示词最多 4000 个字符。');
     // 同款号防重（软拦截）：上衣款号已用过的模板再提交，弹确认让使用者自己定夺。
     const topNow = collectTagSlots('style-tags').top || '';
     if (topNow && state.styleUsedTop === topNow) {
-      const chosen = selection === 'selected' ? [$('template-select').value] : state.filteredTemplates.map(t => String(t.id));
+      const chosen = selection === 'selected' ? pickedIds : state.filteredTemplates.map(t => String(t.id));
       const reused = usedCount(chosen);
       if (reused && !confirm(`款号 ${topNow} 有 ${reused} 个候选视频模板在之前的批次里用过。\n\n确定要重复使用吗？（历史记录只为防重提醒，不影响归档）`)) return;
     }
@@ -361,7 +400,7 @@
       const dataUrl = await readFile(file);
       const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: dataUrl }) });
       btn.textContent = '正在提交…';
-      const body = { upload_id: uploaded.upload_id, selection, count, template_id: $('template-select').value,
+      const body = { upload_id: uploaded.upload_id, selection, count, template_id: pickedIds.join(','),
         tag_filters: state.tagFilters, prompt_id: $('prompt-select').value, prompt: promptBody,
         resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true,
         tags: collectTagSlots('style-tags') };
