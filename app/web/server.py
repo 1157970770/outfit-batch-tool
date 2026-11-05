@@ -31,7 +31,7 @@ from app.prompts import PromptLibrary
 from app.runtime import build_storages
 from app.wan_api import configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
-from app.web.batches import BatchError, BatchManager
+from app.web.batches import PRODUCE_CHOICES, PRODUCE_MIN, BatchError, BatchManager
 from app.web.jobs import JobManager, _redact
 from app.web.settings import WebSettings, load_settings
 from app.web.templates import TemplateCatalog, TemplateError
@@ -171,6 +171,25 @@ class WebApplication:
 
     def user_for_token(self, token: str) -> dict | None:
         return self.signer.verify(token, self.settings.users)
+
+    def quota_of(self, user: dict) -> int:
+        """账户生成数量上限（条）：0 或缺省 = 不限。管理端可按账户修改。"""
+        info = self.settings.users.get(str((user or {}).get("username") or "")) or {}
+        try:
+            return max(0, int(info.get("quota") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def quota_check(self, user: dict, count: int) -> str:
+        """提交 count 条是否会超出账户额度。返回错误文案，空串 = 通过。"""
+        quota = self.quota_of(user)
+        if quota <= 0:
+            return ""
+        used = self.jobs.videos_used(str((user or {}).get("username") or ""))
+        if used + count > quota:
+            return (f"生成数量已达上限：该账户已用 {used} 条 / 上限 {quota} 条，"
+                    f"本次 {count} 条会超出额度；请联系管理员调整。")
+        return ""
 
     def persist_web(self) -> None:
         """落盘 web.json。
@@ -448,8 +467,9 @@ def make_handler(app: WebApplication):
                                                "small_lane_items": app.settings.small_lane_items,
                                                "max_batch_items": app.settings.max_batch_items,
                                                "max_batch_run_items": app.settings.max_batch_run_items,
-                                               "produce_choices": [choice for choice in (20, 50, 100)
+                                               "produce_choices": [choice for choice in PRODUCE_CHOICES
                                                                    if choice <= app.settings.max_batch_run_items],
+                                               "produce_min": PRODUCE_MIN,
                                                "max_concurrency": app.settings.max_concurrency,
                                                 "tag_filter_enabled": any(app.catalog.tag_values.values()),
                                                 "tagged_templates_count": len(app.catalog.items) if app.catalog.tag_workbook_info else 0,

@@ -145,7 +145,7 @@ app/wan_api.py  百炼 DashScope / RunningHub 适配
 | `max_active_per_user`   | 1      | 每人几个大批量 job           |
 | `max_job_items`         | 3      | 试跑页单次上限（v0.7 起 20 → 3） |
 | `max_batch_items`       | 缺省 500 | 一个批次清单上限              |
-| `max_batch_run_items`   | 缺省 100 | 批次单次生产上限（20/50/100 档） |
+| `max_batch_run_items`   | 缺省 100 | 批次单次生产上限（快捷档 5/10/20/50/100，档外任意整数也放行，最小 5） |
 | `small_lane_items`      | 3      | 快速通道判定阈值              |
 | `max_active_small_jobs` | 4      | 快速通道 job 数            |
 | `small_lane_inflight`   | 12     | 快速通道在飞名额              |
@@ -166,7 +166,7 @@ app/wan_api.py  百炼 DashScope / RunningHub 适配
 
 1. 新建批次：批次号（忽略大小写唯一）、定妆图、提示词、筛选条件；
 2. 逐条预览并勾选，锁定清单（`draft → locked`）；
-3. 按 20 / 50 / 100 档分批生产，每档生成一个 job；
+3. 按快捷档 5 / 10 / 20 / 50 / 100 分批生产（也可填任意整数，如 7、13、33；清单不足 5 条时一次提交全部剩余），每档生成一个 job；
 4. 条目状态 `pending / producing / done / failed`，去重靠状态位；
 5. 生产结束可关闭批次（`closed`），也可提前关闭。
 

@@ -32,8 +32,11 @@ from app.web.templates import TemplateError
 
 BATCH_STATES = ("draft", "locked", "closed")
 ITEM_STATES = ("pending", "producing", "done", "failed")
-# v2：单次生产只接受这三档；重试失败另行放宽到 1–100。
-PRODUCE_CHOICES = (20, 50, 100)
+# v3：单次生产的快捷档位 5 / 10 / 20 / 50 / 100；接口同时接受 PRODUCE_MIN–上限的
+# **任意整数**（7、13、33 这类非 5 倍数同样放行），前端"自定条数"就靠这条。
+# 唯一例外：清单剩余不足 PRODUCE_MIN 时，允许一次提交「全部剩余」（否则零头永远跑不掉）。
+PRODUCE_CHOICES = (5, 10, 20, 50, 100)
+PRODUCE_MIN = 5
 DEFAULT_PRODUCE_COUNT = 50
 RETRY_MIN = 1
 RETRY_MAX = 100
@@ -704,13 +707,22 @@ class BatchManager:
     def produce(self, batch_id: str, user: dict, data: dict) -> dict:
         raw = data.get("count", DEFAULT_PRODUCE_COUNT)
         count = _as_int(raw, None)
-        if count is None or count not in PRODUCE_CHOICES:
-            raise BatchError("每次生产条数只能是 20、50 或 100。")
-        if count > self.settings.max_batch_run_items:
-            raise BatchError(f"单次最多生产 {self.settings.max_batch_run_items} 条。")
+        max_run = self.settings.max_batch_run_items
+        if count is None or count <= 0:
+            raise BatchError("每次生产条数需要是正整数。")
+        if count > max_run:
+            raise BatchError(f"单次最多生产 {max_run} 条。")
         with self.mutex:
             batch = self._authorized(batch_id, user)
             self._reconcile(batch)
+            if count < PRODUCE_MIN:
+                # 低于最小生成单位只有一种合法情形：清单本身只剩这么多（跑掉零头）。
+                # 否则 3 条也能随时插队，最小单位就形同虚设。
+                pending = sum(1 for item in (batch.get("items") or [])
+                              if str(item.get("state") or "") == "pending")
+                if pending and count != pending:
+                    raise BatchError(
+                        f"每次最少生产 {PRODUCE_MIN} 条；清单只剩 {pending} 条时可以一次提交全部剩余。")
             return self._start_run(batch, user, ("pending",), count,
                                    "没有待生产的条目，可重试失败项或关闭批次。")
 

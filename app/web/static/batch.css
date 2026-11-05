@@ -228,6 +228,17 @@
 .batch-produce-actions{display:flex;gap:8px;margin:0}
 .batch-produce-btn{flex:1 1 0;min-height:40px;padding:6px 10px;font-size:13px;line-height:1.25}
 .batch-produce-btn:disabled{opacity:.55;cursor:not-allowed}
+/* 右列：档位按钮一行 + 自定条数一行 */
+.batch-produce-side{display:grid;gap:6px;min-width:0}
+.batch-produce-side .batch-produce-actions{flex-wrap:wrap;gap:6px}
+.batch-produce-side .batch-produce-btn{flex:1 1 0;min-width:62px;min-height:36px;padding:5px 8px;font-size:12.5px}
+.batch-produce-custom{display:flex;align-items:center;gap:6px;min-width:0}
+.batch-produce-custom label{flex:none;font-size:12px;color:var(--muted)}
+.batch-produce-custom input{flex:none;width:62px;height:30px;padding:0 6px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);font-size:12.5px;text-align:center}
+.batch-produce-custom input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,235,.12);outline:none}
+.batch-produce-custom input:disabled{opacity:.55}
+.batch-produce-custom .quiet{flex:none;min-height:30px;padding:3px 12px;font-size:12px}
+.batch-produce-custom .muted{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
 .batch-retry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
 .batch-retry .quiet{min-height:32px;padding:4px 12px;font-size:12px}
 .batch-retry .muted{font-size:12px}

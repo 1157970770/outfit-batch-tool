@@ -277,6 +277,9 @@ def main() -> int:
         assert code == 200, code
         prompt = body(boot)["prompts"][0]
         prompt_id, prompt_text = prompt["id"], prompt["body"]
+        service = body(boot)["service"]
+        assert service["produce_choices"] == [5, 10, 20, 50, 100], service
+        assert service["produce_min"] == 5, service
 
         image = io.BytesIO()
         Image.new("RGB", (256, 320), (230, 220, 210)).save(image, format="PNG")
@@ -339,7 +342,7 @@ def main() -> int:
         estimate = payload["cost_estimate"]
         # P1-5：普通用户的估算不带单价与金额；档位 count 保留（前端生产按钮靠它）
         assert "unit_price" not in estimate and "amount" not in estimate and "price_source" not in estimate, estimate
-        assert [option["count"] for option in estimate["options"]] == [20, 50, 100], estimate
+        assert [option["count"] for option in estimate["options"]] == [5, 10, 20, 50, 100], estimate
         assert all("amount" not in option for option in estimate["options"]), estimate
         code, _, admin_cands = call(admin, base, f"/api/batches/{batch_id}/candidates", "POST",
                                     {"tag_filters": {}, "limit": 1000})
@@ -499,7 +502,7 @@ def main() -> int:
         detail_estimate = body(filtered)["batch"]["cost_estimate"]
         assert "unit_price" not in detail_estimate, detail_estimate     # P1-5：alice 非 admin
         assert detail_estimate["count"] == 0, detail_estimate          # 已无待生产
-        assert [option["count"] for option in detail_estimate["options"]] == [20, 50, 100]
+        assert [option["count"] for option in detail_estimate["options"]] == [5, 10, 20, 50, 100]
         assert all(option.get("amount") is None for option in detail_estimate["options"]), detail_estimate
         code, _, admin_detail = call(admin, base, f"/api/batches/{batch_id}")
         admin_estimate = body(admin_detail)["batch"]["cost_estimate"]
@@ -507,8 +510,9 @@ def main() -> int:
         assert admin_estimate["options"][0]["amount"] is not None, admin_estimate
         code, _, filtered = call(alice, base, f"/api/batches/{batch_id}?item_state=pending")
         assert code == 200 and body(filtered)["items"] == []
-        code, _, invalid = call(alice, base, f"/api/batches/{batch_id}/produce", "POST", {"count": 30})
-        assert code == 400, (code, invalid)                   # v2：只接受 20/50/100
+        # v3：30 这类非档位整数已合法，能拦住的是越过单次上限
+        code, _, invalid = call(alice, base, f"/api/batches/{batch_id}/produce", "POST", {"count": 1000})
+        assert code == 400, (code, invalid)
         print("  ✓ 两批 20+30 全部 done，50 条模板 ID 无重复")
 
         # 打包下载
@@ -798,6 +802,39 @@ def main() -> int:
         again_id = make_batch("AW26-001")
         assert again_id != batch_id and again_id in app2.batches.batches
         print("  ✓ 删除批次同时释放批次号索引，同号可重新创建")
+
+        # 6.7 单次生产条数：档位 5/10/20/50/100，档位之外任意整数放行，最小单位 5（零头例外）
+        step_id = make_batch("AW26-STEP5", upload_id=upload_id)
+        code, _, raw = call(alice, base2, f"/api/batches/{step_id}/lock", "POST",
+                            {"template_ids": ready_ids[:10], "confirmed": True})
+        assert code == 200, (code, raw)
+        # 清单还有 10 条时，4 条低于最小生成单位 → 400
+        code, _, raw = call(alice, base2, f"/api/batches/{step_id}/produce", "POST", {"count": 4})
+        assert code == 400 and "5" in body(raw)["error"], (code, raw)
+        assert body(call(alice, base2, f"/api/batches/{step_id}")[2])["batch"]["pending"] == 10, \
+            "400 不能把条目状态改掉"
+        # 7 条不是 5 的倍数，但属于「任意整数」→ 201
+        code, _, raw = call(alice, base2, f"/api/batches/{step_id}/produce", "POST", {"count": 7})
+        assert code == 201 and body(raw)["taken"] == 7, (code, raw)
+        wait_job(alice, base2, body(raw)["job"]["id"])
+        state = wait_batch(alice, base2, step_id,
+                           lambda b: b["active_job_id"] == "" and b["producing"] == 0,
+                           label="7 条对账")
+        assert state["done"] == 7 and state["pending"] == 3, state
+        # 只剩 3 条：切 2 条不允许（零头会永远跑不掉），一次提交全部剩余允许
+        code, _, raw = call(alice, base2, f"/api/batches/{step_id}/produce", "POST", {"count": 2})
+        assert code == 400, (code, raw)
+        code, _, raw = call(alice, base2, f"/api/batches/{step_id}/produce", "POST", {"count": 3})
+        assert code == 201 and body(raw)["taken"] == 3, (code, raw)
+        wait_job(alice, base2, body(raw)["job"]["id"])
+        state = wait_batch(alice, base2, step_id,
+                           lambda b: b["active_job_id"] == "" and b["producing"] == 0,
+                           label="3 条对账")
+        assert state["done"] == 10 and state["pending"] == 0, state
+        # 清单空了：再点 5 条 → 409（空清单），不是 500
+        code, _, raw = call(alice, base2, f"/api/batches/{step_id}/produce", "POST", {"count": 5})
+        assert code == 409, (code, raw)
+        print("  ✓ 单次条数：4 条 400、7 条（非 5 倍数）201 取 7、剩 3 条只许全提、跑完再点 409")
 
         print("OK 批次创建 → 候选 → 锁定 → 分批生产 → 历史分组 → 重启恢复 → 删除批次 全部通过")
         return 0

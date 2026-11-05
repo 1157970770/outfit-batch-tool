@@ -18,7 +18,9 @@
 
   const BATCH_DURATION_PARAM = 7;    // duration = 输出秒数，本页固定 7
   const OUTPUT_SECONDS = BATCH_DURATION_PARAM;
-  const PRODUCE_STEPS = [20, 50, 100];
+  const PRODUCE_STEPS = [5, 10, 20, 50, 100];
+  // 最小生成单位：档位下限（服务端 produce_min 优先）。低于它只有一种情况放行——清单就剩这么多。
+  const PRODUCE_MIN_FALLBACK = 5;
   // 候选分页：每页条数 = 实测容量（列数 × 能完整放下的行数），**保底 50**。
   // 候选区现在与右列等高（见 batch.css），实测 1920×880 候选网格约 654px 高 · 6 列 × 14 行 = 84 条/页，
   // 1920×990 是 6 × 16 = 96 条/页 —— 一页正好填满整块区域，不再有「分页条下面空 280px」的观感。
@@ -79,7 +81,18 @@
       choices: choices.length ? choices : PRODUCE_STEPS,
       maxBatchItems: Math.min(1000, num(svc.max_batch_items, 500) || 500),
       maxRunItems: num(svc.max_batch_run_items, PRODUCE_STEPS[PRODUCE_STEPS.length - 1]) || PRODUCE_STEPS[PRODUCE_STEPS.length - 1],
+      produceMin: Math.max(1, num(svc.produce_min, PRODUCE_MIN_FALLBACK) || PRODUCE_MIN_FALLBACK),
     };
+  }
+  // 生产条数的合法区间：上限同时受「单次上限」与「清单剩余」钳制；
+  // 剩余不足最小单位时下限降到 1（否则零头永远提交不出去）。
+  function produceRange(batch) {
+    const limits = serviceLimits();
+    const total = num(batch && batch.total_items, b.items.length);
+    const pending = Math.max(0, num(batch && batch.pending, total - num(batch && batch.done) - num(batch && batch.failed)));
+    const cap = Math.min(limits.maxRunItems, pending);
+    const min = cap < limits.produceMin ? Math.min(1, cap) : limits.produceMin;
+    return { pending, cap, min };
   }
   // 生产按钮的档位：优先后端 cost_estimate.options 的 count（配置改了单次上限也能跟上），
   // 没有时就退回本地三档。本页不展示金额，只取档位。
@@ -1209,6 +1222,7 @@
       btn.addEventListener('click', () => produce(count, batch));
       actions.append(btn);
     }
+    renderProduceCustom(pending, activeId, closed);
 
     // 失败条目给一个重试入口（接口 #9），否则 failed 条目在页面上就是死路。
     const retryBox = $('batch-retry');
@@ -1225,6 +1239,56 @@
     } else {
       retryBox.classList.add('hidden');
     }
+  }
+
+  /* ---------- 自定条数（档位之外的可变粒度：7、13、33 都行） ----------
+     渲染只改 min/max/disabled 与提示文案，**不重写输入框的值**：
+     这里每 4 秒被轮询重渲染一次，用户正敲「12」时被硬改成 5 是最难受的体验。
+     越界纠正放到提交那一刻（produceCustom 里），用户能看懂为什么被改。 */
+  function renderProduceCustom(pending, activeId, closed) {
+    const input = $('batch-produce-count');
+    const btn = $('batch-produce-apply');
+    const hint = $('batch-produce-hint');
+    if (!input || !btn) return;
+    const limits = serviceLimits();
+    const range = produceRange(b.current);
+    const disabled = b.busy || !!activeId || closed || pending === 0;
+    input.min = String(range.min);
+    input.max = String(Math.max(range.min, range.cap));
+    input.title = range.cap >= limits.produceMin
+      ? `可填 ${limits.produceMin}–${range.cap} 之间的任意整数（7、13、33 都行）`
+      : `清单只剩 ${range.cap} 条，可一次提交`;
+    input.disabled = disabled;
+    btn.disabled = disabled;
+    if (hint) {
+      hint.textContent = pending === 0 ? '清单已跑完'
+        : range.cap < limits.produceMin ? `只剩 ${range.cap} 条`
+          : `${limits.produceMin}–${range.cap} 任意整数`;
+    }
+  }
+
+  function produceCustom() {
+    const batch = b.current;
+    if (b.busy || !batch || !batch.id) return;
+    const input = $('batch-produce-count');
+    const typed = Math.trunc(num(input && input.value, 0));
+    if (!typed) {
+      toast('先在「自定」里填要生产的条数。');
+      if (input) input.focus();
+      return;
+    }
+    const range = produceRange(batch);
+    if (range.pending === 0) { toast('清单里已经没有待生产的条目了。'); return; }
+    if (typed < range.min) {
+      toast(range.min > 1
+        ? `本次最少生产 ${range.min} 条；清单只剩 ${range.pending} 条时可一次提交全部剩余。`
+        : `清单只剩 ${range.cap} 条，最多只能提交这么多。`);
+      return;
+    }
+    const count = Math.min(typed, range.cap);
+    if (input) input.value = String(count);   // 纠正后的值回显，避免以为提交了 typed 条
+    if (count < typed) toast(`清单只剩 ${count} 条，本次按 ${count} 条提交。`);
+    produce(count, batch);
   }
 
   async function retryFailed(batch, count) {
@@ -2033,6 +2097,23 @@
       renderItems();
     });
     $('batch-items-more').addEventListener('click', () => { b.itemLimit += ITEM_PAGE; renderItems(); });
+    // 自定条数：点「生产」或输入框回车都走同一条校验（下限/剩余/上限）
+    const applyBtn = $('batch-produce-apply');
+    if (applyBtn) applyBtn.addEventListener('click', produceCustom);
+    const countInput = $('batch-produce-count');
+    if (countInput) {
+      countInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); produceCustom(); }
+      });
+      // 失焦时把明显越界的值收拢到合法区间，让输入框里看到的就等于会提交的
+      countInput.addEventListener('blur', () => {
+        const range = produceRange(b.current);
+        const typed = Math.trunc(num(countInput.value, 0));
+        if (!typed) return;
+        const fixed = Math.max(range.min, Math.min(typed, Math.max(range.min, range.cap)));
+        if (fixed !== typed) countInput.value = String(fixed);
+      });
+    }
 
     // 预览播放器：失败要有交代，成功/被拦各有提示，绝不留一块黑屏
     const video = $('batch-preview-video');
