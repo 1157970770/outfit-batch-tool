@@ -630,7 +630,7 @@
     } catch (err) { toast(err.message); }
   }
   $('reload-templates').addEventListener('click', async () => { try { const result = await api('/api/admin/reload-templates', { method: 'POST', body: '{}' }); toast(`已加载 ${result.count} 个视频场景`); await bootstrap(); } catch (err) { toast(err.message); } });
-  $('add-user-form').addEventListener('submit', async e => { e.preventDefault(); const f = new FormData(e.currentTarget); try { await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username: f.get('username'), password: f.get('password'), role: f.get('role') }) }); e.currentTarget.reset(); toast('账号已添加。'); await refreshAdmin(); } catch (err) { toast(err.message); } });
+  $('add-user-form').addEventListener('submit', async e => { e.preventDefault(); const form = e.currentTarget; const f = new FormData(form); try { await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username: f.get('username'), password: f.get('password'), role: f.get('role') }) }); form.reset(); toast('账号已添加。'); await refreshAdmin(); } catch (err) { toast(err.message); } });
 
   ['account-from', 'account-to', 'account-status'].forEach(id => $(id).addEventListener('change', () => loadAccount(true)));
   $('account-more').addEventListener('click', () => loadAccount(false));
