@@ -45,6 +45,7 @@ REQUIRED = [
     "test_web_tag_api",
     "test_web_multi_images",
     "test_batches",
+    "test_history_admin",
 ]
 OPTIONAL: list[str] = []
 PER_SUITE_TIMEOUT = 900                  # 单套 15 分钟

@@ -551,6 +551,9 @@ def main() -> int:
         assert keyed[batch_id]["batch_no"] == "AW26-001", keyed[batch_id]
         assert keyed[batch_id]["job_count"] == 2 and keyed[batch_id]["total"] == READY_COUNT, keyed
         assert keyed[batch_id]["success"] == READY_COUNT and keyed[batch_id]["failed"] == 0, keyed
+        for row in rows:
+            assert row["success"] + row["failed"] + row["unfinished"] == row["total"], row
+            assert row["state_sig"], row
         assert "__ungrouped__" in keyed, rows
         assert keyed["__ungrouped__"]["is_ungrouped"] is True, keyed["__ungrouped__"]
         assert keyed["__ungrouped__"]["job_count"] == 1, keyed["__ungrouped__"]
@@ -559,13 +562,32 @@ def main() -> int:
         assert keyed[batch_id]["big_jobs"] == 2 and keyed[batch_id]["small_jobs"] == 0, keyed
         code, _, small_only = call(alice, base, "/api/jobs?lane=small&limit=50")
         assert code == 200 and body(small_only)["total"] == 1, small_only
-        assert rows[-1]["key"] == "__ungrouped__", "未分组固定排最后"
+        stamps = [r["last_at"] for r in rows]
+        assert stamps == sorted(stamps, reverse=True), "分组按最近更新倒序，未分组不再钉在最后"
+        # 管理员按账户拆未分组：虚拟 key 只存在于接口层，明细走同一个 key。
+        code, _, admin_groups = call(admin, base, "/api/history/groups?scope=all&group_by=owner")
+        assert code == 200, (code, admin_groups)
+        admin_rows = body(admin_groups)["groups"]
+        assert "empty_batches" in body(admin_groups), admin_groups
+        owner_row = next((r for r in admin_rows if r["key"] == "__ungrouped__:alice"), None)
+        assert owner_row and owner_row["group_kind"] == "owner" and owner_row["owner"] == "alice", admin_rows
+        assert owner_row["total"] == 1, owner_row
+        code, _, owner_items = call(admin, base, "/api/history/groups/__ungrouped__:alice?offset=0&limit=50")
+        assert code == 200 and body(owner_items)["total"] == 1, owner_items
+        code, _, denied = call(alice, base, "/api/history/groups/__ungrouped__:alice")
+        assert code == 403, (code, denied)
+        # 按批次分组仍是原来的单一大组
+        code, _, plain = call(admin, base, "/api/history/groups?scope=all")
+        assert code == 200 and any(r["key"] == "__ungrouped__" for r in body(plain)["groups"]), plain
+        print("  ✓ 管理员按账户拆未分组、空批次计数、虚拟组权限与明细")
         code, _, hist = call(alice, base, f"/api/history/groups/{batch_id}?offset=0&limit=200")
         assert code == 200, (code, hist)
         hist_body = body(hist)
         assert hist_body["total"] == READY_COUNT, hist_body["total"]
         first = hist_body["items"][0]
         assert first["template_name"].endswith(".mp4") and first["download_url"], first
+        assert first["owner"] == "alice" and first["created_at"] > 0, first
+        assert first["batch_no"] == "AW26-001" and first["job_status"], first
         # 对比层要「对应的定妆图」：每条记录都带 job 自己的素材图（uploads/<id>）
         assert first["image_url"] == f"/api/uploads/{upload_id}", first
         hist_warn = {row["template_id"]: row["verify_warn"] for row in hist_body["items"]}
@@ -590,6 +612,14 @@ def main() -> int:
         assert cfg["images"][0]["upload_id"] == upload_id, cfg
         assert cfg["images"][0]["url"] == f"/api/uploads/{upload_id}", cfg
         assert cfg["images"][0]["available"] is True, cfg
+        assert cfg["owner"] == "alice" and cfg["cross_account"] is False, cfg
+        # 管理员跨账户重跑：图片要按**原任务**的 owner 校验，不能按 admin 自己，
+        # 否则一律判失效、提交按钮被禁用。新任务记在谁名下要说清楚。
+        code, _, admin_rr = call(admin, base, rerun_path)
+        assert code == 200, (code, admin_rr)
+        admin_cfg = body(admin_rr)["config"]
+        assert admin_cfg["owner"] == "alice" and admin_cfg["cross_account"] is True, admin_cfg
+        assert admin_cfg["images"][0]["available"] is True, admin_cfg
         # 服务器磁盘路径绝不能下发到浏览器
         assert "path" not in cfg["images"][0] and "image_path" not in cfg, cfg
         code, _, rr = call(bob, base, rerun_path)
@@ -814,7 +844,9 @@ def main() -> int:
         rows_after = body(call(alice, base2, "/api/history/groups")[2])["groups"]
         keyed_after = {row["key"]: row for row in rows_after}
         assert batch_id not in keyed_after, "删除后历史分组不能再出现该批次"
-        assert rows_after[-1]["key"] == "__ungrouped__", rows_after
+        assert "__ungrouped__" in keyed_after, rows_after
+        assert [r["last_at"] for r in rows_after] == sorted(
+            [r["last_at"] for r in rows_after], reverse=True), "分组按最近更新倒序"
         ungrouped_after = keyed_after["__ungrouped__"]
         assert ungrouped_after["job_count"] == ungrouped_before["job_count"] + len(moved_ids), ungrouped_after
         assert ungrouped_after["total"] == ungrouped_before["total"] + moved_records, ungrouped_after

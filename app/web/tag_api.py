@@ -122,6 +122,31 @@ def _locked_batches(app, ids) -> list[dict]:
     return found
 
 
+def _library_affected_ids(store, action: str, data: dict) -> list[str]:
+    """库级操作影响的模板 ID。
+
+    merge/delete/rename/set_category 的请求体里只有标签名、没有 ids，而「未完成批次
+    还在用这条素材」的提醒要按模板 ID 去批次清单里查，所以得先反查行。合并只关心
+    被清掉的源标签（目标标签保留，不算影响）。
+    """
+    if action == "merge":
+        names = {str(data.get("source") or "").strip()}
+    elif action in ("delete", "rename", "set_category"):
+        names = {str(data.get("name") or "").strip()}
+    else:
+        return []
+    names.discard("")
+    if not names:
+        return []
+    ids: list[str] = []
+    for row in store.rows(include_deprecated=True):
+        if names & {str(tag) for tag in row.get("tags") or []}:
+            template_id = str(row.get("id") or "")
+            if template_id:
+                ids.append(template_id)
+    return ids
+
+
 def snapshot(app, rev=None) -> dict:
     store = getattr(app, "tag_store", None)
     if store is None:
@@ -287,6 +312,10 @@ def impact(app, data: dict, user: dict) -> dict:
         raise _wrap(exc) from None
     if action == "deprecate":
         preview["locked_batches"] = _locked_batches(app, data.get("ids") or [])
+    elif action in ("merge", "delete", "rename", "set_category"):
+        # 库级操作没有 ids：按标签反查受影响的行，才能提示「还有批次在等这条素材」。
+        preview["locked_batches"] = _locked_batches(
+            app, _library_affected_ids(store, action, data))
     preview["ok"] = True
     preview["checked_at"] = time.time()
     return preview

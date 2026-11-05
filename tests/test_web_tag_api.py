@@ -224,6 +224,36 @@ def main() -> int:
         assert preview["affected"] == 2, preview  # 001 与 003 用「近景」
         assert body(call(alice, base, "/api/tags/snapshot")[2])["revision"] == before, "impact 不能改 revision"
 
+        # ---------- 库级操作的影响面：未完成批次里的素材也要报出来 ----------
+        # 直接塞一个已锁定批次（完整 HTTP 流程见 test_batches），只验 impact 的口径：
+        # 合并/删除/改名没有 ids，必须按标签反查模板，再对批次清单里 pending/producing 求和。
+        app.batches.batches["impact-fixture"] = {
+            "id": "impact-fixture", "batch_no": "T-IMPACT", "state": "locked",
+            "items": [{"template_id": "002", "state": "pending"},
+                      {"template_id": "003", "state": "done"}],
+        }
+        try:
+            code, _, raw = call(alice, base, "/api/tags/impact", "POST",
+                                {"action": "merge", "source": "适合秋冬", "target": "近景"})
+            assert code == 200, body(raw)
+            locked = body(raw)["locked_batches"]
+            assert locked == [{"batch_no": "T-IMPACT", "items": 1, "state": "locked"}], locked
+
+            code, _, raw = call(alice, base, "/api/tags/impact", "POST",
+                                {"action": "delete", "name": "适合秋冬"})
+            assert body(raw)["locked_batches"] == locked, body(raw)
+
+            code, _, raw = call(alice, base, "/api/tags/impact", "POST",
+                                {"action": "rename", "name": "适合秋冬", "new_name": "秋季"})
+            assert body(raw)["locked_batches"] == locked, body(raw)
+
+            # 没被未完成批次用到的标签，不能误报
+            code, _, raw = call(alice, base, "/api/tags/impact", "POST",
+                                {"action": "rename", "name": "酒店", "new_name": "酒店客房"})
+            assert code == 200 and body(raw)["locked_batches"] == [], body(raw)
+        finally:
+            app.batches.batches.pop("impact-fixture", None)
+
         # ---------- 标签库删除：没 confirm 必须 400 ----------
         code, _, raw = call(alice, base, "/api/tags/library", "POST",
                             {"revision": revision, "action": "delete", "name": "近景"})

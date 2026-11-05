@@ -1152,8 +1152,21 @@ def make_handler(app: WebApplication):
             if all_users and user.get("role") != "admin":
                 return self._error("此操作需要管理员权限。", 403)
             owner = str((query.get("owner", [""])[0] or "")).strip()
-            return self._json({"ok": True,
-                               "groups": app.batches.history_groups(user, all_users, owner)})
+            group_by = str((query.get("group_by", [""])[0] or "")).strip()
+            groups = app.batches.history_groups(user, all_users, owner, group_by)
+            # 空批次（还没有任何生产记录）不生成一个点不开的分组，只给个计数：
+            # 否则「大批量生产」里 4 个批次、历史里只看到 1 个，会以为数据丢了。
+            with app.batches.mutex:
+                visible = app.batches.batches
+                if not all_users:
+                    visible = {k: v for k, v in visible.items()
+                               if v.get("owner") == user.get("username")}
+                elif owner:
+                    visible = {k: v for k, v in visible.items() if v.get("owner") == owner}
+                used = {row["key"] for row in groups if not row["is_ungrouped"]}
+                empty_batches = sum(1 for key in visible if key not in used)
+            return self._json({"ok": True, "groups": groups,
+                               "empty_batches": empty_batches})
 
         def _history_items(self, key, query, user):
             try:
@@ -1459,6 +1472,7 @@ def make_handler(app: WebApplication):
                 return self._error("找不到该任务。", 404)
             if user.get("role") != "admin" and job.get("owner") != user.get("username"):
                 return self._error("无权操作该任务。", 403)
+            job_owner = str(job.get("owner") or "")
             wanted = str((query or {}).get("template_id", [""])[0] or "").strip()
             ids = [str(item) for item in job.get("template_ids") or []]
             if wanted and wanted not in ids:
@@ -1469,7 +1483,10 @@ def make_handler(app: WebApplication):
             images = []
             for slot in image_slots(job)[:MAX_IMAGE_SLOTS]:
                 upload_id = str(slot.get("upload_id") or "")
-                meta = app.resolve_upload(upload_id, user["username"]) if upload_id else None
+                # 图片归属看的是**原任务**的 owner，不是当前登录名。管理员点别人
+                # 账户的历史行重跑时，按 admin 去查会全部判失效（误报「图片已失效」
+                # 且提交按钮被禁用），但 /api/uploads 本来就允许 admin 读任意账户的图。
+                meta = app.resolve_upload(upload_id, job_owner) if upload_id else None
                 images.append({
                     "upload_id": upload_id,
                     "name": str(slot.get("name") or ""),
@@ -1489,7 +1506,9 @@ def make_handler(app: WebApplication):
                 "tags": tags,
                 # 老 v0.9.0 任务只有 style_no，没有 6 栏位 tags，前端兜底成「上衣」。
                 "style_no": str(job.get("style_no") or ""),
-                "owner": str(job.get("owner") or ""),
+                "owner": job_owner,
+                # 管理员跨账户重跑：前端要提示「新任务算在你自己的账号下」。
+                "cross_account": job_owner != str(user.get("username") or ""),
             }})
 
         def _job_detail(self, job_id, user):
@@ -1565,6 +1584,7 @@ def make_handler(app: WebApplication):
                 _remove_quiet(zip_path)
 
         def _preview(self, template_id, allow_deprecated=False):
+            response_started = False
             try:
                 # 已弃用的视频仍允许预览，否则用户没法在恢复前确认是哪一条
                 item = app.catalog.resolve(template_id, include_retired=allow_deprecated)
@@ -1579,15 +1599,35 @@ def make_handler(app: WebApplication):
                 parsed = urllib.parse.urlsplit(url)
                 if parsed.scheme not in ("http", "https") or not parsed.hostname:
                     return self._error("模板预览地址无效。", 502)
-                headers = {"User-Agent": "OutfitLocal/1"}
-                if self.headers.get("Range"):
-                    headers["Range"] = self.headers["Range"]
-                req = urllib.request.Request(url, headers=headers)
-                try:
-                    response = urllib.request.urlopen(req, timeout=30)
-                except urllib.error.HTTPError as exc:
-                    response = exc
+
+                def fetch(target):
+                    headers = {"User-Agent": "OutfitLocal/1"}
+                    if self.headers.get("Range"):
+                        headers["Range"] = self.headers["Range"]
+                    req = urllib.request.Request(target, headers=headers)
+                    try:
+                        return urllib.request.urlopen(req, timeout=30)
+                    except urllib.error.HTTPError as exc:
+                        return exc
+
+                response = fetch(url)
                 status = getattr(response, "status", 200)
+                # 上游偶发 5xx（签名刚过期 / COS 抖动）：有 key 就重签一次再试。
+                # 日志里「206 / 502 / 206 / 206」正是同一条视频被多次 Range 拉取时
+                # 其中一次失败，重试能消掉大部分这种黑帧。
+                if status >= 500 and item.get("key"):
+                    try:
+                        store = app.template_store()
+                        fresh = store.sign_url(item["key"], 3600) if store else ""
+                    except Exception:
+                        fresh = ""
+                    if fresh and fresh != url:
+                        try:
+                            response.close()
+                        except Exception:
+                            pass
+                        response = fetch(fresh)
+                        status = getattr(response, "status", 200)
                 self.send_response(status)
                 self.send_header("Content-Type", response.headers.get("Content-Type", "video/mp4"))
                 for header in ("Content-Length", "Content-Range", "Accept-Ranges"):
@@ -1597,10 +1637,18 @@ def make_handler(app: WebApplication):
                 self.send_header("Cache-Control", "private, max-age=300")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
-                if self.command != "HEAD":
+                response_started = True
+                if self.command != "HEAD" and status < 400:
                     shutil.copyfileobj(response, self.wfile, length=64 * 1024)
                 response.close()
             except (TemplateError, OSError, urllib.error.URLError, RuntimeError) as exc:
+                if response_started:
+                    # 响应头已经发出去了，再写一次 HTTP 错误会把 JSON 混进视频流。
+                    try:
+                        self.log_message("preview stream aborted: %s", exc)
+                    except Exception:
+                        pass
+                    return
                 return self._error(f"模板预览失败：{exc}", 502)
 
         def _download_video(self, template_id):

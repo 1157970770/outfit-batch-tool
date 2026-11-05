@@ -44,7 +44,7 @@
   // 首屏占位在 session 判定后立刻撤掉，登录页/主界面才有机会显示
   function hideBoot() { const el = $('boot-view'); if (el) el.classList.add('hidden'); }
   function showLogin() { hideBoot(); $('app-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); state.user = null; state.showAll = false; clearInterval(state.timer); }
-  function showApp() { hideBoot(); $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
+  function showApp() { hideBoot(); $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('history-group-by').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
   // 管理员"查看全部"时的账户维度：scope=all 再加 owner 过滤，普通账号永远只看自己。
   function scopeQuery() {
     if (!(state.user && state.user.role === 'admin' && state.showAll)) return 'mine';
@@ -54,6 +54,8 @@
     const select = $('owner-filter');
     const adminAll = state.user && state.user.role === 'admin' && state.showAll;
     select.classList.toggle('hidden', !adminAll);
+    const groupBy = $('history-group-by');
+    if (groupBy) groupBy.classList.toggle('hidden', !adminAll);
     if (!adminAll) { state.ownerFilter = ''; select.value = ''; return; }
     if (!state.adminUsers.length) {
       try { const data = await api('/api/admin/users'); state.adminUsers = data.users || []; } catch (_) { /* 取不到就只留"全部账户" */ }
@@ -649,7 +651,14 @@
     if (createPane === 'history') smallHistories.create.reload('mine');
   }
   document.querySelectorAll('#create-tabs button').forEach(btn => {
-    btn.addEventListener('click', () => setCreatePane(btn.dataset.pane));
+    btn.addEventListener('click', () => {
+      // 试跑历史只在「历史任务 → 小批量」里维护一份，避免两处列表口径不同。
+      if (btn.dataset.pane === 'history' && window.BatchUI && window.BatchUI.showSmallHistory) {
+        window.BatchUI.showSmallHistory();
+        return;
+      }
+      setCreatePane(btn.dataset.pane);
+    });
   });
 
   /* ------------------------------------------------ 历史「重跑」配置回填
@@ -729,9 +738,13 @@
     if (!tid || !known) notes.push('原场景已不在候选里，请重新点选一个');
     if (!usable.length) notes.push('原图片已失效，请在槽位 1 重新上传定妆图');
     else if (dropped) notes.push(`另有 ${dropped} 张细节图已失效，需要时请补上`);
+    // 管理员跨账户重跑：配置能带过来，但新任务算在当前账号名下，必须说清楚。
+    const crossNote = c.cross_account && c.owner
+      ? `注意：原任务属于 ${c.owner}，本次将以你自己的账号重新提交（图片沿用原图）。` : '';
     $('image-info').textContent = [
       `重跑预填：${usable.length} 张原图 · 场景 ${tid || '未指定'} · 上次的提示词与参数已带入。`,
       '可以替换图片、改提示词或改场景，确认后点「确认提交」。',
+      ...(crossNote ? [crossNote] : []),
       ...notes,
     ].join(' ');
     toast(notes.length ? `已带入上次配置，但${notes.join('；')}`

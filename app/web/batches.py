@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,8 +28,8 @@ import zipfile
 from pathlib import Path
 
 from app.web.jobs import (
-    MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _redact, clean_style_no, clean_tags,
-    duration_ok, image_slots,
+    MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _FAILED_RECORD_STATES, _redact,
+    clean_style_no, clean_tags, duration_ok, image_slots,
 )
 from app.web.style_usage import StyleUsageLedger
 from app.web.templates import TemplateError
@@ -996,14 +997,19 @@ class BatchManager:
         return zip_path
 
     # ------------------------------------------------------------------ #11 历史分组
-    def history_groups(self, user: dict, all_users: bool = False, owner: str = "") -> list[dict]:
-        """按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务 + 批次已删除）统一进 __ungrouped__。
+    def history_groups(self, user: dict, all_users: bool = False, owner: str = "",
+                       group_by: str = "batch") -> list[dict]:
+        """按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务 + 批次已删除）进未分组。
 
         归属只认「批次文件还在不在」：job.batch_ref 不回写（历史数据只读），批次一旦被删除，
-        它名下的 job 会自动落回 __ungrouped__，不会留下一个点不开的空分组。
+        它名下的 job 会自动落回未分组，不会留下一个点不开的空分组。
         owner 仅对管理员生效：只看某个账户的历史。
+        group_by="owner"（仅管理员看全部用户时生效）：把未分组再按账户拆成
+        `__ungrouped__:<owner>` 虚拟组，避免多个账户的试跑挤成一张大列表。
+        虚拟 key 只存在于接口层，job / batch 的落盘结构一律不动。
         """
         filter_owner = str(owner or "") if all_users else ""
+        split_owner = bool(all_users and group_by == "owner")
         with self.mutex:
             groups: dict[str, dict] = {}
             for job in self.jobs.jobs.values() if self.jobs else ():
@@ -1012,10 +1018,16 @@ class BatchManager:
                 if filter_owner and job.get("owner") != filter_owner:
                     continue
                 ref = str(job.get("batch_ref") or "")
-                key = ref if ref and ref in self.batches else UNGROUPED_KEY
+                if ref and ref in self.batches:
+                    key = ref
+                elif split_owner:
+                    key = f"{UNGROUPED_KEY}:{str(job.get('owner') or 'unknown')}"
+                else:
+                    key = UNGROUPED_KEY
                 slot = groups.setdefault(key, {
-                    "key": key, "job_count": 0, "total": 0, "success": 0, "failed": 0,
-                    "first_at": None, "last_at": None, "owners": set(),
+                    "key": key, "job_count": 0, "total": 0,
+                    "success": 0, "failed": 0, "unfinished": 0,
+                    "first_at": None, "last_at": None, "owners": set(), "sig": [],
                     # 按通道计数：历史页要能只显示大批量，也要能把「未分组」里的试跑挑出来。
                     "small_jobs": 0, "big_jobs": 0,
                 })
@@ -1025,6 +1037,13 @@ class BatchManager:
                 else:
                     slot["big_jobs"] += 1
                 slot["owners"].add(str(job.get("owner") or ""))
+                # 明细状态指纹：前端用它判断已展开的分组要不要重载。
+                # 只看成功/失败计数会漏掉「A 条 running→success、B 条 success→running」
+                # 这种互相抵消的变化，明细就会停在旧状态。
+                slot["sig"].append(
+                    f"{job.get('id')}:{job.get('status')}:"
+                    + ",".join(f"{str(rec.get('id'))}={str(rec.get('status') or '')}"
+                               for rec in job.get("records") or []))
                 created = job.get("created_at") or 0
                 stamp = job.get("finished_at") or created
                 slot["first_at"] = created if slot["first_at"] is None else min(slot["first_at"], created)
@@ -1032,28 +1051,41 @@ class BatchManager:
                 for rec in job.get("records") or []:
                     status = str(rec.get("status") or "")
                     slot["total"] += 1
+                    # 与 jobs.work_for / 账户用量完全同口径：非成功终态全算失败侧，
+                    # 其余（running/queued/pending/空）算进行中，保证 total 三者之和。
+                    # 以前这里写死 4 种失败状态，unknown/timeout/skipped 和进行中
+                    # 都会凭空消失，卡片数字与账户用量对不上。
                     if status == "success":
                         slot["success"] += 1
-                    elif status in {"failed", "invalid", "expired", "canceled"}:
+                    elif status in _FAILED_RECORD_STATES:
                         slot["failed"] += 1
+                    else:
+                        slot["unfinished"] += 1
             rows = []
             for key, slot in groups.items():
-                batch = self.batches.get(key) if key != UNGROUPED_KEY else None
+                is_owner_group = key.startswith(UNGROUPED_KEY + ":")
+                is_ungrouped = key == UNGROUPED_KEY or is_owner_group
+                batch = None if is_ungrouped else self.batches.get(key)
                 batch_no = str((batch or {}).get("batch_no") or "")
                 # 管理员看全部时，分组卡片要能看出这批是谁跑的；多人混在一起就标"多人"。
                 owners = {name for name in slot.get("owners", set()) if name}
                 owner_label = next(iter(owners)) if len(owners) == 1 else ("多人" if owners else "")
                 rows.append({
                     "key": key,
-                    "batch_no": batch_no if key != UNGROUPED_KEY else "未分组",
-                    "is_ungrouped": key == UNGROUPED_KEY,
+                    "batch_no": "未分组" if is_ungrouped else batch_no,
+                    "group_kind": "owner" if is_owner_group else "batch",
+                    "is_ungrouped": is_ungrouped,
                     "small_jobs": slot["small_jobs"], "big_jobs": slot["big_jobs"],
                     "owner": owner_label,
                     "job_count": slot["job_count"], "total": slot["total"],
                     "success": slot["success"], "failed": slot["failed"],
+                    "unfinished": slot["unfinished"],
+                    "state_sig": hashlib.md5("|".join(sorted(slot["sig"])).encode("utf-8")).hexdigest()[:12],
                     "first_at": slot["first_at"], "last_at": slot["last_at"] or 0,
                 })
-            rows.sort(key=lambda row: (row["is_ungrouped"], -(row["last_at"] or 0)))
+            # 统一按最近更新倒序：以前把「未分组」钉在最后，最新的试跑反而被
+            # 压在一堆老批次下面，管理员一进历史页看到的全是旧数据。
+            rows.sort(key=lambda row: -(row["last_at"] or 0))
             return rows
 
     def history_items(self, key: str, user: dict, offset: int = 0, limit: int = 200,
@@ -1062,7 +1094,20 @@ class BatchManager:
         limit = max(1, min(500, int(limit or 200)))
         owner = str(owner or "") if user.get("role") == "admin" else ""
         with self.mutex:
-            if key != UNGROUPED_KEY:
+            if key.startswith(UNGROUPED_KEY + ":"):
+                # 管理员按账户拆出来的虚拟组：只取该账户、且不属于任何现存批次的任务。
+                if user.get("role") != "admin":
+                    raise BatchError("无权查看该分组。", 403)
+                target_owner = key[len(UNGROUPED_KEY) + 1:]
+                batch_no = "未分组"
+                if owner and owner != target_owner:
+                    jobs = []          # 筛选与虚拟组冲突时返回空，不能放宽到别的账户
+                else:
+                    jobs = [job for job in (self.jobs.jobs.values() if self.jobs else ())
+                            if (not job.get("batch_ref")
+                                or str(job.get("batch_ref")) not in self.batches)
+                            and str(job.get("owner") or "") == target_owner]
+            elif key != UNGROUPED_KEY:
                 batch = self.batches.get(str(key))
                 if not batch:
                     raise BatchError("找不到该批次。", 404)
@@ -1104,11 +1149,21 @@ class BatchManager:
                 for rec in job.get("records") or []:
                     template_id = str(rec.get("id"))
                     status = str(rec.get("status") or "")
+                    raw_name = rec.get("template")
+                    # 老任务/模板下架后 job.templates 里没有名字，退回记录自带的
+                    # template 字段；它可能是完整云端 URL，只取文件名展示。
+                    raw_name = (raw_name.rsplit("/", 1)[-1] or "") if isinstance(raw_name, str) else ""
+                    template_name = names.get(template_id, "") or raw_name
                     rows.append({
                         "job_id": str(job.get("id")),
                         "template_id": template_id,
                         "image_url": image_url,
-                        "template_name": names.get(template_id, ""),
+                        "template_name": template_name,
+                        # 管理员看全部用户时，明细行要能分辨是谁、什么时候、属于哪批。
+                        "owner": str(job_owner or ""),
+                        "created_at": job.get("created_at") or 0,
+                        "batch_no": batch_no,
+                        "job_status": str(job.get("status") or ""),
                         "status": status,
                         "seconds": rec.get("seconds"),
                         "download_url": (f"/api/jobs/{job.get('id')}/download/{template_id}"

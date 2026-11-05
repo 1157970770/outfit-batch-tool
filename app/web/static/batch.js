@@ -55,7 +55,7 @@
     promptDraft: '',         // 编辑中的草稿文本（与 batch.prompt 分离，避免误覆盖）
     promptOpen: false,       // 提示词是否展开全文（默认折叠两行，页面更紧凑；4 秒轮询重渲染也靠它保持）
     groups: [], openGroups: new Set(), groupDetails: new Map(), groupSig: new Map(),
-    historyMode: 'groups', flatWarned: false,
+    emptyBatches: 0, historyMode: 'groups', flatWarned: false,
     styleUsed: {},           // 当前批次上衣款号已用过的模板（{id: {batch_no,...}}），防重标记
   };
 
@@ -231,6 +231,17 @@
       btn.classList.toggle('hidden', !viewVisible);
       btn.disabled = !viewVisible || b.busy;
     }
+    // 「关闭批次」：锁定态才有意义；还有任务在跑时置灰（后端也会 409，这里先拦住）。
+    const closeBtn = $('batch-d-close-btn');
+    if (closeBtn) {
+      const closable = b.mode === 'view' && !!b.current && !!b.current.id && state === 'locked';
+      const running = !!(b.current && b.current.active_job_id);
+      closeBtn.classList.toggle('hidden', !closable);
+      closeBtn.disabled = !closable || b.busy || running;
+      closeBtn.title = running
+        ? '还有生产任务在跑，等它跑完才能关闭批次'
+        : '关闭后不能再提交生产；清单、记录与已出的视频都保留';
+    }
   }
   function exitBatch() {
     if (b.mode !== 'view' || !b.current || b.busy) return;
@@ -250,6 +261,28 @@
     toast(state === 'draft'
       ? '已退出这个批次，草稿仍然保留；点「继续筛选」可以接着做。'
       : '已退回批次列表，批次数据不变。');
+  }
+
+  /* 关闭批次：状态机 draft → locked → closed 的最后一步。
+     只改批次本身，不动清单、不删视频、不碰已产出的 job —— 关闭后历史分组里仍能看到。 */
+  async function closeBatch() {
+    const batch = b.current;
+    if (!batch || !batch.id || b.busy) return;
+    if ((txt(batch.state) || 'draft') !== 'locked') return;
+    if (txt(batch.active_job_id)) { toast('还有生产任务在跑，等它跑完再关闭。'); return; }
+    if (!confirm(`关闭批次 ${txt(batch.batch_no) || batch.id}？\n\n关闭后不能再提交生产，清单与已产出的视频都保留；历史里随时能查。`)) return;
+    b.busy = true;
+    updateExitButton();
+    try {
+      await api(`/api/batches/${encodeURIComponent(batch.id)}/close`, { method: 'POST', body: '{}' });
+      toast('批次已关闭。');
+      b.busy = false;
+      await refreshBatch(false);
+    } catch (err) {
+      b.busy = false;
+      toast(err.message);
+      updateExitButton();
+    }
   }
 
   /* ---------- 步骤 A：建批次 ---------- */
@@ -612,13 +645,36 @@
     candRefreshTimer = setTimeout(() => { fetchCandidates().catch(() => {}); }, 300);
   }
 
+  /* 标签 → 大类。服务端 filter_items() 的语义是「同一大类内命中任一标签即可（OR）、
+     跨大类必须全部命中（AND）」，本地快筛必须照抄；否则同一大类勾两个标签
+     （例如 近景 + 中景）会被当成「必须同时包含」，候选瞬间变 0 条。 */
+  function tagCategoryOf() {
+    const st = (App && App.state) || {};
+    const values = st.tagValues || {};
+    const map = new Map();
+    for (const category of Object.keys(values)) {
+      for (const tag of values[category] || []) {
+        if (!map.has(tag)) map.set(tag, category);
+      }
+    }
+    return map;
+  }
+
   /* 当前筛选命中的候选（只受标签快筛影响，不受「只看已选」影响）。
      「全选全部 N 条」的 N 就取这里的长度 —— 是筛选后的真实条数，不是 500 这个拉取上限。 */
   function candidateMatched() {
     let list = b.candidates;
     if (b.candTagFilter.size) {
-      const wanted = [...b.candTagFilter];
-      list = list.filter((item) => wanted.every((tag) => item.tags.includes(tag)));
+      const categoryOf = tagCategoryOf();
+      // 认不出大类的标签各自成组（退化为「必须同时包含」），不静默放宽条件。
+      const groups = new Map();
+      for (const tag of b.candTagFilter) {
+        const key = categoryOf.get(tag) || `\u0000${tag}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(tag);
+      }
+      const wanted = [...groups.values()];
+      list = list.filter((item) => wanted.every((tags) => tags.some((tag) => item.tags.includes(tag))));
     }
     return list;
   }
@@ -994,7 +1050,7 @@
     for (const item of b.candidates) for (const tag of item.tags) counts.set(tag, (counts.get(tag) || 0) + 1);
     const tags = [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 24);
     if (!tags.length) return;
-    root.append(el('span', 'batch-chips-label', '按标签快速定位（需同时包含）：'));
+    root.append(el('span', 'batch-chips-label', '按标签快速定位（同类任一、跨类全部）：'));
     for (const [tag, count] of tags) {
       const chip = el('button', `batch-chip${b.candTagFilter.has(tag) ? ' is-on' : ''}`, `${tag} ${count}`);
       chip.type = 'button';
@@ -1819,11 +1875,17 @@
 
   /* ---------- 历史任务：按批次分组 ---------- */
   function groupSignature(group) {
-    return `${num(group.job_count)}|${num(group.success)}|${num(group.failed)}|${num(group.last_at)}`;
+    // state_sig 是后端按「每条记录的状态」算的指纹：running→终态、或两条记录
+    // 状态互换导致计数互相抵消时，已展开的分组明细也能跟着刷新。
+    const counts = [group.job_count, group.total, group.success, group.failed,
+      group.unfinished, group.last_at].map(value => num(value)).join('|');
+    return `${txt(group.state_sig) || 'none'}|${counts}`;
   }
   // 历史范围：全部 / 大批量 / 小批量。小批量是平铺列表（一轮 1–3 条，按批次分组反而多点一次），
   // 大批量与全部仍走批次分组；分组数据里带了 small_jobs / big_jobs，用来剔除纯试跑的「未分组」。
   let historyScope = 'all';
+  // 管理员看全部用户时默认按账户拆「未分组」；「按批次」是原来的单一大组。
+  let historyGroupBy = 'owner';
   function setHistoryScope(scope, silent) {
     historyScope = ['all', 'big', 'small'].includes(scope) ? scope : 'all';
     document.querySelectorAll('#history-scope button').forEach(btn => {
@@ -1834,6 +1896,16 @@
   document.querySelectorAll('#history-scope button').forEach(btn => {
     btn.addEventListener('click', () => setHistoryScope(btn.dataset.scope));
   });
+  const groupBySelect = $('history-group-by');
+  if (groupBySelect) {
+    groupBySelect.value = historyGroupBy;
+    groupBySelect.addEventListener('change', () => {
+      historyGroupBy = groupBySelect.value === 'batch' ? 'batch' : 'owner';
+      // 虚拟组 key 变了，旧的展开态/明细缓存/签名全部作废，否则会拿旧 key 去拉明细。
+      b.openGroups.clear(); b.groupDetails.clear(); b.groupSig.clear();
+      refreshHistory();
+    });
+  }
 
   async function refreshHistory(openId = '') {
     if (!App.state.user) return;
@@ -1850,8 +1922,9 @@
     }
     $('history-small').classList.add('hidden');
     try {
-      const data = await api(`/api/history/groups?scope=${scopeParam()}`);
+      const data = await api(`/api/history/groups?scope=${scopeParam()}&group_by=${encodeURIComponent(historyGroupBy)}`);
       b.groups = Array.isArray(data.groups) ? data.groups : [];
+      b.emptyBatches = num(data.empty_batches);
       b.historyMode = 'groups';
       $('jobs-list').classList.add('hidden');
       $('history-groups').classList.remove('hidden');
@@ -1890,12 +1963,17 @@
       return;
     }
     const fragment = document.createDocumentFragment();
+    if (num(b.emptyBatches)) {
+      fragment.append(el('p', 'muted history-empty-note',
+        `另有 ${num(b.emptyBatches)} 个批次还没有生产记录，可在「大批量生产」里查看。`));
+    }
     for (const group of groups) fragment.append(groupCard(group));
     root.append(fragment);
   }
   function groupCard(group) {
     const key = txt(group.key);
     const isUngrouped = key === '__ungrouped__' || group.is_ungrouped === true;
+    const isOwnerGroup = group.group_kind === 'owner';
     const open = b.openGroups.has(key);
     const card = el('article', 'card history-group');
     card.dataset.key = key;
@@ -1903,13 +1981,19 @@
     head.type = 'button';
     head.setAttribute('aria-expanded', open ? 'true' : 'false');
     const titleWrap = el('div', 'history-group-title');
-    titleWrap.append(el('b', null, isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次')));
-    const parts = [`${num(group.job_count)} 个任务`, `成功 ${num(group.success)}`, `失败 ${num(group.failed)}`];
-    // 管理员看全部用户时，分组标题要能区分是谁的任务（多人混组时后端给"多人"）。
-    if (App.state.user && App.state.user.role === 'admin' && group.owner) parts.unshift(`账户 ${group.owner}`);
+    const title = isOwnerGroup
+      ? `${txt(group.owner) || '未知账户'} · 未分组试跑`
+      : (isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次'));
+    titleWrap.append(el('b', null, title));
+    // 数字统一按「记录条数」口径，与账户用量页一致；任务数单独标，不再混写。
+    const parts = [`${num(group.total)} 条记录`, `成功 ${num(group.success)}`,
+      `失败 ${num(group.failed)}`, `进行中 ${num(group.unfinished)}`,
+      `${num(group.job_count)} 个任务`];
+    if (App.state.user && App.state.user.role === 'admin' && group.owner && !isOwnerGroup) parts.unshift(`账户 ${group.owner}`);
     titleWrap.append(el('small', null, `${parts.join(' · ')} · ${fmtTime(group.first_at)} → ${fmtTime(group.last_at)}`));
     const side = el('div', 'history-group-side');
-    if (num(group.failed)) side.append(el('span', 'status failed', `失败 ${num(group.failed)}`));
+    // 标题里已有失败数，右侧只保留「进行中」这个需要一眼看到的动态徽标。
+    if (num(group.unfinished)) side.append(el('span', 'status running', `进行中 ${num(group.unfinished)}`));
     const chevron = el('span', 'history-chevron', open ? '收起' : '展开');
     side.append(chevron);
     head.append(titleWrap, side);
@@ -2005,15 +2089,21 @@
 
   function historyRow(item, groupKey, batchNo) {
     const status = txt(item.status);
-    const row = el('div', 'history-record');
+    const adminAll = !!(App.state.user && App.state.user.role === 'admin' && App.state.showAll);
+    const inOwnerGroup = String(groupKey || '').startsWith('__ungrouped__:');
+    const row = el('div', `history-record${adminAll ? ' is-admin' : ''}`);
     const nameCell = el('div', 'history-record-name');
     nameCell.append(el('b', null, txt(item.template_name) || txt(item.template_id) || '未命名场景'), el('small', null, txt(item.template_id)));
+    // 12 位任务 ID 不常驻占宽：管理员要看归属与时间，ID 收进悬停提示。
+    nameCell.title = `任务 ${txt(item.job_id)}${txt(item.batch_no) ? ` · ${txt(item.batch_no)}` : ''}`;
     const statusCell = el('div', 'history-record-state');
     const statusText = App.statusText || {};
     statusCell.append(el('span', `status ${status}`, statusText[status] || status || '—'));
     const infoCell = el('div', 'history-record-info');
     const parts = [];
-    if (txt(item.job_id)) parts.push(`任务 ${txt(item.job_id)}`);
+    // 按账户拆出来的组标题已经写了账户，行内不再重复一遍。
+    if (adminAll && !inOwnerGroup && txt(item.owner)) parts.push(`账户 ${txt(item.owner)}`);
+    if (adminAll && num(item.created_at)) parts.push(fmtTime(item.created_at));
     if (num(item.seconds)) parts.push(`用时 ${num(item.seconds)} 秒`);
     if (txt(item.archive_warning)) parts.push(txt(item.archive_warning));
     if (parts.length) infoCell.append(el('small', null, parts.join(' · ')));
@@ -2021,6 +2111,7 @@
     const warn = txt(item.verify_warn);
     if (warn) infoCell.append(el('small', 'history-verify-warn', `质量提示：${warn}`));
     const actions = el('div', 'record-actions');
+    const success = status === 'success' && txt(item.download_url);
     if (txt(item.job_id)) {
       const rerun = el('button', 'quiet rerun-btn', '重跑');
       rerun.type = 'button';
@@ -2028,8 +2119,8 @@
       rerun.addEventListener('click', () => rerunHistoryItem(item, rerun));
       actions.append(rerun);
     }
-    if (txt(item.download_url)) {
-      // 对比：一个屏并排看 定妆图 / 生成的视频 / 它用的模板视频
+    if (success) {
+      // 对比 / 下载只有成功出片才有意义；进行中和失败条目不摆一堆灰按钮。
       const cmp = el('button', 'quiet', '对比');
       cmp.type = 'button';
       cmp.title = '同屏对比定妆图、生成的视频与模板视频';
@@ -2038,8 +2129,6 @@
       const link = el('a', 'link-btn', '下载');
       link.href = txt(item.download_url);
       actions.append(link);
-    } else {
-      actions.append(el('span', 'muted', '无文件'));
     }
     if (txt(item.job_id)) {
       const btn = el('button', 'quiet', '任务详情');
@@ -2058,7 +2147,7 @@
      三个面板 flex:1 平分宽度 —— 图面板隐藏后剩下两个自动变宽，不会留空列。 */
   const compareView = {
     root: null, title: null, grid: null, imgPane: null, img: null, gen: null, tpl: null,
-    seq: 0, imgCache: new Map(),
+    tplFallback: null, seq: 0, imgCache: new Map(),
   };
 
   function ensureCompareView() {
@@ -2095,6 +2184,24 @@
     c.tpl = document.createElement('video');
     c.tpl.controls = true; c.tpl.loop = true; c.tpl.muted = true; c.tpl.playsInline = true; c.tpl.preload = 'auto';
     tplPane.append(c.tpl);
+    // 云端预览偶发 502 / 模板已下架：给出明确提示与重试入口，别只留一个黑框。
+    const fallback = el('div', 'compare-fallback hidden');
+    fallback.append(el('span', null, '模板视频暂时加载失败（云端预览不可用）'));
+    const retry = el('button', 'quiet', '重试');
+    retry.type = 'button';
+    retry.addEventListener('click', () => {
+      const tid = c.tpl.dataset.templateId || '';
+      if (!tid) return;
+      fallback.classList.add('hidden');
+      c.tpl.src = `/api/templates/${encodeURIComponent(tid)}/preview?allow_deprecated=1&t=${Date.now()}`;
+      const promise = c.tpl.play();
+      if (promise && typeof promise.catch === 'function') promise.catch(() => {});
+    });
+    fallback.append(retry);
+    tplPane.append(fallback);
+    c.tplFallback = fallback;
+    c.tpl.addEventListener('error', () => fallback.classList.remove('hidden'));
+    c.tpl.addEventListener('loadeddata', () => fallback.classList.add('hidden'));
 
     grid.append(c.imgPane, genPane, tplPane);
     c.grid = grid;
@@ -2139,10 +2246,16 @@
     const tid = txt(item.template_id);
     const batchLabel = batchNo && batchNo !== '未分组' ? ` · 批次 ${batchNo}` : '';
     c.title.textContent = `${name}（${tid}）${batchLabel}`;
-    const batchId = groupKey && groupKey !== '__ungrouped__' ? groupKey : '';
+    // 按账户拆出来的 __ungrouped__:<owner> 是虚拟 key，不是批次 id，别拿去查批次图。
+    const gk = String(groupKey || '');
+    const batchId = gk && gk !== '__ungrouped__' && !gk.startsWith('__ungrouped__:') ? gk : '';
     // 先把视频和覆盖层亮出来，图再异步补 —— 不让图片请求拖着整个对比层不出现。
     c.gen.src = txt(item.download_url);
-    c.tpl.src = tid ? `/api/templates/${encodeURIComponent(tid)}/preview` : '';
+    // 历史任务用的模板可能已被标记弃用：不带 allow_deprecated 会直接 404，
+    // 对比层第三栏就永远是空的。标签页预览一直带这个参数，这里要一致。
+    c.tpl.dataset.templateId = tid;
+    c.tpl.src = tid ? `/api/templates/${encodeURIComponent(tid)}/preview?allow_deprecated=1` : '';
+    if (c.tplFallback) c.tplFallback.classList.add('hidden');
     const direct = txt(item.image_url);
     setCompareImage(direct);
     c.root.classList.remove('hidden');
@@ -2169,6 +2282,7 @@
     }
     c.img.removeAttribute('src');
     c.imgPane.classList.add('hidden');
+    if (c.tplFallback) c.tplFallback.classList.add('hidden');
     c.root.classList.add('hidden');
   }
 
@@ -2194,6 +2308,8 @@
       const btn = $(id);
       if (btn) btn.addEventListener('click', exitBatch);
     }
+    const closeBtn = $('batch-d-close-btn');
+    if (closeBtn) closeBtn.addEventListener('click', closeBatch);
     $('batch-prompt-select').addEventListener('change', () => {
       $('batch-prompt-body').value = $('batch-prompt-select').selectedOptions[0]?.dataset.body || '';
       updateBatchPromptCount();
@@ -2322,6 +2438,11 @@
     enter,
     onTemplates,
     refreshHistory,
+    // 小批量试跑页的「历史」入口：并到统一的历史任务页，只留一套列表与口径。
+    showSmallHistory: () => {
+      setHistoryScope('small', true);
+      if (window.OutfitApp && window.OutfitApp.switchView) window.OutfitApp.switchView('history-view');
+    },
     // 供调试/外部刷新使用
     refresh: () => (b.mode === 'list' ? loadBatches() : refreshBatch(false)),
   };
