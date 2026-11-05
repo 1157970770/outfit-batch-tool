@@ -1811,7 +1811,7 @@
     if (!detail.items.length) { body.append(el('div', 'empty', '这一组没有明细。')); return; }
     const list = el('div', 'record-list');
     const fragment = document.createDocumentFragment();
-    for (const item of detail.items) fragment.append(historyRow(item));
+    for (const item of detail.items) fragment.append(historyRow(item, key, detail.batchNo));
     list.append(fragment);
     body.append(list);
     const rest = detail.total - detail.items.length;
@@ -1823,7 +1823,7 @@
     }
     body.append(el('p', 'muted history-group-foot', `共 ${detail.total} 条${detail.batchNo ? ` · 批次 ${detail.batchNo}` : ''}`));
   }
-  function historyRow(item) {
+  function historyRow(item, groupKey, batchNo) {
     const status = txt(item.status);
     const row = el('div', 'history-record');
     const nameCell = el('div', 'history-record-name');
@@ -1842,6 +1842,12 @@
     if (warn) infoCell.append(el('small', 'history-verify-warn', `质量提示：${warn}`));
     const actions = el('div', 'record-actions');
     if (txt(item.download_url)) {
+      // 对比：一个屏并排看 定妆图 / 生成的视频 / 它用的模板视频
+      const cmp = el('button', 'quiet', '对比');
+      cmp.type = 'button';
+      cmp.title = '同屏对比定妆图、生成的视频与模板视频';
+      cmp.addEventListener('click', () => openCompare(item, groupKey, batchNo));
+      actions.append(cmp);
       const link = el('a', 'link-btn', '下载');
       link.href = txt(item.download_url);
       actions.append(link);
@@ -1856,6 +1862,100 @@
     }
     row.append(nameCell, statusCell, infoCell, actions);
     return row;
+  }
+
+  /* ---------- 历史对比：定妆图 / 生成的视频 / 模板视频 同屏 ----------
+     全页只建一个覆盖层；打开时才设 src 并自动静音循环播放，关闭即停并清 src。
+     定妆图按分组 key（= 批次 id）查 /api/batches/<id> 拿 image_url，结果缓存；
+     「未分组」没有批次，图面板直接隐藏，两个视频照常对比。 */
+  const compareView = { root: null, title: null, imgPane: null, img: null, gen: null, tpl: null, imgCache: new Map() };
+
+  function ensureCompareView() {
+    if (compareView.root) return;
+    const c = compareView;
+    const root = el('div', 'compare-overlay hidden');
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-modal', 'true');
+    root.setAttribute('aria-label', '生成结果对比');
+    const head = el('div', 'compare-head');
+    c.title = el('div', 'compare-title');
+    const close = el('button', 'quiet compare-close', '关闭 ×');
+    close.type = 'button';
+    close.addEventListener('click', hideCompareView);
+    head.append(c.title, close);
+    const grid = el('div', 'compare-grid');
+
+    const makePane = (label) => {
+      const pane = el('div', 'compare-pane');
+      pane.append(el('div', 'compare-label', label));
+      return pane;
+    };
+    c.imgPane = makePane('定妆图');
+    c.img = document.createElement('img');
+    c.img.alt = '定妆图';
+    c.imgPane.append(c.img);
+    const genPane = makePane('生成的视频');
+    c.gen = document.createElement('video');
+    c.gen.controls = true; c.gen.loop = true; c.gen.muted = true; c.gen.playsInline = true; c.gen.preload = 'auto';
+    genPane.append(c.gen);
+    const tplPane = makePane('模板视频');
+    c.tpl = document.createElement('video');
+    c.tpl.controls = true; c.tpl.loop = true; c.tpl.muted = true; c.tpl.playsInline = true; c.tpl.preload = 'auto';
+    tplPane.append(c.tpl);
+
+    grid.append(c.imgPane, genPane, tplPane);
+    root.append(grid);
+    document.body.append(root);
+    c.root = root;
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideCompareView(); });
+    // 点空白处（遮罩/网格缝隙）也能关，面板内点击不关
+    root.addEventListener('click', (e) => { if (e.target === root || e.target === grid) hideCompareView(); });
+  }
+
+  async function openCompare(item, groupKey, batchNo) {
+    ensureCompareView();
+    const c = compareView;
+    const name = txt(item.template_name) || txt(item.template_id) || '未命名场景';
+    const tid = txt(item.template_id);
+    c.title.textContent = `${name}（${tid}）${batchNo ? ` · 批次 ${batchNo}` : ''}`;
+    // 定妆图：分组 key 就是批次 id；未分组没有批次，图面板隐藏
+    const batchId = groupKey && groupKey !== '__ungrouped__' ? groupKey : '';
+    c.img.removeAttribute('src');
+    c.imgPane.classList.add('hidden');
+    if (batchId) {
+      let image_url = c.imgCache.get(batchId);
+      if (image_url === undefined) {
+        try {
+          const data = await api(`/api/batches/${encodeURIComponent(batchId)}`);
+          image_url = txt(data.batch && data.batch.image_url);
+        } catch { image_url = ''; }
+        c.imgCache.set(batchId, image_url);
+      }
+      if (image_url) {
+        c.img.src = image_url;
+        c.imgPane.classList.remove('hidden');
+      }
+    }
+    c.gen.src = txt(item.download_url);
+    c.tpl.src = tid ? `/api/templates/${encodeURIComponent(tid)}/preview` : '';
+    c.root.classList.remove('hidden');
+    for (const video of [c.gen, c.tpl]) {
+      if (!video.getAttribute('src')) continue;
+      const promise = video.play();
+      if (promise && typeof promise.catch === 'function') promise.catch(() => { /* 静音被拦极罕见，手动点控件即可 */ });
+    }
+  }
+
+  function hideCompareView() {
+    const c = compareView;
+    if (!c.root || c.root.classList.contains('hidden')) return;
+    for (const video of [c.gen, c.tpl]) {
+      try { video.pause(); } catch (_) { /* 已释放时 pause 可能抛错 */ }
+      video.removeAttribute('src');
+      if (video.load) video.load();
+    }
+    c.img.removeAttribute('src');
+    c.root.classList.add('hidden');
   }
 
   /* ---------- 事件绑定与入口 ---------- */

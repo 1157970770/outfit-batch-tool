@@ -121,6 +121,23 @@
 .batch-cand-badge-used{background:color-mix(in srgb,var(--red,#c2410c) 12%,white);color:var(--red,#c2410c)}
 /* 评分徽标：蓝色系（打分是正向信息），与琥珀「未上传」/红「已用」区分 */
 .batch-cand-badge-rating{background:color-mix(in srgb,var(--blue) 12%,white);color:var(--blue)}
+
+/* ---------- 历史对比：定妆图 / 生成的视频 / 模板视频 同屏 ---------- */
+.compare-overlay{position:fixed;inset:0;z-index:80;display:flex;flex-direction:column;gap:10px;padding:16px;background:rgba(15,25,45,.72);backdrop-filter:blur(2px)}
+.compare-overlay.hidden{display:none}
+.compare-head{display:flex;align-items:center;gap:12px;flex:none}
+.compare-title{flex:1 1 auto;min-width:0;font-size:15px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.compare-close{flex:none}
+.compare-grid{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(180px,240px) 1fr 1fr;gap:12px}
+.compare-pane{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:0;background:var(--paper);border:1px solid var(--line-strong);border-radius:12px;padding:10px}
+.compare-label{flex:none;font-size:12px;font-weight:700;color:var(--muted)}
+.compare-pane img,.compare-pane video{flex:1 1 auto;min-height:0;width:100%;object-fit:contain;background:#000;border-radius:8px}
+.compare-pane-image.is-missing,.compare-pane.hidden{display:none}
+@media (max-width:900px){
+  .compare-grid{grid-template-columns:1fr;overflow:auto}
+  .compare-pane{min-height:240px}
+  .compare-pane-image{min-height:180px}
+}
 .batch-cand-meta{grid-area:meta;min-width:0;font-size:11px;line-height:14px;color:var(--muted);word-break:break-word}
 /* 标签多时缩字号并允许换行，保证视频卡完整展示全部标签 */
 .batch-cand-meta.is-dense{font-size:10px;line-height:12px}
