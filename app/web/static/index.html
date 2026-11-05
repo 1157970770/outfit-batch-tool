@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css?v=20261105b">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
-  <script defer src="/static/app.js?v=20261105a"></script>
+  <script defer src="/static/app.js?v=20261105b"></script>
   <script defer src="/static/batch.js?v=20261105b"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
@@ -284,7 +284,16 @@
                 <div id="batch-counters" class="batch-counters"></div>
                 <div class="batch-progress-line"><div class="progress"><span id="batch-progress-fill"></span></div><p id="batch-progress-text" class="muted">等待开始</p></div>
               </div>
-              <div id="batch-produce-actions" class="batch-produce-actions"></div>
+              <div class="batch-produce-side">
+                <div id="batch-produce-actions" class="batch-produce-actions"></div>
+                <!-- 自定条数：档位之外的可变粒度（7、13、33 都行），下限 5 条，上限＝单次生产上限 -->
+                <div class="batch-produce-custom">
+                  <label for="batch-produce-count">自定</label>
+                  <input id="batch-produce-count" type="number" min="5" max="100" step="1" value="5" inputmode="numeric" aria-label="本次生产条数">
+                  <button id="batch-produce-apply" class="quiet" type="button">生产</button>
+                  <span id="batch-produce-hint" class="muted">5–100 之间任意整数</span>
+                </div>
+              </div>
             </div>
             <div id="batch-retry" class="batch-retry hidden"></div>
             <p id="batch-produce-error" class="error hidden"></p>

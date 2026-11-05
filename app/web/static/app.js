@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
+  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, detailTimer: null, showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
   const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', unknown: '结果未知', timeout: '等待超时', success: '成功' };
   const esc = (s) => String(s ?? '');
   // 6 栏位款号标签：读取容器内 [data-tag-slot]，返回 {top:...} 形式（空值丢弃）。
@@ -409,9 +409,38 @@
       card.append(left, actions); root.append(card);
     });
   }
-  async function openJob(id) { state.selectedJob = id; try { const data = await api(`/api/jobs/${id}`); renderDetail(data.job); } catch (err) { toast(err.message); } }
+  async function openJob(id) {
+    state.selectedJob = id;
+    stopDetailPoll();
+    try { const data = await api(`/api/jobs/${id}`); renderDetail(data.job); scheduleDetailPoll(id, data.job && data.job.status); } catch (err) { toast(err.message); }
+  }
+  /* 任务详情的运行中轮询：排队/生成中每 3.5s 重拉一次详情，
+     单条视频完成状态就能自动跳成「成功」，不用手动刷新。跑完/关面板/切任务即停。 */
+  const DETAIL_ACTIVE = ['queued', 'running'];
+  // 面板内容签名：状态 + 每条记录的状态。轮询时签名没变就不重渲染，
+  // 避免把面板里正在播放的视频播放器每 3.5 秒重建一次。
+  const detailSig = (job) => `${job && job.status}|${((job && job.records) || []).map((r) => `${r.id}:${r.status}`).join(',')}`;
+  function stopDetailPoll() { if (state.detailTimer) { clearInterval(state.detailTimer); state.detailTimer = null; } }
+  function scheduleDetailPoll(jobId, status) {
+    stopDetailPoll();
+    if (!DETAIL_ACTIVE.includes(String(status || ''))) return;
+    state.detailTimer = setInterval(async () => {
+      if (document.hidden) return;
+      // 面板已关 / 已切到别的任务：这轮定时器作废
+      if (state.selectedJob !== jobId) { stopDetailPoll(); return; }
+      const root = $('job-detail');
+      if (!root || root.classList.contains('hidden')) { stopDetailPoll(); return; }
+      try {
+        const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (state.selectedJob !== jobId) { stopDetailPoll(); return; }
+        if (detailSig(data.job) !== state.detailSig) renderDetail(data.job);
+        if (!DETAIL_ACTIVE.includes(String(data.job && data.job.status))) stopDetailPoll();
+      } catch (_) { /* 轮询失败保留当前画面，下一轮再试 */ }
+    }, 3500);
+  }
   function renderDetail(job) {
     state.detailStatus = job.status;
+    state.detailSig = detailSig(job);
     const root = $('job-detail'); root.classList.remove('hidden'); root.replaceChildren();
     const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.batch_id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = job.message || statusText[job.status]; left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status;
     const side = document.createElement('div'); side.className = 'job-actions';
