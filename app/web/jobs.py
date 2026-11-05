@@ -585,6 +585,28 @@ class JobManager:
             return seconds * float(price), "derived"
         return 0.0, "missing"
 
+    def videos_used(self, owner: str) -> int:
+        """账户已占用的生成额度（条），供按账户的生成上限使用。
+
+        口径：
+          · success（已生成）与 running（正在生成）计入；
+          · queued/running 任务里还没跑到的条目也会生成，一并计入（多算不吃亏）；
+          · failed/invalid/expired/canceled/unknown/timeout/skipped 不计——没生成出视频。
+        """
+        used = 0
+        with self.lock:
+            for job in self.jobs.values():
+                if str(job.get("owner") or "") != owner:
+                    continue
+                counted = 0
+                for rec in job.get("records") or []:
+                    if str(rec.get("status")) in ("success", "running"):
+                        counted += 1
+                if str(job.get("status")) in ("queued", "running"):
+                    counted += max(0, int(job.get("total") or 0) - counted)
+                used += counted
+        return used
+
     def usage_for(self, start: float | None = None, end: float | None = None,
                   owner: str = "") -> dict:
         """按账户汇总工作量：任务数、条数、成功/失败、计费秒、预估金额、最近活跃。

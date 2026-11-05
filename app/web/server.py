@@ -665,7 +665,9 @@ def make_handler(app: WebApplication):
                 if not self._user(admin=True):
                     return
                 return self._json({"ok": True, "users": [{"username": n, "role": u.get("role", "user"),
-                                   "enabled": u.get("enabled", True)}
+                                   "enabled": u.get("enabled", True),
+                                   "quota": max(0, int(u.get("quota") or 0) if str(u.get("quota") or "").strip().lstrip("-").isdigit() else 0),
+                                   "used": app.jobs.videos_used(n)}
                                   for n, u in app.settings.users.items()]})
             return self._error("页面或接口不存在。", 404)
 
@@ -782,6 +784,8 @@ def make_handler(app: WebApplication):
                 username = urllib.parse.unquote(parts[3]) if len(parts) >= 4 else ""
                 if len(parts) == 5 and parts[4] == "reset":
                     return self._admin_reset_user(username, data)
+                if len(parts) == 5 and parts[4] == "quota":
+                    return self._admin_set_quota(username, data)
                 if len(parts) == 5 and parts[4] == "disable":
                     return self._admin_disable_user(username, user)
                 if len(parts) == 5 and parts[4] == "enable":
@@ -964,6 +968,9 @@ def make_handler(app: WebApplication):
                     return self._error("提示词库没有可用模板，请联系管理员检查 prompts/prompt-library.json。", 503)
                 if count > int(app.settings.web.get("confirm_over_items", 5)) and not data.get("confirmed"):
                     return self._error("批量数量较多，请确认后再提交。", 409)
+                quota_error = app.quota_check(user, count)
+                if quota_error:
+                    return self._error(quota_error, 403)
                 job = app.jobs.create(user["username"], Path(meta["path"]), meta["name"], templates,
                                       prompt_id, str(data.get("resolution") or "480P"),
                                       int(data.get("duration") or 5), str(data.get("prompt") or ""),
@@ -1325,6 +1332,28 @@ def make_handler(app: WebApplication):
                 user["version"] = int(user.get("version", 1)) + 1
                 app.persist_web()
             return self._json({"ok": True})
+
+        def _admin_set_quota(self, username, data):
+            """POST /api/admin/users/{name}/quota {quota: 条数}。
+            0 = 不限。只改 quota 字段，不 bump version（不能把人踢下线）。"""
+            user = app.settings.users.get(username)
+            if not user:
+                return self._error("账号不存在。", 404)
+            raw = data.get("quota")
+            try:
+                quota = int(raw)
+            except (TypeError, ValueError):
+                return self._error("上限必须是 0 以上的整数（0 表示不限）。")
+            if not 0 <= quota <= 1_000_000:
+                return self._error("上限必须是 0–1000000 的整数（0 表示不限）。")
+            with app._web_lock:
+                user["quota"] = quota
+                app.persist_web()
+            used = app.jobs.videos_used(username)
+            note = (f"该账户已用 {used} 条，新上限即时生效。" if quota
+                    else f"该账户已用 {used} 条，已改为不限。")
+            return self._json({"ok": True, "username": username, "quota": quota,
+                               "used": used, "note": note})
 
         def _admin_disable_user(self, username, actor):
             user = app.settings.users.get(username)

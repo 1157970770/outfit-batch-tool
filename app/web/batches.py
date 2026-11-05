@@ -41,6 +41,9 @@ DEFAULT_PRODUCE_COUNT = 50
 RETRY_MIN = 1
 RETRY_MAX = 100
 UNGROUPED_KEY = "__ungrouped__"
+# job.image_path 里的上传图：web-data/uploads/<xx>/<32位id>.<ext>（Windows 反斜杠同样匹配）。
+# 命中即说明这张图能通过 /api/uploads/<id>（带 owner 校验）取回来。
+UPLOAD_IMAGE_RE = re.compile(r"uploads[\\/][0-9a-f]{2}[\\/](?P<id>[0-9a-f]{32})\.[A-Za-z0-9]{1,8}$")
 
 # 计费口径：一条任务的计费秒数 ≈ 模板时长 + 输出视频秒数。
 # 输出默认固定 7 秒（duration=7，API 接受 2–30）；duration=-1 时才按 7 秒估算。
@@ -596,6 +599,22 @@ class BatchManager:
             return self.public(batch)
 
     # ------------------------------------------------------------------ 生产（#5 / #9 共用）
+    def _quota_check(self, user: dict, count: int) -> None:
+        """账户生成数量上限：0/缺省 = 不限。超了直接拒绝，不部分提交。
+        settings.users 是 web.json 里的账户表；videos_used 与小批量同口径。"""
+        info = (self.settings.users or {}).get(str((user or {}).get("username") or "")) or {}
+        try:
+            quota = max(0, int(info.get("quota") or 0))
+        except (TypeError, ValueError):
+            quota = 0
+        if quota <= 0:
+            return
+        owner = str((user or {}).get("username") or "")
+        used = self.jobs.videos_used(owner)
+        if used + count > quota:
+            raise BatchError(f"生成数量已达上限：该账户已用 {used} 条 / 上限 {quota} 条，"
+                             f"本次 {count} 条会超出额度；请联系管理员调整。", 403)
+
     def _start_run(self, batch: dict, user: dict, wanted: tuple[str, ...], count: int,
                    empty_message: str) -> dict:
         """在锁内取数 → 校验模板 → 建 job → 标 producing。调用方必须已持锁。"""
@@ -609,6 +628,8 @@ class BatchManager:
         queue = [item for item in (batch.get("items") or []) if item.get("state") in wanted]
         if not queue:
             raise BatchError(empty_message, 409)
+        # 额度校验放在改任何状态之前：超限就是纯拒绝，条目一个都不动。
+        self._quota_check(user, min(len(queue), max(1, int(count or 0))))
         catalog = self._catalog()
         taken: list[tuple[dict, dict]] = []
         blocked: list[str] = []
@@ -964,12 +985,20 @@ class BatchManager:
                     continue
                 names = {str(tpl.get("id")): str(tpl.get("name") or "")
                          for tpl in job.get("templates") or [] if isinstance(tpl, dict)}
+                # 这条记录对应的定妆图 = job 自己的素材图。批次有批次级定妆图，但试跑/未分组
+                # 的历史任务没有批次，只有 job 自己这张才对得上；只有落在 uploads/<xx>/<id>.<ext>
+                # 的才走带权限校验的 /api/uploads 接口，其它来源一律不给 URL。
+                image_url = ""
+                upload_hit = UPLOAD_IMAGE_RE.search(str(job.get("image_path") or ""))
+                if upload_hit:
+                    image_url = f"/api/uploads/{upload_hit.group('id')}"
                 for rec in job.get("records") or []:
                     template_id = str(rec.get("id"))
                     status = str(rec.get("status") or "")
                     rows.append({
                         "job_id": str(job.get("id")),
                         "template_id": template_id,
+                        "image_url": image_url,
                         "template_name": names.get(template_id, ""),
                         "status": status,
                         "seconds": rec.get("seconds"),
