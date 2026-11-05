@@ -36,12 +36,14 @@ REQUIRED = [
     "test_style_usage",
     "test_web_auth",
     "test_jobs_state",
+    "test_resume",
     "test_billing",
     "test_web_hardening",
     "test_batch5",
     "test_web_tags",
     "test_web",
     "test_web_tag_api",
+    "test_web_multi_images",
     "test_batches",
 ]
 OPTIONAL: list[str] = []

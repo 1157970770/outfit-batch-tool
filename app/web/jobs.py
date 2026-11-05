@@ -11,12 +11,61 @@ import time
 import uuid
 from pathlib import Path
 
+from app import config as appconfig
 from app.core import TAG_SLOTS, BatchRunner, BatchSpec, unique_batch_dir
+from app.media import base64_budget_error
 from app.runtime import build_storages
-from app.wan_api import global_inflight, global_small_inflight
+from app.wan_api import MAX_IMAGES, global_inflight, global_small_inflight
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _STYLE_MAX = 40
+# 1 张定妆图 + 最多 9 张细节图：与 wan_api.MAX_IMAGES 对齐（官方 reference_image 上限）。
+MAX_IMAGE_SLOTS = MAX_IMAGES
+UPLOAD_PATH_RE = re.compile(r"uploads[\\/][0-9a-f]{2}[\\/](?P<id>[0-9a-f]{32})\.[A-Za-z0-9]{1,8}$")
+
+
+def image_slots(record: dict) -> list[dict]:
+    """统一读图：images[] 是唯一真源（下标=槽位=imageUrls 顺序）；老 job / 老 batch
+    只有单值 image_path/image_name，回退成 1 个元素，upload_id 从路径反解。"""
+    raw = record.get("images")
+    if isinstance(raw, list) and raw:
+        slots = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            slots.append({"upload_id": str(item.get("upload_id") or ""),
+                          "name": str(item.get("name") or ""),
+                          "path": str(item.get("path") or "")})
+        if slots:
+            return slots
+    path = str(record.get("image_path") or "")
+    if not path:
+        return []
+    hit = UPLOAD_PATH_RE.search(path)
+    return [{"upload_id": hit.group("id") if hit else "",
+             "name": str(record.get("image_name") or ""),
+             "path": path}]
+
+
+def normalize_images(raw, image_path: Path, image_name: str) -> list[dict]:
+    """把入参归一成有序槽位数组。raw=None 时用旧的位置参数造单元素列表。"""
+    if raw is None:
+        raw = [{"upload_id": "", "name": image_name, "path": str(image_path)}]
+    if not isinstance(raw, list):
+        raise ValueError("图片参数无效，请重新上传。")
+    if len(raw) > MAX_IMAGE_SLOTS:
+        raise ValueError(f"一次最多 {MAX_IMAGE_SLOTS} 张图片（1 张定妆图 + 9 张细节图）。")
+    slots = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("图片参数无效，请重新上传。")
+        path = str(item.get("path") or "").strip()
+        if not path:
+            raise ValueError("图片文件路径为空，请重新上传。")
+        hit = UPLOAD_PATH_RE.search(path)
+        slots.append({"upload_id": str(item.get("upload_id") or (hit.group("id") if hit else "")),
+                      "name": str(item.get("name") or ""), "path": path})
+    return slots
 
 TAG_LABELS = dict(TAG_SLOTS)   # slot -> 中文名（上衣/内衬/裤子/鞋子/场景/特殊备注）
 # 款号类栏位（上衣/内衬/裤子/鞋子）：英文+数字组合；场景/备注允许中文自由文本。
@@ -99,6 +148,42 @@ def _redact(text: str) -> str:
     return result
 
 
+# 重启接回：最多自动重排几次。防「一启动就崩、崩了又拉起」的死循环把同一批任务反复折腾。
+RESUME_MAX_ATTEMPTS = 3
+
+
+def _resume_scope(job: dict) -> tuple[int, int]:
+    """统计重启后能自动接回的分量：(可接回的云端任务条数, 还没提交过的条目数)。
+
+    只有这两类才值得重排：前者接着等原 taskId（不重提、不二次计费），
+    后者本来就没提交过（重排等于继续干）。「正在跑但没有 taskId」不算——
+    那类只能落 unknown，让人去控制台核对后再决定。
+    """
+    now = time.time()
+    records = {}
+    for rec in job.get("records") or []:
+        if isinstance(rec, dict) and rec.get("id") is not None:
+            records[str(rec["id"])] = rec
+    reattach = 0
+    for rec in records.values():
+        if str(rec.get("status") or "") != "running" or not rec.get("task_id"):
+            continue
+        try:
+            expires = float(rec.get("task_expires_at") or 0)
+        except (TypeError, ValueError):
+            expires = 0
+        if expires and expires < now:
+            continue
+        reattach += 1
+    pending = 0
+    for tpl in job.get("templates") or []:
+        tid = str((tpl or {}).get("id"))
+        rec = records.get(tid)
+        if rec is None or str(rec.get("status") or "") in ("", "pending"):
+            pending += 1
+    return reattach, pending
+
+
 def duration_ok(value) -> bool:
     """时长校验，与 app/wan_api.py 的 validate_task 保持同一口径。
 
@@ -136,6 +221,13 @@ class JobManager:
         self.dispatcher = threading.Thread(target=self._dispatch, name="web-job-dispatch", daemon=True)
         self.dispatcher.start()
 
+    def _cos_available(self) -> bool:
+        """多图预算闸用：启用 COS 时图片走短签名 URL，不受 Base64 总量限制。"""
+        # getattr 兜底：单测/诊断脚本里的 settings 是 SimpleNamespace，没有 config 字段。
+        cfg = getattr(self.settings, "config", None) or {}
+        provider = str(cfg.get("COS_PROVIDER") or "").strip().lower()
+        return appconfig.truthy(cfg.get("COS_ENABLED")) and provider != "local"
+
     def _path(self, job_id: str) -> Path:
         return self.jobs_dir / f"{job_id}.json"
 
@@ -161,10 +253,48 @@ class JobManager:
             if job.get("id") != job_id:
                 job["id"] = job_id
                 dirty = True
-            if job.get("status") == "running":
-                job["status"] = "interrupted"
-                job["message"] = "服务重启时任务正在运行；请核对阿里云任务后再重试。"
-                job["finished_at"] = time.time()
+            if job.get("status") in ("running", "interrupted"):
+                # 能接回就自动接回（重新排队，_run_job 走 resume 路径），接不回来才留「已中断」。
+                # interrupted 也一并处理：上一次重启留下的已中断任务，只要云端那条还在跑
+                # （taskId 未过期），这次重启照样能接回来，不必等用户手动去核对。
+                reattach, pending = _resume_scope(job)
+                attempts = int(job.get("resume_count") or 0)
+                if job.get("status") == "running":
+                    resumable = bool(reattach or pending)
+                else:
+                    # 已中断的只认「云端还在跑」这一条：普通条目早就有定论了，
+                    # 顺手重排只会把过去的重启又演一遍。
+                    resumable = bool(reattach)
+                resumable = resumable and attempts < RESUME_MAX_ATTEMPTS \
+                    and not job.get("cancel_requested")
+                if resumable:
+                    parts = []
+                    if reattach:
+                        parts.append(f"接回 {reattach} 条云端任务")
+                    if pending:
+                        parts.append(f"续跑 {pending} 条未提交条目")
+                    job["status"] = "queued"
+                    job["resume"] = True
+                    job["resume_count"] = attempts + 1
+                    job["started_at"] = None
+                    job["finished_at"] = None
+                    job["message"] = f"服务重启：自动{'、'.join(parts)}，稍候即继续跟进进度。"
+                elif job.get("status") == "running":
+                    job["status"] = "interrupted"
+                    job["message"] = (
+                        "服务重启时任务正在运行，且没有可自动接回的云端任务；"
+                        "请核对阿里云任务后再重试。"
+                    )
+                    job["finished_at"] = time.time()
+                for rec in job.get("records") or []:
+                    # 没接回来的「正在跑」条目：落 unknown（不可一键重试，
+                    # 否则云端那条可能被二次提交、二次计费）。
+                    if str(rec.get("status") or "") == "running" and not resumable:
+                        rec["status"] = "unknown"
+                        rec["error"] = (
+                            "服务重启时这条正在运行，但没有可核对的 taskId（或已过期）；"
+                            "请到控制台核对后再决定是否重试。"
+                        )
                 dirty = True
             self.jobs[job_id] = job
             if dirty:
@@ -175,12 +305,23 @@ class JobManager:
                duration: int = 5, prompt_body: str | None = None, *,
                batch_ref: str = "", limit_items: int | None = None,
                tags: dict | None = None, style_no: str = "",
-               admin: bool = False) -> dict:
+               admin: bool = False, images: list[dict] | None = None) -> dict:
         """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。
 
+        images：有序槽位数组（1 定妆 + 最多 9 细节），给出时是权威值，覆盖
+        image_path/image_name；缺省时用旧的位置参数造单元素列表。
         tags：6 栏位标签（上衣必填）；style_no：v0.9.0 旧字段，读老批次时兜底，
         两者都缺时报错——云端归档路径必须有上衣款号。
         """
+        slots = normalize_images(images, image_path, image_name)
+        if not slots:
+            raise ValueError("请先上传服装图片。")
+        budget = base64_budget_error([s["path"] for s in slots],
+                                     cos_enabled=self._cos_available())
+        if budget:
+            raise ValueError(budget)
+        image_path = Path(slots[0]["path"])
+        image_name = slots[0]["name"]
         if prompt_id not in self.prompts:
             raise ValueError("请选择有效的提示词模板")
         prompt = str(prompt_body if prompt_body is not None else self.prompts[prompt_id]).strip()
@@ -210,6 +351,8 @@ class JobManager:
             "id": job_id, "owner": owner, "status": "queued", "created_at": now,
             "started_at": None, "finished_at": None, "batch_id": batch_id,
             "image_path": str(image_path), "image_name": image_name,
+            # 多图真源：images[0]=定妆图，images[1..9]=细节图；顺序即传给模型的「图N」。
+            "images": slots, "image_upload_id": slots[0]["upload_id"],
             "prompt_id": prompt_id, "prompt": prompt,
             "templates": templates, "template_ids": [str(t["id"]) for t in templates],
             "resolution": resolution, "duration": duration, "total": len(templates),
@@ -401,16 +544,36 @@ class JobManager:
                 job["status"] = "running"
                 job["started_at"] = time.time()
                 job["message"] = "正在生成，请稍候。"
-                out_dir = unique_batch_dir(self.output_root, job["batch_id"])
+                # 重启接回：复用重启前的输出目录（已下载的成品就在里面），
+                # 并把旧记录交给引擎，让它跳过已出片的、接回已提交的，绝不重提。
+                resume_mode = bool(job.get("resume"))
+                resume_records = {}
+                if resume_mode:
+                    for rec in job.get("records") or []:
+                        if isinstance(rec, dict) and rec.get("id") is not None:
+                            resume_records[str(rec["id"])] = dict(rec)
+                    job["message"] = "服务重启后已自动接回，正在继续跟进云端进度。"
+                    job.pop("resume", None)
+                old_out = str(job.get("out_dir") or "")
+                if resume_mode and old_out and Path(old_out).is_dir():
+                    out_dir = Path(old_out)
+                else:
+                    out_dir = unique_batch_dir(self.output_root, job["batch_id"])
                 job["out_dir"] = str(out_dir)
                 self._save(job)
+            if resume_mode:
+                self._append_log(job_id, f"重启接回：沿用 {len(resume_records)} 条旧记录继续")
             template_store, output_store = build_storages(self.settings.config)
             cfg = self.settings.config
             # 线程数只是工作线程，不再与 API 并发/速率绑在一起；上限 50 防止误配。
             concurrency = self.settings.max_concurrency
+            job_slots = image_slots(job)
+            job_image_paths = [s["path"] for s in job_slots]
             spec = BatchSpec(
                 batch_id=Path(job["out_dir"]).name,
-                image_path=job["image_path"], prompt=job["prompt"], out_dir=Path(job["out_dir"]),
+                image_path=job_image_paths[0] if job_image_paths else "",
+                image_paths=job_image_paths,
+                prompt=job["prompt"], out_dir=Path(job["out_dir"]),
                 templates=job["templates"], api_key=app_api_key(cfg), base=str(cfg.get("WAN_BASE_URL") or ""),
                 provider=str(cfg.get("WAN_PROVIDER") or "dashscope"),
                 model=str(cfg.get("WAN_MODEL") or "wan3.0-video"), mode="edit",
@@ -428,6 +591,8 @@ class JobManager:
                 # 快速通道用自己的在飞池，3 条小任务不会被大批量的几十条挡住。
                 inflight_semaphore=(self.small_inflight if job.get("lane") == "small"
                                     else self.inflight),
+                # 只在重启接回时非空：引擎据此跳过已出片、接回已提交的条目。
+                resume=resume_records,
             )
             runner = BatchRunner(spec, on_event=lambda e: self._on_event(job_id, e),
                                  log=lambda m: self._append_log(job_id, m))
@@ -512,16 +677,20 @@ class JobManager:
                         "请先到控制台核对，确认没有重复后再新建任务"
                     )
                 raise ValueError("该任务没有可重试的失败项")
-            image_path = Path(source["image_path"])
-            if not image_path.is_file():
-                raise ValueError("原服装图片已不存在，请重新上传后新建任务")
+            slots = image_slots(source)
+            if not slots:
+                raise ValueError("原任务没有可用的图片，请重新上传后新建任务")
+            for index, slot in enumerate(slots, 1):
+                if not Path(slot["path"]).is_file():
+                    raise ValueError(f"原任务第 {index} 张图片已不存在，请重新上传后新建任务")
             # P1-20：用量与结果归属**原 owner**（管理员重试他人任务不记账到自己头上），
             # batch_ref 透传，批次 history 回查不断链。权限判断留在 server 层。
-            return self.create(str(source.get("owner") or owner), image_path, source.get("image_name", "服装图"), selected,
+            # 全部图原样带过去：丢一张细节图会让「图N」整体错位，等于偷换了需求。
+            return self.create(str(source.get("owner") or owner), Path(slots[0]["path"]), slots[0]["name"], selected,
                                source["prompt_id"], source["resolution"], source["duration"], source.get("prompt"),
                                batch_ref=str(source.get("batch_ref") or ""),
                                tags=dict(source.get("tags") or {}), style_no=str(source.get("style_no") or ""),
-                               admin=admin)
+                               admin=admin, images=slots)
 
     def cancel(self, job_id: str) -> bool:
         with self.changed:
@@ -768,6 +937,10 @@ class JobManager:
                 "duration", "total", "done", "message", "log_tail", "cancel_requested",
                 "lane", "style_no", "tags")}
             safe["batch_ref"] = str(safe.get("batch_ref") or "")
+            # 只下发可访问的缩略 URL 与文件名；images 里有服务器绝对路径，绝不出公网。
+            slots = image_slots(job)
+            safe["image_urls"] = [f"/api/uploads/{s['upload_id']}" for s in slots if s.get("upload_id")]
+            safe["image_names"] = [s["name"] for s in slots]
             if safe.get("message"):
                 safe["message"] = _redact(safe["message"])
             safe["log_tail"] = [_redact(line) for line in (safe.get("log_tail") or [])]

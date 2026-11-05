@@ -122,21 +122,22 @@
 /* 评分徽标：蓝色系（打分是正向信息），与琥珀「未上传」/红「已用」区分 */
 .batch-cand-badge-rating{background:color-mix(in srgb,var(--blue) 12%,white);color:var(--blue)}
 
-/* ---------- 历史对比：定妆图 / 生成的视频 / 模板视频 同屏 ---------- */
+/* ---------- 历史对比：定妆图 / 生成的视频 / 模板视频 同屏 ----------
+   三个面板 flex:1 平分宽度：不管显示 2 块还是 3 块，都铺满整屏、宽度一致，
+   不会出现「窄图栏 + 空出一整列」的参差。 */
 .compare-overlay{position:fixed;inset:0;z-index:80;display:flex;flex-direction:column;gap:10px;padding:16px;background:rgba(15,25,45,.72);backdrop-filter:blur(2px)}
 .compare-overlay.hidden{display:none}
 .compare-head{display:flex;align-items:center;gap:12px;flex:none}
 .compare-title{flex:1 1 auto;min-width:0;font-size:15px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .compare-close{flex:none}
-.compare-grid{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(180px,240px) 1fr 1fr;gap:12px}
-.compare-pane{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:0;background:var(--paper);border:1px solid var(--line-strong);border-radius:12px;padding:10px}
+.compare-grid{flex:1 1 auto;min-height:0;min-width:0;display:flex;gap:12px;align-items:stretch}
+.compare-pane{flex:1 1 0;display:flex;flex-direction:column;gap:6px;min-width:0;min-height:0;background:var(--paper);border:1px solid var(--line-strong);border-radius:12px;padding:10px}
 .compare-label{flex:none;font-size:12px;font-weight:700;color:var(--muted)}
-.compare-pane img,.compare-pane video{flex:1 1 auto;min-height:0;width:100%;object-fit:contain;background:#000;border-radius:8px}
-.compare-pane-image.is-missing,.compare-pane.hidden{display:none}
+.compare-pane img,.compare-pane video{flex:1 1 auto;min-height:0;min-width:0;width:100%;object-fit:contain;background:#000;border-radius:8px}
+.compare-pane.hidden{display:none}
 @media (max-width:900px){
-  .compare-grid{grid-template-columns:1fr;overflow:auto}
-  .compare-pane{min-height:240px}
-  .compare-pane-image{min-height:180px}
+  .compare-grid{flex-direction:column;overflow:auto}
+  .compare-pane{flex:0 0 auto;min-height:240px}
 }
 .batch-cand-meta{grid-area:meta;min-width:0;font-size:11px;line-height:14px;color:var(--muted);word-break:break-word}
 /* 标签多时缩字号并允许换行，保证视频卡完整展示全部标签 */
@@ -318,6 +319,10 @@
 .history-record-name small{display:block;font-size:11px;color:var(--muted)}
 .history-record-info small{display:block;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .history-record .record-actions{display:flex;gap:6px;justify-content:flex-end}
+/* 重跑是这一行的主动作，给一点颜色区分「对比 / 下载 / 任务详情」这些查看类按钮 */
+.history-record .rerun-btn{color:var(--blue);border-color:var(--blue);font-weight:600}
+.history-record .rerun-btn:hover{background:#f2f7ff}
+.history-record .rerun-btn:disabled{color:#a2a8b3;border-color:var(--line);background:#fafafa}
 .history-more{margin-top:10px}
 .history-group-foot{font-size:12px;margin:10px 0 0}
 
@@ -410,3 +415,36 @@
 .batch-card-del:not(:disabled):hover{background:color-mix(in srgb,var(--red) 10%,var(--paper))}
 .batch-card-del:not(:disabled):active{background:color-mix(in srgb,var(--red) 16%,var(--paper))}
 .batch-card-del:disabled{opacity:.55;cursor:wait}
+
+/* ---------- 批次多图：锁定摘要缩略条 + 锁定后追加/删除细节图 ---------- */
+.batch-sum-slots{display:flex;gap:4px;align-items:center;overflow-x:auto;scrollbar-width:thin;flex:none;max-width:100%}
+.batch-sum-slot{position:relative;flex:none;width:56px;height:56px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--line);background:var(--bg)}
+.batch-sum-slot img{width:100%;height:100%;object-fit:cover}
+.batch-sum-slot .slot-badge{font-size:9px;top:2px;left:2px;padding:0 4px}
+.batch-slot-manage{margin-top:10px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:color-mix(in srgb,var(--bg) 60%,white)}
+.batch-slot-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.batch-slot-head b{font-size:13px}
+.batch-slot-head .muted{flex:1 1 260px;font-size:11.5px}
+/* 批次表单是全宽的：10 个等大方格会把整页撑高，改成「左定妆 / 右细节阵列」 */
+#batch-image-slots,
+#batch-slot-grid{grid-template-columns:190px minmax(0,1fr);gap:8px;align-items:start}
+#batch-image-slots .slot-cell.is-primary,
+#batch-slot-grid .slot-cell.is-primary{max-height:140px}
+#batch-image-slots .slot-grid-detail,
+#batch-slot-grid .slot-grid-detail{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
+#batch-image-slots .slot-cell:not(.is-primary),
+#batch-slot-grid .slot-cell:not(.is-primary){aspect-ratio:auto;height:66px;max-height:66px}
+#batch-image-slots .slot-cell:not(.is-primary) .slot-add,
+#batch-slot-grid .slot-cell:not(.is-primary) .slot-add{font-size:15px}
+@media (max-width:760px){
+  #batch-image-slots,#batch-slot-grid{grid-template-columns:1fr}
+  #batch-image-slots .slot-cell:not(.is-primary),
+  #batch-slot-grid .slot-cell:not(.is-primary){aspect-ratio:1/1;height:auto;max-height:none}
+}
+.batch-slot-error{margin:6px 0 0;font-size:11.5px}
+@media (max-width:760px){.batch-slot-manage .slot-grid-detail{grid-template-columns:repeat(4,minmax(0,1fr))}}
+
+/* ---------- 批次表单：说明文字 + 选择图片按钮 ---------- */
+.batch-image-bar{display:flex;align-items:center;gap:10px;margin-top:6px}
+.batch-image-bar .image-info{flex:1 1 auto;margin:0;min-width:0}
+.batch-image-bar .slot-pick-btn{margin-left:auto}

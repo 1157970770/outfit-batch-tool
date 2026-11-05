@@ -29,10 +29,10 @@ from app import config as appconfig
 from app.media import MediaError, validate_image
 from app.prompts import PromptLibrary
 from app.runtime import build_storages
-from app.wan_api import configure_globals, global_limits
+from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
 from app.web.batches import PRODUCE_CHOICES, PRODUCE_MIN, BatchError, BatchManager
-from app.web.jobs import JobManager, _redact
+from app.web.jobs import MAX_IMAGE_SLOTS, JobManager, _redact, image_slots
 from app.web.settings import WebSettings, load_settings
 from app.web.templates import TemplateCatalog, TemplateError
 from app.web import WEB_VERSION
@@ -470,6 +470,7 @@ def make_handler(app: WebApplication):
                                                "produce_choices": [choice for choice in PRODUCE_CHOICES
                                                                    if choice <= app.settings.max_batch_run_items],
                                                "produce_min": PRODUCE_MIN,
+                                               "max_images": MAX_IMAGES,
                                                "max_concurrency": app.settings.max_concurrency,
                                                 "tag_filter_enabled": any(app.catalog.tag_values.values()),
                                                 "tagged_templates_count": len(app.catalog.items) if app.catalog.tag_workbook_info else 0,
@@ -566,6 +567,8 @@ def make_handler(app: WebApplication):
                 if not user:
                     return
                 parts = path.strip("/").split("/")
+                if len(parts) == 4 and parts[3] == "rerun-config":
+                    return self._rerun_config(parts[2], urllib.parse.parse_qs(parsed.query), user)
                 if len(parts) == 4 and parts[3] == "log":
                     return self._job_log(parts[2], user)
                 if len(parts) == 4 and parts[3] == "report.csv":
@@ -729,6 +732,8 @@ def make_handler(app: WebApplication):
                     action = parts[3]
                     if action == "image":
                         return self._batch_image(parts[2], data, user)
+                    if action == "images":
+                        return self._batch_images(parts[2], data, user)
                     if action == "candidates":
                         return self._batch_candidates(parts[2], data, user)
                     if action == "lock":
@@ -940,17 +945,44 @@ def make_handler(app: WebApplication):
                                "width": info.get("width"), "height": info.get("height"),
                                "size_mb": info.get("size_mb")}, 201)
 
+        def _resolve_image_slots(self, data, user, *, allow_empty=False):
+            """upload_ids（新，1–10）优先，回退老的单个 upload_id；顺序即槽位顺序。
+
+            返回 (slots, error_response)：slots 为 None 时第二项是可直接 return 的错误响应。
+            """
+            raw = data.get("upload_ids")
+            if raw is None:
+                single = str(data.get("upload_id") or "").strip()
+                raw = [single] if single else []
+            if not isinstance(raw, list):
+                return None, self._error("图片参数无效，请重新上传。")
+            ids = [str(item or "").strip() for item in raw]
+            ids = [item for item in ids if item]
+            if not ids:
+                if allow_empty:
+                    return [], None
+                return None, self._error("请先上传服装图片。")
+            if len(ids) > MAX_IMAGE_SLOTS:
+                return None, self._error(
+                    f"一次最多 {MAX_IMAGE_SLOTS} 张图片（1 张定妆图 + 9 张细节图），当前 {len(ids)} 张。")
+            if len(set(ids)) != len(ids):
+                return None, self._error("同一张图片不能重复提交。")
+            slots = []
+            for index, upload_id in enumerate(ids, 1):
+                if not re.fullmatch(r"[a-f0-9]{32}", upload_id):
+                    return None, self._error(f"第 {index} 张图片已失效，请重新上传。", 404)
+                meta = app.resolve_upload(upload_id, user["username"])
+                if not meta:
+                    return None, self._error(f"第 {index} 张图片已失效，请重新上传。", 404)
+                slots.append({"upload_id": upload_id,
+                              "name": str(meta.get("name") or ""),
+                              "path": str(meta.get("path") or "")})
+            return slots, None
+
         def _create_job(self, data, user):
-            upload_id = str(data.get("upload_id") or "")
-            if not re.fullmatch(r"[a-f0-9]{32}", upload_id):
-                return self._error("请先上传服装图片。")
-            meta_path = app.upload_meta / f"{upload_id}.json"
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return self._error("图片已失效，请重新上传。", 404)
-            if meta.get("owner") != user["username"] or not Path(meta.get("path", "")).is_file():
-                return self._error("找不到这张图片，请重新上传。", 404)
+            slots, error = self._resolve_image_slots(data, user)
+            if slots is None:
+                return error
             if app.settings.templates_error:
                 return self._error("视频场景暂不可用，请联系管理员。", 503)
             try:
@@ -971,12 +1003,13 @@ def make_handler(app: WebApplication):
                 quota_error = app.quota_check(user, count)
                 if quota_error:
                     return self._error(quota_error, 403)
-                job = app.jobs.create(user["username"], Path(meta["path"]), meta["name"], templates,
+                job = app.jobs.create(user["username"], Path(slots[0]["path"]), slots[0]["name"], templates,
                                       prompt_id, str(data.get("resolution") or "480P"),
                                       int(data.get("duration") or 5), str(data.get("prompt") or ""),
                                       tags=data.get("tags") if isinstance(data.get("tags"), dict) else None,
                                       style_no=str(data.get("style_no") or ""),
-                                      admin=(user.get("role") == "admin"))
+                                      admin=(user.get("role") == "admin"),
+                                      images=slots)
                 return self._json({"ok": True, "job": job}, 201)
             except (ValueError, TemplateError) as exc:
                 return self._error(exc)
@@ -1017,6 +1050,20 @@ def make_handler(app: WebApplication):
         def _batch_image(self, batch_id, data, user):
             try:
                 result = app.batches.set_image(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result})
+
+        def _batch_images(self, batch_id, data, user):
+            """锁定后唯一可写图的入口：op=add 追加细节图 / op=remove 删除细节图。"""
+            op = str(data.get("op") or "").strip()
+            try:
+                if op == "add":
+                    result = app.batches.add_images(batch_id, user, data)
+                elif op == "remove":
+                    result = app.batches.remove_images(batch_id, user, data)
+                else:
+                    return self._error("op 只能是 add 或 remove。", 400)
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, **result})
@@ -1395,6 +1442,55 @@ def make_handler(app: WebApplication):
                 del app.settings.users[username]
                 app.persist_web()
             return self._json({"ok": True, "username": username})
+
+        def _rerun_config(self, job_id, query, user):
+            """历史行「重跑」取原始配置：只回浏览器填表要用的字段，不暴露磁盘路径。
+
+            一条历史记录 = 一个 job 里的一个模板。图片给的是 upload_id + 可访问标记，
+            前端用它们直接填小批量页的槽位（提交时走原有 /api/jobs，不必重新上传）。
+            available=False 表示元数据/文件已丢失、或图片属于别的账号，前端会留空让用户重传。
+            """
+            # jobs.get()/public() 是给列表用的脱敏白名单，不含 prompt/images/templates，
+            # 这里必须读内部原始记录（只读拷贝，下面仍然只挑必要字段下发）。
+            with app.jobs.lock:
+                raw_job = app.jobs.jobs.get(job_id)
+                job = dict(raw_job) if raw_job else None
+            if not job:
+                return self._error("找不到该任务。", 404)
+            if user.get("role") != "admin" and job.get("owner") != user.get("username"):
+                return self._error("无权操作该任务。", 403)
+            wanted = str((query or {}).get("template_id", [""])[0] or "").strip()
+            ids = [str(item) for item in job.get("template_ids") or []]
+            if wanted and wanted not in ids:
+                return self._error("该场景不在这个任务里。", 404)
+            template_id = wanted or (ids[0] if len(ids) == 1 else "")
+            hit = next((tpl for tpl in job.get("templates") or []
+                        if isinstance(tpl, dict) and str(tpl.get("id")) == template_id), {})
+            images = []
+            for slot in image_slots(job)[:MAX_IMAGE_SLOTS]:
+                upload_id = str(slot.get("upload_id") or "")
+                meta = app.resolve_upload(upload_id, user["username"]) if upload_id else None
+                images.append({
+                    "upload_id": upload_id,
+                    "name": str(slot.get("name") or ""),
+                    "url": f"/api/uploads/{upload_id}" if meta else "",
+                    "available": bool(meta),
+                })
+            tags = job.get("tags") if isinstance(job.get("tags"), dict) else {}
+            return self._json({"ok": True, "config": {
+                "job_id": job_id,
+                "template_id": template_id,
+                "template_name": str(hit.get("name") or ""),
+                "images": images,
+                "prompt": str(job.get("prompt") or ""),
+                "prompt_id": str(job.get("prompt_id") or ""),
+                "resolution": str(job.get("resolution") or "480P"),
+                "duration": job.get("duration", 5),
+                "tags": tags,
+                # 老 v0.9.0 任务只有 style_no，没有 6 栏位 tags，前端兜底成「上衣」。
+                "style_no": str(job.get("style_no") or ""),
+                "owner": str(job.get("owner") or ""),
+            }})
 
         def _job_detail(self, job_id, user):
             job = app.jobs.get(job_id, user.get("role") == "admin")

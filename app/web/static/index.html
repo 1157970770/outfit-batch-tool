@@ -5,12 +5,14 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261105a">
+  <link rel="stylesheet" href="/static/style.css?v=20261105i">
   <link rel="stylesheet" href="/static/tag-filter.css">
-  <link rel="stylesheet" href="/static/batch.css?v=20261105d">
+  <link rel="stylesheet" href="/static/batch.css?v=20261105i">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
-  <script defer src="/static/app.js?v=20261105d"></script>
-  <script defer src="/static/batch.js?v=20261105d"></script>
+  <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
+  <script defer src="/static/image-slots.js?v=20261105i"></script>
+  <script defer src="/static/app.js?v=20261105i"></script>
+  <script defer src="/static/batch.js?v=20261105i"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
 <body>
@@ -66,13 +68,12 @@
 
         <div id="create-pane-make" class="console-grid">
           <article class="panel panel-media">
-            <div class="panel-head"><span class="step">1</span><div><b>定妆图</b><small>JPG / PNG / WebP，≤ 20MB</small></div></div>
-            <label id="drop-zone" class="drop-zone console-drop">
-              <input id="image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
-              <img id="image-preview" class="image-preview hidden" alt="服装图片预览">
-              <video id="template-preview" class="template-preview hidden" controls loop muted playsinline preload="metadata"></video>
-              <span id="drop-copy" class="drop-copy"><span class="upload-icon">↑</span><strong>点击或拖拽图片到这里</strong><small>只上传到本机服务</small></span>
-            </label>
+            <div class="panel-head"><span class="step">1</span><div><b>定妆图 + 细节图</b><small>定妆图必填，可再加 9 张细节图（单张 ≤ 20MB）</small></div><label id="image-pick-btn" class="slot-pick-btn" for="image-file">选择图片</label></div>
+            <div id="image-slots" class="slot-grid" role="group" aria-label="任务图片槽位"></div>
+            <input id="image-file" class="slot-file-input" type="file" multiple accept="image/*,.jpg,.jpeg,.png,.webp,.bmp">
+            <div id="image-preview-wrap" class="template-preview-wrap hidden">
+              <video id="template-preview" class="template-preview" controls loop muted playsinline preload="metadata"></video>
+            </div>
             <div id="image-info" class="image-info muted"></div>
           </article>
 
@@ -186,12 +187,9 @@
                   <label>特殊备注<input data-tag-slot="note" maxlength="100" autocomplete="off" placeholder="选填"></label>
                 </div>
               </div>
-              <label id="batch-drop-zone" class="drop-zone batch-drop">
-                <input id="batch-image-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/jpeg,image/png,image/webp">
-                <img id="batch-image-preview" class="image-preview hidden" alt="定妆图预览">
-                <span id="batch-drop-copy"><span class="upload-icon">↑</span><strong>上传定妆图</strong><small>整批 500 条共用这一张图</small></span>
-              </label>
-              <div id="batch-image-info" class="image-info muted"></div>
+              <div id="batch-image-slots" class="slot-grid" role="group" aria-label="批次图片槽位"></div>
+              <input id="batch-image-file" class="slot-file-input" type="file" multiple accept="image/*,.jpg,.jpeg,.png,.webp,.bmp">
+              <div class="batch-image-bar"><div id="batch-image-info" class="image-info muted">槽位 1 = 定妆图（整批共用），其余为可选细节图。</div><label id="batch-image-pick" class="slot-pick-btn" for="batch-image-file">选择图片</label></div>
               <div class="batch-form-grid batch-form-grid-3">
                 <label class="field">提示词模板<select id="batch-prompt-select"></select></label>
                 <label class="field">画质<select id="batch-resolution"><option value="480P" selected>标准 480P</option><option value="720P">高清 720P</option></select></label>
@@ -271,6 +269,17 @@
               </div>
             </div>
             <div id="batch-summary" class="batch-summary"></div>
+            <!-- 锁定后仍可追加/删除细节图；主图不可换，追加只影响之后的生产 -->
+            <div id="batch-slot-manage" class="batch-slot-manage hidden">
+              <div class="batch-slot-head">
+                <b>批次图片</b>
+                <span id="batch-slot-hint" class="muted">定妆图 1 张（不可更换）+ 细节图 0–9 张；追加只影响之后的生产</span>
+                <input id="batch-slot-file" class="slot-file-input" type="file" multiple accept="image/*,.jpg,.jpeg,.png,.webp,.bmp">
+                <button id="batch-slot-add" class="quiet btn-sm" type="button">追加细节图</button>
+              </div>
+              <div id="batch-slot-grid" class="slot-grid slot-grid-compact"></div>
+              <p id="batch-slot-error" class="error hidden"></p>
+            </div>
           </article>
 
           <article class="card batch-panel hidden" id="batch-step-d">

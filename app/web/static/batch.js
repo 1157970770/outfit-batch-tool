@@ -49,6 +49,8 @@
     previewId: '', resizeRaf: 0,
     itemFilter: 'all', itemLimit: ITEM_PAGE, itemsSignature: '',
     busy: false, pollTimer: null, activeJob: null,
+    // 建批次时的 10 槽位本地状态；锁定后追加细节图时的错误文案（轮询重渲染不丢）
+    slots: [], slotBusy: false, slotError: '',
     promptEditing: false,    // 锁定摘要里「修改提示词」的编辑态；切批次/退出时复位
     promptDraft: '',         // 编辑中的草稿文本（与 batch.prompt 分离，避免误覆盖）
     promptOpen: false,       // 提示词是否展开全文（默认折叠两行，页面更紧凑；4 秒轮询重渲染也靠它保持）
@@ -60,6 +62,34 @@
   /* ---------- 小工具 ---------- */
   const num = (value, fallback = 0) => { const n = Number(value); return Number.isFinite(n) ? n : fallback; };
   const txt = (value) => (value === undefined || value === null ? '' : String(value));
+  const Slots = window.ImageSlots;
+
+  /* ---------- 多图槽位：定妆图=槽位1，细节图=槽位2–10 ----------
+     界面编号「图N」= upload_ids[N-1] = 模型 imageUrls[N-1]，删除后自动左移。 */
+  function batchSlotEntries(batch) {
+    const urls = Array.isArray(batch && batch.image_urls) ? batch.image_urls : [];
+    const names = Array.isArray(batch && batch.image_names) ? batch.image_names : [];
+    const single = txt(batch && batch.image_url);
+    const list = urls.length ? urls : (single ? [single] : []);
+    return list.map((url, index) => ({
+      url, previewUrl: '', file: null,
+      name: names[index] || txt(batch && batch.image_name) || `图${index + 1}`,
+      uploadId: String(url).split('/').pop() || '',
+      status: 'done', progress: 100, error: '',
+    }));
+  }
+  function renderFormSlots() {
+    if (b.slotBind) { b.slotBind.refresh(); return; }
+    Slots.renderSlots($('batch-image-slots'), b.slots, {
+      inputId: 'batch-image-file', readonly: b.mode !== 'new',
+    });
+  }
+  function slotInfoText() {
+    $('batch-image-info').classList.remove('is-warn');
+    $('batch-image-info').textContent = b.slots.length
+      ? `已选 ${b.slots.length} / ${Slots.maxSlots} 张 · 槽位 1 是定妆图，其余依次为图2…图${b.slots.length}`
+      : '槽位 1 = 定妆图（整批共用，必填），其余为可选细节图。';
+  }
   function el(tag, cls, text) {
     const node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -106,14 +136,6 @@
       if (counts.length) return { source: 'server', counts };
     }
     return { source: 'local', counts: serviceLimits().choices };
-  }
-  function readFile(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(new Error('无法读取图片，请重新选择。'));
-      reader.readAsDataURL(file);
-    });
   }
   function scopeParam() {
     const user = App.state.user;
@@ -175,6 +197,7 @@
       if (locked) {
         renderStepper(3);
         renderSummary(batch);
+        renderSlotManage(batch);
         renderProduce(batch);
         renderItems();
       } else {
@@ -238,9 +261,9 @@
     // 6 栏位标签随批次冻结：整排一起禁用/解禁
     document.querySelectorAll('#batch-tags input[data-tag-slot]').forEach((input) => { input.disabled = frozen; });
     $('batch-create-btn').disabled = frozen;
-    $('batch-drop-zone').classList.toggle('is-frozen', frozen);
+    $('batch-image-slots').classList.toggle('is-frozen', frozen);
     $('batch-a-hint').textContent = frozen
-      ? '批次级设置已冻结：提示词、画质、时长、定妆图建立后不可改；要改请新建批次。'
+      ? '批次级设置已冻结：提示词、画质、时长、定妆图建立后不可改；细节图可在步骤 3 追加。'
       : '提示词、画质、时长在批次级冻结；建好后要改只能新建批次。';
   }
   // 已有批次：折叠冻结的建批次表单（省下一整屏）；新建批次时必须是展开的。
@@ -275,8 +298,11 @@
     if (txt(batch.prompt)) $('batch-prompt-body').value = txt(batch.prompt);
     updateBatchPromptCount();
     const imageName = txt(batch.image_name);
-    const imageUrl = txt(batch.image_url);
-    $('batch-image-info').textContent = imageName ? `定妆图：${imageName}` : '这个批次还没有绑定定妆图。';
+    const imageUrls = Array.isArray(batch.image_urls) ? batch.image_urls : [];
+    const slotCount = imageUrls.length || (txt(batch.image_url) ? 1 : 0);
+    $('batch-image-info').textContent = slotCount
+      ? `图片 ${slotCount} 张 · 槽位 1 定妆图：${imageName || '—'}`
+      : '这个批次还没有绑定定妆图。';
     const durationValue = batch.duration === null || batch.duration === undefined ? BATCH_DURATION_PARAM : num(batch.duration, BATCH_DURATION_PARAM);
     // 收起状态下这一行就是「这个批次是什么」的全部信息
     $('batch-a-summary').textContent = [
@@ -285,31 +311,25 @@
       txt(batch.title) || '',
       txt(batch.resolution) || '—',
       durationValue > 0 ? `输出 ${durationValue} 秒` : '输出跟随素材时长',
-      imageName ? `定妆图 ${imageName}` : '未绑定定妆图',
+      slotCount ? `图片 ${slotCount} 张` : '未绑定定妆图',
     ].filter(Boolean).join(' · ');
-    const preview = $('batch-image-preview');
-    if (imageUrl) {
-      // 批次里存的定妆图，走 /api/uploads/{id}（后端只给 owner/admin 看）
-      preview.src = imageUrl;
-      preview.alt = imageName ? `定妆图：${imageName}` : '定妆图';
-      preview.classList.remove('hidden');
-    } else {
-      preview.classList.add('hidden');
-      preview.removeAttribute('src');
-    }
-    $('batch-drop-copy').classList.toggle('hidden', !!(imageUrl || imageName));
+    // 查看已有批次：槽位只读，缩略图走 /api/uploads/{id}（后端只给 owner/admin 看）。
+    // 必须就地替换内容：bindSlotEvents 持有的是同一个数组引用。
+    const entries = batchSlotEntries(batch);
+    b.slots.length = 0;
+    for (const entry of entries) b.slots.push(entry);
+    renderFormSlots();
   }
   function resetBatchForm() {
     $('batch-no').value = '';
     App.fillTagSlots('batch-tags', {});
     $('batch-title').value = '';
     $('batch-prompt-body').value = '';
-    $('batch-image-info').textContent = '';
+    Slots.resetSlots(b.slots);
     $('batch-image-file').value = '';
-    const preview = $('batch-image-preview');
-    preview.classList.add('hidden');
-    preview.removeAttribute('src');
-    $('batch-drop-copy').classList.remove('hidden');
+    b.slotError = '';
+    slotInfoText();
+    renderFormSlots();
     const promptSelect = $('batch-prompt-select');
     if (promptSelect && promptSelect.options.length) {
       promptSelect.selectedIndex = 0;
@@ -336,24 +356,34 @@
     const promptBody = $('batch-prompt-body').value.trim();
     const promptId = $('batch-prompt-select').value;
     const resolution = $('batch-resolution').value;
-    const file = $('batch-image-file').files[0];
     clearBatchError();
     if (batchNo.length < 1 || batchNo.length > 40) { showBatchError('批次号必填，1–40 个字符。'); $('batch-no').focus(); return; }
-    if (!file) { showBatchError('请先上传定妆图。'); return; }
+    if (!b.slots.length || !b.slots[0].file) { showBatchError('请先在槽位 1 上传定妆图。'); return; }
     if (!promptId) { showBatchError('请选择提示词模板。'); return; }
     if (!promptBody) { showBatchError('提示词不能为空，请选择模板或填写内容。'); return; }
     if (promptBody.length > 4000) { showBatchError('提示词最多 4000 个字符。'); return; }
 
+    const tags = App.collectTagSlots('batch-tags');
+    if (!tags.top) { showBatchError('请填写「上衣」款号（云端归档路径按它命名）。'); return; }
     const btn = $('batch-create-btn');
-    b.busy = true; btn.disabled = true; btn.textContent = '正在上传定妆图…';
+    b.busy = true; btn.disabled = true; btn.textContent = '正在上传图片…';
     try {
-      const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: await readFile(file) }) });
+      // 提交时并发上传 3 张；已成功的格子不会重传（失败后可整体重试）
+      const upload = await Slots.uploadImages(b.slots, {
+        concurrency: 3,
+        onProgress: (info) => { btn.textContent = `正在上传 ${info.done}/${info.total} 张…`; renderFormSlots(); },
+      });
+      renderFormSlots();
+      if (!upload.ok) {
+        const first = upload.failures[0];
+        throw new Error(`第 ${first.index} 张图片（${first.name}）上传失败：${first.message}`);
+      }
+      const ids = upload.uploadIds;
       btn.textContent = '正在创建批次…';
-      const tags = App.collectTagSlots('batch-tags');
-      if (!tags.top) { showBatchError('请填写「上衣」款号（云端归档路径按它命名）。'); return; }
-      const payload = { batch_no: batchNo, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_id: uploaded.upload_id };
+      const payload = { batch_no: batchNo, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_ids: ids, upload_id: ids[0] };
       const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
       if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
+      Slots.resetSlots(b.slots);          // 上传用的 object URL 用完即释放
       b.current = data.batch;
       b.mode = 'view';
       b.formOpen = false;   // 建好就收起冻结的设置，直接看候选
@@ -372,37 +402,27 @@
     }
   }
 
-  /* ---------- 定妆图上传（复用现有交互与校验口径） ---------- */
+  /* ---------- 批次图片槽位（建批次时编辑，查看已有批次时只读） ---------- */
   function bindDropZone() {
     const input = $('batch-image-file');
-    const zone = $('batch-drop-zone');
-    input.addEventListener('change', () => previewBatchFile(input.files[0]));
-    zone.addEventListener('dragover', (event) => { event.preventDefault(); if (!zone.classList.contains('is-frozen')) zone.classList.add('drag'); });
-    zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
-    zone.addEventListener('drop', (event) => {
-      event.preventDefault();
-      zone.classList.remove('drag');
-      if (zone.classList.contains('is-frozen')) return;
-      const file = event.dataTransfer.files[0];
-      if (!file) return;
-      input.files = event.dataTransfer.files;
-      previewBatchFile(file);
+    const root = $('batch-image-slots');
+    b.slotBind = Slots.bindSlotEvents(root, input, b.slots, {
+      // 步骤 A 在「新建」模式可编辑；查看已有批次（表单冻结）只读
+      isReadonly: () => b.mode !== 'new' || b.busy || b.slotBusy,
+      onChange: () => {
+        slotInfoText();
+        // 只重建 DOM，事件委托保持不变；inputId 让空槽直接用原生 label 打开选择器
+        Slots.renderSlots(root, b.slots, {
+          inputId: 'batch-image-file',
+          readonly: b.mode !== 'new' || b.busy || b.slotBusy,
+        });
+      },
+      onError: (text) => {
+        $('batch-image-info').textContent = text;
+        $('batch-image-info').classList.add('is-warn');
+        toast(text);
+      },
     });
-  }
-  function previewBatchFile(file) {
-    $('batch-image-info').textContent = '';
-    if (!file) return;
-    const okType = /\.(jpe?g|png|webp|bmp)$/i.test(file.name);
-    if (!okType || file.size > 20 * 1024 * 1024) {
-      $('batch-image-info').textContent = '请选择 JPG、PNG 或 WebP 图片，大小不超过 20MB。iPhone HEIC 请先另存为 JPG。';
-      $('batch-image-file').value = '';
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    $('batch-image-preview').src = url;
-    $('batch-image-preview').classList.remove('hidden');
-    $('batch-drop-copy').classList.add('hidden');
-    $('batch-image-info').textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB`;
   }
 
   /* ---------- 提示词 ---------- */
@@ -1024,6 +1044,75 @@
   /* ---------- 步骤 C / D：锁定摘要、分批生产 ---------- */
   // 摘要收成一条横条：左边定妆图缩略（48px），右边一排 chip。
   // 原来 8 个格子铺满整行、被定妆图撑到 200px 高，是这页最占地方的一块。
+  /* ---------- 锁定后追加/删除细节图 ----------
+     主图（槽位 1）不可换；删除细节图后面的会左移，所以界面上的「图N」始终
+     等于传给模型的 imageUrls[N-1]，用户写提示词时不用心算空槽。 */
+  function renderSlotManage(batch) {
+    const box = $('batch-slot-manage');
+    if (!box) return;
+    const editable = txt(batch.state) !== 'closed' && !b.busy && !b.slotBusy;
+    box.classList.toggle('hidden', !b.current || b.mode !== 'view');
+    const entries = batchSlotEntries(batch);
+    Slots.renderSlots($('batch-slot-grid'), entries, {
+      compact: true, readonly: !editable,
+      onRemove: editable ? (index) => removeDetailImage(index) : null,
+    });
+    $('batch-slot-hint').textContent = `已绑定 ${entries.length} / ${Slots.maxSlots} 张 · 定妆图不可更换，追加只影响之后的生产`;
+    $('batch-slot-add').disabled = !editable || entries.length >= Slots.maxSlots;
+    const error = $('batch-slot-error');
+    error.textContent = b.slotError;
+    error.classList.toggle('hidden', !b.slotError);
+  }
+
+  async function addDetailImages(files) {
+    if (b.slotBusy || !b.current || !b.current.id) return;
+    const slots = [];
+    const result = Slots.appendFiles(slots, files, { replaceIndex: 0 });
+    if (result.errors.length) { b.slotError = result.errors.join(' '); renderSlotManage(b.current); return; }
+    if (!slots.length) return;
+    b.slotBusy = true; b.busy = true; b.slotError = '';     // 暂停 4 秒轮询，避免上传中被重渲染
+    renderSlotManage(b.current);
+    const btn = $('batch-slot-add');
+    try {
+      const upload = await Slots.uploadImages(slots, { concurrency: 3,
+        onProgress: (info) => { btn.textContent = `上传 ${info.done}/${info.total}…`; } });
+      if (!upload.ok) throw new Error(`第 ${upload.failures[0].index} 张图片上传失败：${upload.failures[0].message}`);
+      const data = await api(`/api/batches/${encodeURIComponent(txt(b.current.id))}/images`, {
+        method: 'POST',
+        body: JSON.stringify({ op: 'add', upload_ids: upload.uploadIds }),
+      });
+      b.current = data.batch;
+      toast(`已追加 ${upload.uploadIds.length} 张，共 ${(data.batch.image_urls || []).length} 张。`);
+    } catch (err) {
+      b.slotError = err.message;
+      toast(err.message);
+    } finally {
+      Slots.resetSlots(slots);
+      b.slotBusy = false; b.busy = false;
+      btn.textContent = '追加细节图';
+      await loadBatchDetail(true);
+    }
+  }
+
+  async function removeDetailImage(index) {
+    if (b.slotBusy || !b.current || !b.current.id) return;
+    if (!confirm(`删除第 ${index} 张细节图？\n\n后面的图片序号会前移，请核对提示词里的「图N」指代。\n只影响之后的生产，已生成的视频不变。`)) return;
+    b.slotBusy = true; b.busy = true; b.slotError = '';
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(txt(b.current.id))}/images`, {
+        method: 'POST', body: JSON.stringify({ op: 'remove', index }),
+      });
+      b.current = data.batch;
+      toast('已删除，后面的图片序号已前移。');
+    } catch (err) {
+      b.slotError = err.message;
+      toast(err.message);
+    } finally {
+      b.slotBusy = false; b.busy = false;
+      await loadBatchDetail(true);
+    }
+  }
+
   function renderSummary(batch) {
     const root = $('batch-summary');
     root.replaceChildren();
@@ -1049,20 +1138,28 @@
     ];
 
     const bar = el('div', 'batch-sum-bar');
-    // 定妆图缩略：有图才占位，点开看原图；整批共用这一张，缩略图 48px 够认人
-    const imageUrl = txt(batch.image_url);
-    if (imageUrl) {
-      const link = el('a', 'batch-sum-thumb');
-      link.href = imageUrl;
-      link.target = '_blank';
-      link.rel = 'noopener';
-      link.title = `查看定妆图原图：${txt(batch.image_name) || '—'}`;
-      const img = el('img', null);
-      img.src = imageUrl;
-      img.alt = txt(batch.image_name) || '定妆图';
-      img.loading = 'lazy';
-      link.append(img);
-      bar.append(link);
+    // 图片缩略条：1 定妆 + N 细节，顺序即「图N」；点开看原图
+    const urls = Array.isArray(batch.image_urls) && batch.image_urls.length
+      ? batch.image_urls : (txt(batch.image_url) ? [txt(batch.image_url)] : []);
+    const names = Array.isArray(batch.image_names) ? batch.image_names : [];
+    if (urls.length) {
+      const strip = el('div', 'batch-sum-slots');
+      urls.forEach((url, index) => {
+        const link = el('a', 'batch-sum-slot');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.title = `查看图${index + 1}：${names[index] || txt(batch.image_name) || '—'}`;
+        const img = el('img');
+        img.src = url;
+        img.alt = `图${index + 1}`;
+        img.loading = 'lazy';
+        const badge = el('span', `slot-badge${index === 0 ? ' is-primary' : ''}`,
+          index === 0 ? '定妆' : `图${index + 1}`);
+        link.append(img, badge);
+        strip.append(link);
+      });
+      bar.append(strip);
     }
 
     const chips = el('div', 'batch-sum-chips');
@@ -1071,9 +1168,10 @@
       chip.append(el('small', null, label), el('b', null, value));
       chips.append(chip);
     }
-    if (txt(batch.image_name)) {
+    if (urls.length) {
       const chip = el('span', 'batch-sum-chip');
-      chip.append(el('small', null, '定妆图'), el('b', null, txt(batch.image_name)));
+      chip.append(el('small', null, '图片'),
+        el('b', null, `${urls.length} 张 · ${names[0] || txt(batch.image_name) || '—'}`));
       chips.append(chip);
     }
     bar.append(chips);
@@ -1888,6 +1986,23 @@
     }
     body.append(el('p', 'muted history-group-foot', `共 ${detail.total} 条${detail.batchNo ? ` · 批次 ${detail.batchNo}` : ''}`));
   }
+  /* 历史行「重跑」：向后端取这一条当时的原始配置，交给小批量页填表。
+     只是预填，不提交 —— 使用者通常要换张图或改两句提示词。 */
+  async function rerunHistoryItem(item, button) {
+    const jobId = txt(item.job_id);
+    if (!jobId || typeof App.applyRerun !== 'function') { toast('重跑功能未就绪，请刷新页面。'); return; }
+    if (button) { button.disabled = true; button.textContent = '读取中…'; }
+    try {
+      const query = `?template_id=${encodeURIComponent(txt(item.template_id))}`;
+      const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/rerun-config${query}`);
+      App.applyRerun(data.config || {});
+    } catch (err) {
+      toast(`重跑配置读取失败：${err.message}`);
+    } finally {
+      if (button && button.isConnected) { button.disabled = false; button.textContent = '重跑'; }
+    }
+  }
+
   function historyRow(item, groupKey, batchNo) {
     const status = txt(item.status);
     const row = el('div', 'history-record');
@@ -1906,6 +2021,13 @@
     const warn = txt(item.verify_warn);
     if (warn) infoCell.append(el('small', 'history-verify-warn', `质量提示：${warn}`));
     const actions = el('div', 'record-actions');
+    if (txt(item.job_id)) {
+      const rerun = el('button', 'quiet rerun-btn', '重跑');
+      rerun.type = 'button';
+      rerun.title = '把这条的图片、提示词和模板视频带入「小批量试跑」，修改后再提交';
+      rerun.addEventListener('click', () => rerunHistoryItem(item, rerun));
+      actions.append(rerun);
+    }
     if (txt(item.download_url)) {
       // 对比：一个屏并排看 定妆图 / 生成的视频 / 它用的模板视频
       const cmp = el('button', 'quiet', '对比');
@@ -1931,9 +2053,13 @@
 
   /* ---------- 历史对比：定妆图 / 生成的视频 / 模板视频 同屏 ----------
      全页只建一个覆盖层；打开时才设 src 并自动静音循环播放，关闭即停并清 src。
-     定妆图按分组 key（= 批次 id）查 /api/batches/<id> 拿 image_url，结果缓存；
-     「未分组」没有批次，图面板直接隐藏，两个视频照常对比。 */
-  const compareView = { root: null, title: null, imgPane: null, img: null, gen: null, tpl: null, imgCache: new Map() };
+     定妆图优先用接口给的 item.image_url（= 这条记录所属 job 自己的素材图），
+     拿不到再退回分组批次级定妆图；两者都没有就把图面板整块移出布局。
+     三个面板 flex:1 平分宽度 —— 图面板隐藏后剩下两个自动变宽，不会留空列。 */
+  const compareView = {
+    root: null, title: null, grid: null, imgPane: null, img: null, gen: null, tpl: null,
+    seq: 0, imgCache: new Map(),
+  };
 
   function ensureCompareView() {
     if (compareView.root) return;
@@ -1958,6 +2084,8 @@
     c.imgPane = makePane('定妆图');
     c.img = document.createElement('img');
     c.img.alt = '定妆图';
+    // 图挂了（会话过期/文件被清理）就整块收起，不留破图、也不留空列
+    c.img.addEventListener('error', () => { if (c.img.getAttribute('src')) setCompareImage(''); });
     c.imgPane.append(c.img);
     const genPane = makePane('生成的视频');
     c.gen = document.createElement('video');
@@ -1969,7 +2097,8 @@
     tplPane.append(c.tpl);
 
     grid.append(c.imgPane, genPane, tplPane);
-    root.append(grid);
+    c.grid = grid;
+    root.append(head, grid);
     document.body.append(root);
     c.root = root;
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideCompareView(); });
@@ -1977,57 +2106,81 @@
     root.addEventListener('click', (e) => { if (e.target === root || e.target === grid) hideCompareView(); });
   }
 
+  function setCompareImage(url) {
+    const c = compareView;
+    if (!url) {
+      c.img.removeAttribute('src');
+      c.imgPane.classList.add('hidden');
+      return;
+    }
+    c.img.src = url;
+    c.imgPane.classList.remove('hidden');
+  }
+
+  // 批次级定妆图：按批次 id 缓存（含空结果，避免每条记录都白跑一次请求）
+  async function batchImageUrl(batchId) {
+    const c = compareView;
+    if (!batchId) return '';
+    if (c.imgCache.has(batchId)) return c.imgCache.get(batchId);
+    let url = '';
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(batchId)}`);
+      url = txt(data.batch && data.batch.image_url);
+    } catch { url = ''; }
+    c.imgCache.set(batchId, url);
+    return url;
+  }
+
   async function openCompare(item, groupKey, batchNo) {
     ensureCompareView();
     const c = compareView;
+    const seq = ++c.seq;
     const name = txt(item.template_name) || txt(item.template_id) || '未命名场景';
     const tid = txt(item.template_id);
-    c.title.textContent = `${name}（${tid}）${batchNo ? ` · 批次 ${batchNo}` : ''}`;
-    // 定妆图：分组 key 就是批次 id；未分组没有批次，图面板隐藏
+    const batchLabel = batchNo && batchNo !== '未分组' ? ` · 批次 ${batchNo}` : '';
+    c.title.textContent = `${name}（${tid}）${batchLabel}`;
     const batchId = groupKey && groupKey !== '__ungrouped__' ? groupKey : '';
-    c.img.removeAttribute('src');
-    c.imgPane.classList.add('hidden');
-    if (batchId) {
-      let image_url = c.imgCache.get(batchId);
-      if (image_url === undefined) {
-        try {
-          const data = await api(`/api/batches/${encodeURIComponent(batchId)}`);
-          image_url = txt(data.batch && data.batch.image_url);
-        } catch { image_url = ''; }
-        c.imgCache.set(batchId, image_url);
-      }
-      if (image_url) {
-        c.img.src = image_url;
-        c.imgPane.classList.remove('hidden');
-      }
-    }
+    // 先把视频和覆盖层亮出来，图再异步补 —— 不让图片请求拖着整个对比层不出现。
     c.gen.src = txt(item.download_url);
     c.tpl.src = tid ? `/api/templates/${encodeURIComponent(tid)}/preview` : '';
+    const direct = txt(item.image_url);
+    setCompareImage(direct);
     c.root.classList.remove('hidden');
     for (const video of [c.gen, c.tpl]) {
       if (!video.getAttribute('src')) continue;
       const promise = video.play();
       if (promise && typeof promise.catch === 'function') promise.catch(() => { /* 静音被拦极罕见，手动点控件即可 */ });
     }
+    if (direct) return;
+    const fallback = await batchImageUrl(batchId);
+    // 等请求回来时用户可能已经关了或换了一条，别把旧图塞进新面板
+    if (seq !== c.seq || !fallback || c.root.classList.contains('hidden')) return;
+    setCompareImage(fallback);
   }
 
   function hideCompareView() {
     const c = compareView;
     if (!c.root || c.root.classList.contains('hidden')) return;
+    c.seq += 1;   // 作废还没回来的图片请求
     for (const video of [c.gen, c.tpl]) {
       try { video.pause(); } catch (_) { /* 已释放时 pause 可能抛错 */ }
       video.removeAttribute('src');
       if (video.load) video.load();
     }
     c.img.removeAttribute('src');
+    c.imgPane.classList.add('hidden');
     c.root.classList.add('hidden');
   }
 
   /* ---------- 事件绑定与入口 ---------- */
   function bindEvents() {
     bindDropZone();
-    // 定妆图缩略图走 /api/uploads/{id}：取不到（会话过期/文件被清理）时安静隐藏，不留破图。
-    $('batch-image-preview').addEventListener('error', () => $('batch-image-preview').classList.add('hidden'));
+    // 追加细节图：锁定之后仍可用（只影响之后的生产）
+    $('batch-slot-add').addEventListener('click', () => { $('batch-slot-file').value = ''; $('batch-slot-file').click(); });
+    $('batch-slot-file').addEventListener('change', () => {
+      const files = Array.from($('batch-slot-file').files || []);
+      if (files.length) addDetailImages(files);
+    });
     $('batch-new-btn').addEventListener('click', newBatch);
     $('batch-refresh-btn').addEventListener('click', async () => {
       if (b.mode === 'view' && b.current && b.current.id) await refreshBatch(false);

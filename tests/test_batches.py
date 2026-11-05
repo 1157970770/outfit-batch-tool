@@ -566,10 +566,40 @@ def main() -> int:
         assert hist_body["total"] == READY_COUNT, hist_body["total"]
         first = hist_body["items"][0]
         assert first["template_name"].endswith(".mp4") and first["download_url"], first
+        # 对比层要「对应的定妆图」：每条记录都带 job 自己的素材图（uploads/<id>）
+        assert first["image_url"] == f"/api/uploads/{upload_id}", first
         hist_warn = {row["template_id"]: row["verify_warn"] for row in hist_body["items"]}
         assert hist_warn[warn_tid] == "时长 9.0s 与预期 7s 不符", "历史分组行也要带同口径的 verify_warn"
         code, _, hist = call(alice, base, "/api/history/groups/__ungrouped__")
         assert code == 200 and body(hist)["total"] == 1, hist
+        # 试跑（未分组）没有批次级定妆图，只能靠 job 自己的素材图 —— 这里必须非空
+        assert body(hist)["items"][0]["image_url"] == f"/api/uploads/{upload_id}", body(hist)["items"][0]
+
+        # ---------------- 4.1 历史行「重跑」：取回这条当时的原始配置
+        ung_item = body(hist)["items"][0]
+        rerun_path = (f"/api/jobs/{ung_item['job_id']}/rerun-config"
+                      f"?template_id={ung_item['template_id']}")
+        code, _, raw_rerun = call(alice, base, rerun_path)
+        assert code == 200, (code, raw_rerun)
+        cfg = body(raw_rerun)["config"]
+        assert cfg["template_id"] == ung_item["template_id"] and cfg["template_name"], cfg
+        assert cfg["prompt"] == prompt_text and cfg["prompt_id"] == prompt_id, cfg
+        assert cfg["resolution"] == "720P" and int(cfg["duration"]) == 5, cfg
+        assert cfg["tags"] == {"top": "AW26-TRIAL"}, cfg
+        assert len(cfg["images"]) == 1, cfg
+        assert cfg["images"][0]["upload_id"] == upload_id, cfg
+        assert cfg["images"][0]["url"] == f"/api/uploads/{upload_id}", cfg
+        assert cfg["images"][0]["available"] is True, cfg
+        # 服务器磁盘路径绝不能下发到浏览器
+        assert "path" not in cfg["images"][0] and "image_path" not in cfg, cfg
+        code, _, rr = call(bob, base, rerun_path)
+        assert code == 403, (code, rr)
+        code, _, rr = call(alice, base, f"/api/jobs/{ung_item['job_id']}/rerun-config?template_id=nope")
+        assert code == 404, (code, rr)
+        code, _, rr = call(alice, base, "/api/jobs/ffffffffffff/rerun-config")
+        assert code == 404, (code, rr)
+        print("  ✓ 重跑配置：回带原图 upload_id / 提示词 / 模板 / 标签，越权与错模板被拦住")
+
         code, _, missing = call(alice, base, "/api/history/groups/ffffffffffff")
         assert code == 404, (code, missing)
         print("  ✓ 历史分组：批次聚 2 个 job/50 条，试跑落 __ungrouped__")

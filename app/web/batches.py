@@ -26,7 +26,10 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from app.web.jobs import _redact, clean_style_no, clean_tags, duration_ok
+from app.web.jobs import (
+    MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _redact, clean_style_no, clean_tags,
+    duration_ok, image_slots,
+)
 from app.web.style_usage import StyleUsageLedger
 from app.web.templates import TemplateError
 
@@ -43,7 +46,8 @@ RETRY_MAX = 100
 UNGROUPED_KEY = "__ungrouped__"
 # job.image_path 里的上传图：web-data/uploads/<xx>/<32位id>.<ext>（Windows 反斜杠同样匹配）。
 # 命中即说明这张图能通过 /api/uploads/<id>（带 owner 校验）取回来。
-UPLOAD_IMAGE_RE = re.compile(r"uploads[\\/][0-9a-f]{2}[\\/](?P<id>[0-9a-f]{32})\.[A-Za-z0-9]{1,8}$")
+# 命名保持对外不变，正则统一收在 jobs.py（读老 job 时两边用同一套）。
+UPLOAD_IMAGE_RE = UPLOAD_PATH_RE
 
 # 计费口径：一条任务的计费秒数 ≈ 模板时长 + 输出视频秒数。
 # 输出默认固定 7 秒（duration=7，API 接受 2–30）；duration=-1 时才按 7 秒估算。
@@ -358,6 +362,51 @@ class BatchManager:
         return float(duration) if duration and duration > 0 else OUTPUT_SECONDS
 
     # ------------------------------------------------------------------ 公开字段
+    # ------------------------------------------------------------------ 多图槽位
+    def _image_slots(self, batch: dict) -> list[dict]:
+        """统一读图：images[] 为真源；老批次回退成单元素列表。顺序 = 槽位 = 模型「图N」。"""
+        return image_slots(batch)
+
+    @staticmethod
+    def _sync_image_aliases(batch: dict) -> None:
+        """images[0] 回写单值别名，让老代码/老前端/历史对比层继续只认主图。"""
+        slots = image_slots(batch)
+        first = slots[0] if slots else {}
+        batch["image_upload_id"] = str(first.get("upload_id") or "")
+        batch["image_path"] = str(first.get("path") or "")
+        batch["image_name"] = str(first.get("name") or "")
+
+    def _parse_uploads(self, user: dict, data: dict, *, allow_empty: bool) -> list[dict]:
+        """把 upload_ids（回退 upload_id）解析成有序槽位；逐张校验归属与文件存在。"""
+        raw = data.get("upload_ids")
+        if raw is None:
+            single = str(data.get("upload_id") or "").strip()
+            raw = [single] if single else []
+        if not isinstance(raw, list):
+            raise BatchError("图片参数无效，请重新上传。")
+        ids = [str(item or "").strip() for item in raw]
+        ids = [item for item in ids if item]
+        if not ids:
+            if allow_empty:
+                return []
+            raise BatchError("请先上传定妆图。")
+        if len(ids) > MAX_IMAGE_SLOTS:
+            raise BatchError(
+                f"一次最多 {MAX_IMAGE_SLOTS} 张图片（1 张定妆图 + 9 张细节图），当前 {len(ids)} 张。")
+        if len(set(ids)) != len(ids):
+            raise BatchError("同一张图片不能重复提交。")
+        slots = []
+        for index, upload_id in enumerate(ids, 1):
+            if not re.fullmatch(r"[a-f0-9]{32}", upload_id):
+                raise BatchError(f"第 {index} 张图片已失效，请重新上传。", 404)
+            meta = self.resolve_upload(upload_id, user["username"])
+            if not meta:
+                raise BatchError(f"第 {index} 张图片已失效，请重新上传。", 404)
+            slots.append({"upload_id": upload_id,
+                          "name": str(meta.get("name") or ""),
+                          "path": str(meta.get("path") or "")})
+        return slots
+
     def public(self, batch: dict) -> dict:
         with self.mutex:
             data = {key: batch.get(key) for key in (
@@ -365,8 +414,12 @@ class BatchManager:
                 "prompt_id", "prompt", "resolution", "duration", "tag_filters", "style_no", "tags",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
                 "created_at", "updated_at", "locked_at", "closed_at")}
-            data["image_url"] = (f"/api/uploads/{batch['image_upload_id']}"
-                                 if batch.get("image_upload_id") else "")
+            # image_url 语义固定为「主图（定妆图）」，老前端/历史对比层靠它，不能改。
+            data["image_url"] = (f"/api/uploads/{data['image_upload_id']}"
+                                 if data.get("image_upload_id") else "")
+            slots = self._image_slots(batch)
+            data["image_urls"] = [f"/api/uploads/{s['upload_id']}" for s in slots if s.get("upload_id")]
+            data["image_names"] = [s["name"] for s in slots]
             data["runs"] = [dict(run) for run in (batch.get("runs") or [])]
             return data
 
@@ -434,7 +487,9 @@ class BatchManager:
         resolution = str(data.get("resolution") or "").strip().upper()
         # 网页标配「输出固定 7 秒」；-1（跟随素材）与 2–30 的其他秒数仍接受，向后兼容老批次。
         duration = _as_int(data.get("duration"), DEFAULT_DURATION)
-        upload_id = str(data.get("upload_id") or "").strip()
+        # 多图：upload_ids 有序（槽位 1 = 定妆图）；缺省时回退老的单个 upload_id。
+        # 草稿态允许 0 张（后补），所以 allow_empty=True。
+        slots = self._parse_uploads(user, data, allow_empty=True)
 
         if not batch_no or len(batch_no) > 40:
             raise BatchError("批次号需要 1–40 个字符。")
@@ -457,12 +512,6 @@ class BatchManager:
             batch_tags = clean_tags(data.get("tags"))
         except ValueError as exc:
             raise BatchError(str(exc)) from None
-        upload = None
-        if upload_id:
-            upload = self.resolve_upload(upload_id, user["username"])
-            if not upload:
-                raise BatchError("图片已失效，请重新上传。", 404)
-
         with self.mutex:
             if _norm_no(batch_no) in self.by_no:
                 raise BatchError("批次号已存在，请换一个。", 409)
@@ -476,9 +525,11 @@ class BatchManager:
                 "style_no": re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("style_no") or "")).strip()[:40],
                 "tags": batch_tags,
                 "state": "draft",
-                "image_upload_id": upload_id,
-                "image_path": str((upload or {}).get("path") or ""),
-                "image_name": str((upload or {}).get("name") or ""),
+                # images[] 是唯一真源；三个单值字段是主图别名，供老前端/老代码读取。
+                "images": slots,
+                "image_upload_id": (slots[0]["upload_id"] if slots else ""),
+                "image_path": (slots[0]["path"] if slots else ""),
+                "image_name": (slots[0]["name"] if slots else ""),
                 "prompt_id": prompt_id, "prompt": prompt,
                 "resolution": resolution, "duration": duration,
                 "tag_filters": {},
@@ -494,24 +545,69 @@ class BatchManager:
 
     # ------------------------------------------------------------------ #2 绑定定妆图
     def set_image(self, batch_id: str, user: dict, data: dict) -> dict:
-        upload_id = str(data.get("upload_id") or "").strip()
-        if not re.fullmatch(r"[a-f0-9]{32}", upload_id):
-            raise BatchError("请先上传定妆图。")
+        """草稿态整组重设（换定妆图/重新选 1+9 张）；锁定后只能走 add/remove_images。"""
+        slots = self._parse_uploads(user, data, allow_empty=False)
         with self.mutex:
             batch = self._authorized(batch_id, user)
             if batch.get("state") != "draft":
                 raise BatchError("批次已锁定，换图请新开批次。", 409)
             if batch.get("items") or batch.get("runs"):
                 raise BatchError("本批次已生产过，换图请新开批次。", 409)
-            upload = self.resolve_upload(upload_id, user["username"])
-            if not upload:
-                raise BatchError("图片已失效，请重新上传。", 404)
-            batch["image_upload_id"] = upload_id
-            batch["image_path"] = str(upload.get("path") or "")
-            batch["image_name"] = str(upload.get("name") or "")
+            batch["images"] = slots
+            self._sync_image_aliases(batch)
             batch["updated_at"] = time.time()
             self._save(batch)
             return {"image_name": batch["image_name"], "batch": self.public(batch)}
+
+    def add_images(self, batch_id: str, user: dict, data: dict) -> dict:
+        """锁定后仍可追加细节图：只落到批次，对**之后**的生产生效（已建 job 持自己的副本）。
+
+        不加「有任务在跑就 409」：_start_run 在同一把锁内一次性读完图并建 job，
+        追加只可能落在生产前或生产后，不存在读一半被改。
+        """
+        incoming = self._parse_uploads(user, data, allow_empty=False)
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            if batch.get("state") == "closed":
+                raise BatchError("批次已关闭，不能再改图。", 409)
+            current = self._image_slots(batch)
+            if len(current) + len(incoming) > MAX_IMAGE_SLOTS:
+                raise BatchError(
+                    f"已绑定 {len(current)} 张，最多 {MAX_IMAGE_SLOTS} 张；本次只能再加 "
+                    f"{max(0, MAX_IMAGE_SLOTS - len(current))} 张。")
+            batch["images"] = current + incoming
+            self._sync_image_aliases(batch)
+            batch["updated_at"] = time.time()
+            self._save(batch)
+            return {"batch": self.public(batch), "slot_count": len(batch["images"])}
+
+    def remove_images(self, batch_id: str, user: dict, data: dict) -> dict:
+        """删除细节图（槽位 1 定妆图不可删）；删除后自动左移，保证「图N」不错位。"""
+        raw_index = data.get("index")
+        upload_id = str(data.get("upload_id") or "").strip()
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            if batch.get("state") == "closed":
+                raise BatchError("批次已关闭，不能再改图。", 409)
+            slots = self._image_slots(batch)
+            if raw_index is not None:
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError):
+                    raise BatchError("图片序号无效。") from None
+            else:
+                index = next((i + 1 for i, slot in enumerate(slots)
+                              if slot.get("upload_id") == upload_id), 0)
+            if index <= 1:
+                raise BatchError("定妆图不能删除；要换请整批重开。")
+            if index > len(slots) or not slots:
+                raise BatchError("要删除的细节图不存在。", 404)
+            slots.pop(index - 1)
+            batch["images"] = slots
+            self._sync_image_aliases(batch)
+            batch["updated_at"] = time.time()
+            self._save(batch)
+            return {"batch": self.public(batch), "slot_count": len(slots)}
 
     # ------------------------------------------------------------------ #3 候选清单
     def candidates(self, batch_id: str, user: dict, data: dict) -> dict:
@@ -574,7 +670,7 @@ class BatchManager:
             batch = self._authorized(batch_id, user)
             if batch.get("state") != "draft":
                 raise BatchError("清单已锁定，不能再改。", 409)
-            if not batch.get("image_upload_id"):
+            if not self._image_slots(batch):
                 raise BatchError("请先绑定定妆图再锁定清单。", 409)
             if len(template_ids) > self.settings.max_batch_items:
                 raise BatchError(f"清单最多 {self.settings.max_batch_items} 条。", 409)
@@ -602,7 +698,9 @@ class BatchManager:
     def _quota_check(self, user: dict, count: int) -> None:
         """账户生成数量上限：0/缺省 = 不限。超了直接拒绝，不部分提交。
         settings.users 是 web.json 里的账户表；videos_used 与小批量同口径。"""
-        info = (self.settings.users or {}).get(str((user or {}).get("username") or "")) or {}
+        # 用 getattr 兜底：单测/诊断脚本里的 settings 是 SimpleNamespace，没有 users 字段。
+        info = (getattr(self.settings, "users", None) or {}).get(
+            str((user or {}).get("username") or "")) or {}
         try:
             quota = max(0, int(info.get("quota") or 0))
         except (TypeError, ValueError):
@@ -622,9 +720,13 @@ class BatchManager:
             raise BatchError("请先锁定清单再生产。", 409)
         if batch.get("active_job_id"):
             raise BatchError("本批次有任务在跑，请等它结束。", 409)
-        image_path = Path(str(batch.get("image_path") or ""))
-        if not batch.get("image_path") or not image_path.is_file():
+        slots = self._image_slots(batch)
+        if not slots:
             raise BatchError("定妆图已丢失，请重新上传或新开批次。", 404)
+        for index, slot in enumerate(slots, 1):
+            if not Path(str(slot.get("path") or "")).is_file():
+                raise BatchError(f"第 {index} 张批次图片已丢失，请重新上传或新开批次。", 404)
+        image_path = Path(slots[0]["path"])
         queue = [item for item in (batch.get("items") or []) if item.get("state") in wanted]
         if not queue:
             raise BatchError(empty_message, 409)
@@ -677,6 +779,7 @@ class BatchManager:
                 batch_ref=str(batch["id"]), limit_items=len(taken),
                 tags=dict(batch.get("tags") or {}),
                 style_no=str(batch.get("style_no") or ""),
+                images=slots,
             )
         except ValueError as exc:
             batch.pop("pending_run", None)
@@ -989,9 +1092,15 @@ class BatchManager:
                 # 的历史任务没有批次，只有 job 自己这张才对得上；只有落在 uploads/<xx>/<id>.<ext>
                 # 的才走带权限校验的 /api/uploads 接口，其它来源一律不给 URL。
                 image_url = ""
-                upload_hit = UPLOAD_IMAGE_RE.search(str(job.get("image_path") or ""))
-                if upload_hit:
-                    image_url = f"/api/uploads/{upload_hit.group('id')}"
+                # 优先读多图真源的首张，老 job 由 image_slots() 从 image_path 反解兜底；
+                # 历史对比层本次仍只展示主图一张。
+                job_slots = image_slots(job)
+                first_id = str(job_slots[0].get("upload_id") or "") if job_slots else ""
+                if not first_id:
+                    upload_hit = UPLOAD_IMAGE_RE.search(str(job.get("image_path") or ""))
+                    first_id = upload_hit.group("id") if upload_hit else ""
+                if first_id:
+                    image_url = f"/api/uploads/{first_id}"
                 for rec in job.get("records") or []:
                     template_id = str(rec.get("id"))
                     status = str(rec.get("status") or "")

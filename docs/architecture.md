@@ -63,8 +63,8 @@ python run_web.py
 ### 3.2 小批量试跑
 
 ```
-POST /api/uploads           定妆图 → web-data/uploads/<32hex>.png + 元数据
-POST /api/jobs              JobManager.create()：
+POST /api/uploads           每张图各 1 次 → web-data/uploads/<xx>/<32hex>.png + 元数据（≤10 张）
+POST /api/jobs              upload_ids[]（兼容旧的单个 upload_id）→ JobManager.create(images=...)：
                               · 校验提示词/条数/画质/时长
                               · lane = small（≤ small_lane_items=3）否则 big
                               · 写 web-data/jobs/<12hex>.json，状态 queued
@@ -79,7 +79,8 @@ _run_job                    BatchRunner.run()：提交 → 轮询 → 下载
 
 ```
 POST /api/batches                 建草稿（批次号唯一、绑图、提示词、画质、时长）
-POST /api/batches/<id>/set-image  换图（草稿或已锁定未生产时）
+POST /api/batches/<id>/image       草稿态整组重设（换定妆图/重新选 1+9 张）
+POST /api/batches/<id>/images      op=add 追加细节图 / op=remove 删细节图（锁定后仍可用；主图不可删）
 POST /api/batches/<id>/candidates 按标签筛选 → 命中清单（写入 items，状态 pending）
 POST /api/batches/<id>/lock       锁定这批清单；之后可反复生产
 POST /api/batches/<id>/produce    取前 N 条 pending → JobManager.create(batch_ref=...)
@@ -157,6 +158,7 @@ while not stop:
 | `status` | `queued → running → succeeded / partial / failed / canceled / interrupted` |
 | `batch_id` | 输出目录名，形如 `WEB-<用户>-<时间>-<后缀>` |
 | `lane` | `small`（≤3 条）或 `big`；老数据缺省按 `big` |
+| `images[]` | 图片真源（1–10 张，顺序 = 槽位 = `imageUrls`）；`image_path`/`image_name` 是 `images[0]` 别名 |
 | `templates` / `template_ids` | 本次要跑的场景（含 COS 地址） |
 | `prompt` / `prompt_id` | 实际提交的提示词 |
 | `resolution` / `duration` / `total` / `done` | 生成参数与进度 |
@@ -174,7 +176,9 @@ while not stop:
 | --- | --- |
 | `id` / `batch_no` / `title` | 内部 id / 批次号（唯一）/ 备注 |
 | `state` | `draft → locked → closed`（closed 不可再生产） |
-| `image_path` / `prompt_id` / `prompt` | 定妆图与提示词 |
+| `images[]` | **图片唯一真源**：`[{upload_id,name,path}]`，顺序 = 槽位 = `imageUrls`；[0]=定妆图 |
+| `image_path` / `image_name` / `image_url` | `images[0]` 的**主图别名**（老代码/老前端/历史对比层用），写图时同步回写 |
+| `prompt_id` / `prompt` | 提示词（不改 prompt；「图2…图10」由用户自己写） |
 | `resolution` / `duration` | 本批次参数 |
 | `tags` | 6 栏位标签，建批次时填，冻结后不改（旧批次只有 `style_no`） |
 | `style_no` | 旧款号字段（v0.9.0），仅老批次存在 |
@@ -188,7 +192,7 @@ while not stop:
 web-data/
 ├── jobs/<id>.json          任务状态（1 个文件 = 1 轮）
 ├── batches/<id>.json       批次
-├── uploads/<32hex>.png     定妆图（单个 job 引用）
+├── uploads/<xx>/<32hex>.png 定妆图与细节图（每图一个文件 + meta/<id>.json；目前无 GC）
 ├── output/<batch_id>/      成片 mp4 + 归档清单
 ├── logs/<job_id>.log       逐条提交日志
 ├── style_template_usage.json  款号-模板防重账本（v0.11.0，见 5.3）
@@ -214,13 +218,13 @@ web-data/
 | GET | `/` `/static/*` | 公开 | 页面与静态资源（每次读盘，改完刷新即可） |
 | GET | `/api/me` `/api/bootstrap` | 登录 | 当前用户、服务上限、提示词、模板、标签 |
 | GET | `/api/templates` `/api/templates/<id>/preview` | 登录 | 模板列表 / 预览视频 |
-| GET | `/api/uploads/<id>` | 登录（限本人） | 回显定妆图 |
-| POST | `/api/uploads` | 登录 | 上传定妆图 |
+| GET | `/api/uploads/<id>` | 登录（限本人） | 回显图片（定妆图 / 细节图） |
+| POST | `/api/uploads` | 登录 | 单张图片上传（每图一次，≤20MB；多图由前端并发 3 张提交） |
 | GET/POST | `/api/jobs` | 登录 | 列表（`?scope=all` 仅 admin；支持 `lane=small\|big`、`offset`、`limit`，返回 `total`）/ 建任务 |
 | GET | `/api/jobs/<id>` `/api/jobs/<id>/files/...` | 登录（限本人） | 详情 / 成片、报告 CSV、ZIP |
 | POST | `/api/jobs/<id>/cancel` `/retry` | 登录（限本人） | 取消 / 只重试失败项 |
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
-| GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、set-image、candidates、lock、produce、retry-failed、close、zip |
+| GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、lock、produce、retry-failed、close、zip |
 | GET | `/api/history/groups[/<key>]` | 登录 | 历史按批次分组 / 组内条目；分组带 `small_jobs`/`big_jobs` 用于分离试跑 |
 | GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |
 | GET | `/api/admin/status` | admin | 服务状态、队列、额度、账号 |

@@ -5,7 +5,7 @@
 
 ## 1. 这是什么
 
-局域网网页版批量视频生产器：1 张定妆图 + N 个视频模板 → N 条 7 秒换装视频，
+局域网网页版批量视频生产器：1 张定妆图 + 最多 9 张细节图 + N 个视频模板 → N 条 7 秒换装视频，
 调用阿里云百炼 `wan3.0-video`，成品落本地并可选归档腾讯云 COS。
 
 | 组成 | 入口 | 说明 |
@@ -88,8 +88,10 @@ app/storage.py         COS / 本地存储适配
 | `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与本地打标工具共用；`.bak` 是上一版 | ❌ |
 | `web-data/manifest_overlay.json` | 网页上传的视频索引（云端 manifest 里没有它们）；启动时与 manifest 合并 | ❌ |
 | `web-data/tag_versions/` | 真源版本快照（gzip，整库含每条标签与弃用态）；自动留 50 版 + 手动 50 版，回滚前另存备份 | ❌ |
-| `web-data/{uploads,output,logs}/` | 定妆图、成片、任务日志 | ❌ |
+| `web-data/{uploads,output,logs}/` | 定妆图与细节图、成片、任务日志 | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
+
+**多图（v0.17.0）**：两页都支持 10 个槽位（槽位 1 定妆图必填，2–10 细节图可选），数组顺序即模型 `imageUrls` 顺序与 prompt 的「图N」。job / batch 以 `images[]` 为唯一真源，`image_path/image_name/image_url` 保留为**主图别名**（老数据零迁移）。`/api/jobs`、`/api/batches` 收 `upload_ids[]`（兼容旧 `upload_id`）；锁定后细节图走 `POST /api/batches/<id>/images` 的 `op=add/remove`，主图不可换。删除细节图后序号自动左移；**不改 prompt**，指代由用户自己写「图2…图10」。COS 关闭时 `app/media.py:base64_budget_error` 会按总量 40MB 兜底拒绝。uploads 目录目前**没有 GC**，10 倍图量会持续堆积，后续可加「按 job/batch 引用计数 + 7 天」的清理。
 
 ### 换 Key / 换模型 / 换地域，只改一处
 

@@ -27,20 +27,24 @@ from pathlib import Path
 try:                      # 作为包导入（测试/界面）
     from .storage import Storage, file_fingerprint, object_key
     from .wan_api import (
-        STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
+        MAX_IMAGES, STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
         TaskCanceled, TaskExpired, WaitStopped, WaitTimeout, WanClient, WanConfig, WanError,
         estimate_cost,
     )
-    from .media import MediaError, SourceUploader, describe_media_source, resolve_body, resolve_image
+    from .media import (
+        MediaError, SourceUploader, base64_budget_error, describe_media_source,
+        resolve_body, resolve_image,
+    )
 except ImportError:       # 直接 python3 app/core.py 时
     from storage import Storage, file_fingerprint, object_key  # type: ignore
     from wan_api import (  # type: ignore
-        STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
+        MAX_IMAGES, STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
         TaskCanceled, TaskExpired, WaitStopped, WaitTimeout, WanClient, WanConfig, WanError,
         estimate_cost,
     )
     from media import (  # type: ignore
-        MediaError, SourceUploader, describe_media_source, resolve_body, resolve_image,
+        MediaError, SourceUploader, base64_budget_error, describe_media_source,
+        resolve_body, resolve_image,
     )
 
 DEFAULT_PROMPT = (
@@ -257,6 +261,20 @@ class BatchSpec:
     inflight_semaphore: threading.Semaphore | None = None
     # 兼容旧调用：只钳提交阶段。新代码请用 inflight_semaphore。
     submit_semaphore: threading.Semaphore | None = None
+    # 服务重启接回：{template_id: 重启前那条记录}。
+    #   status=success  → 不再跑，沿用旧记录（避免二次计费/重复下载）
+    #   status=running 且带 task_id → 不提交，接着等那个 taskId
+    #   没有记录 / pending → 正常提交
+    resume: dict = field(default_factory=dict)
+    # 多图：全部图片按槽位顺序（含定妆图）。为空时回退 image_path（桌面/CLI 老调用）。
+    # 必须放在末尾：image_path 等前排字段无默认值，中间插带默认值的字段会报 TypeError。
+    image_paths: list[str] = field(default_factory=list)
+
+    def image_sources(self) -> list[str]:
+        """传给模型的图片顺序：images[0]=图1 定妆，images[1..]=图2…图10。"""
+        if self.image_paths:
+            return list(self.image_paths)
+        return [self.image_path] if self.image_path else []
 
 
 @dataclass
@@ -321,7 +339,8 @@ class BatchRunner:
         self.stop_event = threading.Event()
         self.state = BatchState(spec)
         self.state.started = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._image_url: str | None = None
+        self._image_url: str | None = None      # 兼容老调用与测试手写注入
+        self._image_urls: list[str] = []        # 多图真源，顺序=槽位=imageUrls
         self._upload_lock = threading.Lock()
         self._save_lock = threading.Lock()
         self._media_cache: dict = {}
@@ -374,16 +393,54 @@ class BatchRunner:
     def run(self) -> dict:
         spec = self.spec
         spec.out_dir.mkdir(parents=True, exist_ok=True)
-        self._prepare_templates()
-        self._ensure_image()
-        self._save_state()
 
         total = len(spec.templates)
-        done = 0
+        # 重启接回：分三类，只有第一类要跑。
+        #   ① 没有记录 / pending：从没提交过 → 正常提交
+        #   ② running 且带 task_id：重启前已提交 → 接回那条云端任务，绝不重提
+        #   ③ 其它（success/unknown/timeout/expired/failed…）：已经是定论，沿用旧记录
+        pending_templates = []
+        need_submit = False
+        kept = 0
+        for tpl in spec.templates:
+            prior = (spec.resume or {}).get(str(tpl["id"])) or {}
+            prev_status = str(prior.get("status") or "")
+            reattach = prev_status == "running" and bool(prior.get("task_id"))
+            if not prior or prev_status in ("", "pending"):
+                pending_templates.append(tpl)
+                need_submit = True
+                continue
+            if reattach:
+                pending_templates.append(tpl)
+                continue
+            keep = dict(prior)
+            if prev_status == "running":
+                # 重启前正在跑却没记下 taskId：接不回来，也不能重提（云端可能已计费），
+                # 落在 unknown（不可一键重试），提示去控制台核对。
+                keep["status"] = "unknown"
+                keep["error"] = ("服务重启时这条正在运行，但没有可核对的 taskId；"
+                                 "请到控制台核对后再决定是否重试。")
+            with self.state.lock:
+                self.state.records[tpl["id"]] = keep
+            kept += 1
+
+        # 纯接回的批次不需要再传定妆图/重签模板：那两件事只服务「要提交」的条目，
+        # 一旦图片被清理/尺寸不合规，不该因为这个把接回也一起拖死。
+        if pending_templates:
+            self._prepare_templates()
+            if need_submit:
+                self._ensure_image()
+        self._save_state()
+
+        done = kept
         self._emit("started", total=total)
+        if kept:
+            # 先把进度条回填到重启前的样子，页面上立刻能看到「已好 N 条」。
+            self._emit("progress", done=done, total=total, record=None)
+            self.log(f"重启接回：{kept} 条沿用旧记录，剩余 {len(pending_templates)} 条继续")
 
         with ThreadPoolExecutor(max_workers=max(1, spec.concurrency)) as pool:
-            futures = {pool.submit(self._run_one, tpl): tpl for tpl in spec.templates}
+            futures = {pool.submit(self._run_one, tpl): tpl for tpl in pending_templates}
             for fut in as_completed(futures):
                 tpl = futures[fut]
                 try:
@@ -436,15 +493,40 @@ class BatchRunner:
                 raise EngineError(f"模板 {tpl['id']} 签名失败：{exc}") from None
 
     def _ensure_image(self) -> None:
+        """开工前把全部槽位图片解析成 URL / Base64，任一张失败即整批失败。
+
+        为什么整批失败而不是跳过：图是整批共用素材，少一张会让 prompt 里的
+        「图3…图10」整体错位，产出的视频内容是错的却照常计费。这里在线程池
+        之前调用，失败时 job 直接 failed，一条都不会提交。
+        """
         with self._upload_lock:
-            if self._image_url:
+            if self._image_urls:
                 return
-            self.log(f"准备服装图：{Path(self.spec.image_path).name}")
-            try:
-                self._image_url = resolve_image(self.spec.image_path, self._uploader)
-            except MediaError as exc:
-                raise EngineError(str(exc)) from None
-            self.log(f"服装图已就绪（{describe_media_source(self._image_url)}），{len(self.spec.templates)} 条任务共用")
+            # 测试用 object.__new__ 手工注入 _image_url（单图老路径），沿用不重传。
+            if self._image_url:
+                self._image_urls = [self._image_url]
+                return
+            paths = self.spec.image_sources()
+            if not paths:
+                raise EngineError("缺少定妆图")
+            if len(paths) > MAX_IMAGES:
+                raise EngineError(f"图片最多 {MAX_IMAGES} 张（1 张定妆图 + 9 张细节图）。")
+            budget = base64_budget_error(paths, cos_enabled=self._uploader is not None)
+            if budget:
+                raise EngineError(budget)
+            urls: list[str] = []
+            for index, path in enumerate(paths, 1):
+                if not Path(path).is_file():
+                    raise EngineError(f"第 {index} 张图片已丢失：{Path(path).name}")
+                self.log(f"准备第 {index}/{len(paths)} 张图片：{Path(path).name}")
+                try:
+                    urls.append(resolve_image(path, self._uploader))
+                except MediaError as exc:
+                    raise EngineError(f"第 {index} 张图片处理失败：{exc}") from None
+            self._image_urls = urls
+            self._image_url = urls[0]
+            self.log(f"{len(urls)} 张图片已就绪（{describe_media_source(urls[0])}），"
+                     f"{len(self.spec.templates)} 条任务共用")
 
     def _run_one(self, tpl: dict) -> dict:
         spec = self.spec
@@ -462,45 +544,68 @@ class BatchRunner:
             rec["status"] = "skipped"
             return rec
 
-        task = {
-            "id": tid,
-            "mode": spec.mode,
-            "prompt": spec.prompt,
-            "imageUrls": [self._image_url],
-            "videoUrls": [tpl["url"]],
-            "resolution": spec.resolution,
-            "audio": False,
-            "promptExtend": False,
-            "watermark": False,
-        }
-        if spec.duration is not None:
-            task["duration"] = spec.duration
-        if spec.aspect_ratio:
-            task["aspectRatio"] = spec.aspect_ratio
+        # 重启接回：这条在重启前已经提交过（有 task_id），云端任务可能还在跑/已出片。
+        # 绝不能重新提交——那就是同一条模板二次计费。直接接着等那条 taskId。
+        prior = (spec.resume or {}).get(str(tid)) or {}
+        reattach = ""
+        if str(prior.get("status") or "") == "running" and prior.get("task_id"):
+            reattach = str(prior["task_id"])
+            rec.update({
+                "task_id": reattach,
+                "request_id": prior.get("request_id") or "",
+                "submitted_at": prior.get("submitted_at") or "",
+                "task_expires_at": prior.get("task_expires_at") or 0,
+                "resumed": True,
+            })
+            self.log(f"[{tid}] 接回重启前的云端任务 taskId={reattach}（不重新提交）")
 
-        body, errors, warnings = self._client.build_body(
-            task, video_durations=[template_seconds], default_mode=spec.mode,
-        )
-        for msg in warnings:
-            self.log(f"[{tid}] 提示：{msg}")
-        if errors:
-            rec["status"] = "invalid"
-            rec["error"] = "; ".join(errors)
-            return rec
+        body, errors, warnings = {}, [], []
+        if not reattach:
+            task = {
+                "id": tid,
+                "mode": spec.mode,
+                "prompt": spec.prompt,
+                # 多图原样按槽位顺序下发；getattr 兜住测试里手工注入 _image_url 的 runner。
+                "imageUrls": list(getattr(self, "_image_urls", None)
+                                  or ([self._image_url] if self._image_url else [])),
+                "videoUrls": [tpl["url"]],
+                "resolution": spec.resolution,
+                "audio": False,
+                "promptExtend": False,
+                "watermark": False,
+            }
+            if spec.duration is not None:
+                task["duration"] = spec.duration
+            if spec.aspect_ratio:
+                task["aspectRatio"] = spec.aspect_ratio
+
+            body, errors, warnings = self._client.build_body(
+                task, video_durations=[template_seconds], default_mode=spec.mode,
+            )
+            for msg in warnings:
+                self.log(f"[{tid}] 提示：{msg}")
+            if errors:
+                rec["status"] = "invalid"
+                rec["error"] = "; ".join(errors)
+                return rec
 
         started = time.time()
         # 全局在飞额度：submit → wait 全程占位，保证跨 job 的「同时运行任务数」有上限。
         # 只有线程池在开会话的话，100 个线程就会同时压 100 条云端任务。
         gate = spec.inflight_semaphore or spec.submit_semaphore
         try:
-            # 桌面链路里 image/video 通常已是 URL；这里兜底处理本地路径
-            body = resolve_body(body, self._uploader, cache=self._media_cache)
-            wire = self._client.wire_body(body)
+            if reattach:
+                # 接回路径不需要组包/再传图：云端那条任务已经收下并计费了。
+                wire = None
+            else:
+                # 桌面链路里 image/video 通常已是 URL；这里兜底处理本地路径
+                body = resolve_body(body, self._uploader, cache=self._media_cache)
+                wire = self._client.wire_body(body)
             if gate is not None:
                 with gate:
-                    final = self._submit_and_wait(wire, rec)
+                    final = self._submit_and_wait(wire, rec, reattach=reattach)
             else:
-                final = self._submit_and_wait(wire, rec)
+                final = self._submit_and_wait(wire, rec, reattach=reattach)
             if final is None:      # 提交前已被停止
                 return rec
             if final.status == STATUS_UNKNOWN:
@@ -578,8 +683,11 @@ class BatchRunner:
         self._save_state()
         return rec
 
-    def _submit_and_wait(self, wire: dict, rec: dict):
+    def _submit_and_wait(self, wire: dict, rec: dict, reattach: str = ""):
         """提交并等待单条任务；调用方负责在飞额度（进入前已占位）。
+
+        reattach 非空 = 服务重启后接回云端已有的 taskId：**不提交**，只接着等结果，
+        避免同一条模板被二次提交、二次计费。
 
         返回终态 TaskResult；提交前就被停止则返回 None（rec 已标 skipped）。
         """
@@ -588,6 +696,18 @@ class BatchRunner:
         if self.stop_event.is_set():
             rec["status"] = "skipped"
             return None
+        if reattach:
+            rec["status"] = "running"
+            rec["resumed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            with self.state.lock:
+                self.state.records[tid] = dict(rec)
+            self._save_state()
+            self._emit("update", record=dict(rec))
+            return self._client.wait_task(
+                reattach, timeout=spec.poll_timeout, interval=spec.poll_interval,
+                on_status=lambda status: self.log(f"[{tid}] {status}"),
+                should_stop=self.stop_event.is_set,
+            )
         try:
             resp = self._client.submit(wire)
         except WanError as exc:

@@ -373,6 +373,33 @@ def resolve_image(path: str | Path, uploader: SourceUploader | None) -> str:
     return to_data_uri(src)
 
 
+# 未启用 COS 时，图片以 Base64 随每次提交发送（每条模板都带一遍）。
+# 10 张 20MB 的图会把单次请求体膨胀到约 267MB，必须在建任务前拦住。
+MAX_BASE64_TOTAL_MB = 40.0
+
+
+def images_total_mb(paths) -> float:
+    total = 0.0
+    for item in paths:
+        try:
+            total += Path(item).stat().st_size / (1024 * 1024)
+        except OSError:
+            continue        # 缺图由 _ensure_image 单独报「第 N 张图片已丢失」
+    return total
+
+
+def base64_budget_error(paths, *, cos_enabled: bool) -> str | None:
+    """COS 关闭时给多图总量设闸；返回 None 表示放行。"""
+    if cos_enabled:
+        return None
+    total = images_total_mb(paths)
+    if total <= MAX_BASE64_TOTAL_MB:
+        return None
+    return ("未启用 COS 时图片以 Base64 随每次提交发送，图片总体积需 "
+            f"≤ {MAX_BASE64_TOTAL_MB:g}MB（当前 {total:.1f}MB）；"
+            "请减少细节图或联系管理员启用 COS。")
+
+
 def resolve_video(path: str | Path, uploader: SourceUploader | None) -> str:
     src = Path(path)
     if not src.exists():

@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, detailTimer: null, picked: new Set(), showAll: false, submitting: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
+  const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, detailTimer: null, picked: new Set(), showAll: false, submitting: false, rerunDupWarnOnce: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
   const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', unknown: '结果未知', timeout: '等待超时', success: '成功' };
   const esc = (s) => String(s ?? '');
   // 6 栏位款号标签：读取容器内 [data-tag-slot]，返回 {top:...} 形式（空值丢弃）。
@@ -96,6 +96,11 @@
 
   async function bootstrap() {
     const data = await api('/api/bootstrap'); state.user = data.user; state.service = data.service; state.prompts = data.prompts || []; showApp();
+    // 图片槽位上限以后端为准（官方 reference_image 上限 10），前端不硬编码。
+    if (window.ImageSlots) {
+      window.ImageSlots.configure({ max: Number(data.service.max_images) || 10 });
+      if (typeof renderImageSlots === 'function') renderImageSlots();
+    }
     const ready = Number(data.service.source_ready_templates || 0);
     $('service-status').textContent = data.service.templates_error ? '视频场景暂不可用'
       : `${data.service.templates_count} 个${data.service.tag_filter_enabled ? '已标注视频场景' : '视频场景'}已就绪${data.service.templates_count ? `（${ready} 个可生成）` : ''}`;
@@ -305,10 +310,16 @@
   function updateTemplatePreview() {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
     const video = $('template-preview');
+    const wrap = $('image-preview-wrap');
     const first = [...state.picked][0] || '';
-    if (!selected || !first) { video.pause(); video.removeAttribute('src'); video.classList.add('hidden'); return; }
+    if (!selected || !first) {
+      video.pause(); video.removeAttribute('src'); video.classList.add('hidden');
+      if (wrap) wrap.classList.add('hidden');
+      return;
+    }
     video.src = `/api/templates/${encodeURIComponent(first)}/preview`;
     video.classList.remove('hidden');
+    if (wrap) wrap.classList.remove('hidden');
     video.title = first ? '预览第一个选中场景' : '';
     // 选中场景即自动播放 + 循环：muted 是浏览器允许自动播放的前提（模板视频本身无音轨）。
     video.loop = true;
@@ -336,20 +347,30 @@
     syncCountButtons();
   }
 
+  // 多图槽位：定妆图 = 槽位 1，细节图 = 槽位 2–10，删除后自动左移（图N 不错位）。
   const fileInput = $('image-file');
-  fileInput.addEventListener('change', () => previewFile(fileInput.files[0]));
-  const dropZone = $('drop-zone');
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
-  dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag'); if (e.dataTransfer.files[0]) { fileInput.files = e.dataTransfer.files; previewFile(e.dataTransfer.files[0]); } });
-  function previewFile(file) {
-    state.upload = null; $('image-info').textContent = '';
-    if (!file) return;
-    const ok = /\.(jpe?g|png|webp|bmp)$/i.test(file.name);
-    if (!ok || file.size > 20 * 1024 * 1024) { $('image-info').textContent = '请选择 JPG、PNG 或 WebP 图片，大小不超过 20MB。iPhone HEIC 请先另存为 JPG。'; fileInput.value = ''; return; }
-    const url = URL.createObjectURL(file); $('image-preview').src = url; $('image-preview').classList.remove('hidden'); $('drop-copy').classList.add('hidden');
-    $('image-info').textContent = `${file.name} · ${(file.size / 1048576).toFixed(1)} MB`;
-  }
+  const imageSlots = window.ImageSlots;
+  state.images = imageSlots.createSlotState();
+  const maxImages = Number((state.service || {}).max_images);
+  if (Number.isFinite(maxImages) && maxImages > 0) imageSlots.configure({ max: maxImages });
+  const renderImageSlots = () => {
+    // 事件委托由 bindSlotEvents 持有；这里只重建 DOM + 更新说明文字。
+    // inputId 让空槽渲染成 <label for="image-file">，点击即可原生打开文件选择器。
+    imageSlots.renderSlots($('image-slots'), state.images, { inputId: 'image-file' });
+    $('image-info').classList.remove('is-warn');
+    $('image-info').textContent = state.images.length
+      ? `已选 ${state.images.length} / ${imageSlots.maxSlots} 张 · 槽位 1 是定妆图，其余依次为图2…图${state.images.length}`
+      : '槽位 1 必填：定妆图；细节图可选，最多 9 张。';
+  };
+  imageSlots.bindSlotEvents($('image-slots'), fileInput, state.images, {
+    onChange: renderImageSlots,
+    // 被拒的图必须显眼：灰字太小，用户会以为「点了没反应」
+    onError: (text) => {
+      $('image-info').textContent = text;
+      $('image-info').classList.add('is-warn');
+      toast(text);
+    },
+  });
   // 局域网 http 不是安全上下文，navigator.clipboard 不可用，统一退回 execCommand。
   async function copyText(text) {
     if (navigator.clipboard && window.isSecureContext) {
@@ -378,7 +399,9 @@
   });
 
   $('submit-btn').addEventListener('click', async () => {
-    const file = fileInput.files[0]; if (!file) return showCreateError('请先上传服装图片。');
+    // 重跑带进来的槽位只有 uploadId（图已在服务器上），没有本地 File，同样算已就绪。
+    if (!state.images.length || !(state.images[0].file || state.images[0].uploadId))
+      return showCreateError('请先在槽位 1 上传定妆图。');
     const selection = document.querySelector('input[name="selection"]:checked').value; const count = selectedCount();
     const pickedIds = [...state.picked];
     const promptBody = $('prompt-body').value.trim();
@@ -389,29 +412,45 @@
     if (promptBody.length > 4000) return showCreateError('提示词最多 4000 个字符。');
     // 同款号防重（软拦截）：上衣款号已用过的模板再提交，弹确认让使用者自己定夺。
     const topNow = collectTagSlots('style-tags').top || '';
-    if (topNow && state.styleUsedTop === topNow) {
+    // 「重跑」本来就是明确要再做同一个场景，不再弹「款号已用过」的软提醒。
+    if (topNow && state.styleUsedTop === topNow && !state.rerunDupWarnOnce) {
       const chosen = selection === 'selected' ? pickedIds : state.filteredTemplates.map(t => String(t.id));
       const reused = usedCount(chosen);
       if (reused && !confirm(`款号 ${topNow} 有 ${reused} 个候选视频模板在之前的批次里用过。\n\n确定要重复使用吗？（历史记录只为防重提醒，不影响归档）`)) return;
     }
     if (!confirm(`将提交 ${count} 条生成任务，标签筛选后有 ${state.filteredTemplates.length} 个候选视频。已提交的任务不能撤回。是否继续？`)) return;
+    const tags = collectTagSlots('style-tags');
+    if (!tags.top) return showCreateError('请填写「上衣」款号（云端归档路径按它命名）。');
     const btn = $('submit-btn'); state.submitting = true; btn.disabled = true; btn.textContent = '正在上传…'; showCreateError('');
     try {
-      const dataUrl = await readFile(file);
-      const uploaded = await api('/api/uploads', { method: 'POST', body: JSON.stringify({ filename: file.name, data: dataUrl }) });
+      // 只上传还没拿到 upload_id 的格子：上一轮失败重试时不会重复传已成功的图。
+      const upload = await imageSlots.uploadImages(state.images, {
+        concurrency: 3,
+        onProgress: (info) => {
+          btn.textContent = `正在上传 ${info.done}/${info.total} 张…`;
+          renderImageSlots();
+        },
+      });
+      renderImageSlots();
+      if (!upload.ok) {
+        const first = upload.failures[0];
+        throw new Error(`第 ${first.index} 张图片（${first.name}）上传失败：${first.message}；其余已上传的图会保留，可直接重试。`);
+      }
       btn.textContent = '正在提交…';
-      const body = { upload_id: uploaded.upload_id, selection, count, template_id: pickedIds.join(','),
+      const ids = upload.uploadIds;
+      const body = { upload_ids: ids, upload_id: ids[0], selection, count, template_id: pickedIds.join(','),
         tag_filters: state.tagFilters, prompt_id: $('prompt-select').value, prompt: promptBody,
         resolution: $('resolution').value, duration: Number($('duration').value), confirmed: true,
-        tags: collectTagSlots('style-tags') };
-      if (!body.tags) { state.submitting = false; btn.disabled = false; btn.textContent = '确认提交'; return showCreateError('请填写「上衣」款号（云端归档路径按它命名）。'); }
+        tags };
       const result = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
-      toast('任务已提交，正在排队。'); fileInput.value = ''; state.upload = null; $('image-preview').classList.add('hidden'); $('drop-copy').classList.remove('hidden'); $('image-info').textContent = '';
+      toast('任务已提交，正在排队。');
+      imageSlots.resetSlots(state.images);
+      fileInput.value = '';
+      renderImageSlots();
       switchView('history-view'); await refreshJobs(result.job.id);
     } catch (err) { showCreateError(err.message); }
-    finally { state.submitting = false; btn.textContent = '确认提交'; updateSummary(); }
+    finally { state.submitting = false; state.rerunDupWarnOnce = false; btn.textContent = '确认提交'; updateSummary(); }
   });
-  function readFile(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('无法读取图片')); reader.readAsDataURL(file); }); }
   function showCreateError(text) { const el = $('create-error'); el.textContent = text; el.classList.toggle('hidden', !text); }
 
   $('refresh-btn').addEventListener('click', () => refreshJobs());
@@ -487,6 +526,30 @@
     close.addEventListener('click', () => { root.classList.add('hidden'); state.selectedJob = null; state.detailStatus = null; });
     side.append(badge, close); head.append(left, side); root.append(head);
     const meta = document.createElement('p'); meta.className = 'job-meta'; meta.textContent = `${job.done || 0} / ${job.total || 0} 条完成 · ${job.resolution} · ${job.duration === -1 ? '跟随场景时长' : `${job.duration} 秒`}${job.lane === 'small' ? ' · 快速通道' : ''}`; root.append(meta);
+    // 1 定妆 + 9 细节：只展示可访问的缩略 URL（后端 public() 不下发服务器路径）。
+    const urls = Array.isArray(job.image_urls) ? job.image_urls : [];
+    if (urls.length) {
+      const strip = document.createElement('div');
+      strip.className = 'detail-slots';
+      urls.forEach((url, index) => {
+        const link = document.createElement('a');
+        link.className = 'detail-slot';
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.title = (job.image_names && job.image_names[index]) || `图${index + 1}`;
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = `图${index + 1}`;
+        img.loading = 'lazy';
+        const badge = document.createElement('span');
+        badge.className = `slot-badge${index === 0 ? ' is-primary' : ''}`;
+        badge.textContent = index === 0 ? '定妆' : `图${index + 1}`;
+        link.append(img, badge);
+        strip.append(link);
+      });
+      root.append(strip);
+    }
     if (job.status === 'succeeded' || job.status === 'partial') { const dl = document.createElement('a'); dl.className = 'link-btn'; dl.href = job.download_all; dl.textContent = '下载已完成视频和报告（ZIP）'; root.append(dl); const first = (job.records || []).find(r => r.status === 'success' && r.download_url); if (first) { const player = document.createElement('video'); player.controls = true; player.preload = 'metadata'; player.className = 'preview-video'; player.src = first.download_url; root.append(player); } }
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled','unknown','timeout','skipped'].includes(r.status)).length;
     if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.addEventListener('click', async () => { if (!confirm(`只重试失败的 ${failedCount} 条？`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); toast('失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
@@ -588,6 +651,93 @@
   document.querySelectorAll('#create-tabs button').forEach(btn => {
     btn.addEventListener('click', () => setCreatePane(btn.dataset.pane));
   });
+
+  /* ------------------------------------------------ 历史「重跑」配置回填
+     由 batch.js 的历史行按钮调用：把那一条当时的图片 / 提示词 / 模板视频 /
+     款号标签 / 画质时长原样带回本页，然后停下来等使用者修改，绝不自动提交。
+     图片只填 upload_id（文件已在服务器上传目录里），提交仍走原有 /api/jobs，
+     不会重新上传，也不会凭空多生成一条。 */
+  function applyRerun(raw) {
+    const c = raw || {};
+    const tid = String(c.template_id || '');
+    // 后端 selected 模式会校验「场景必须在当前标签筛选结果里」，所以先清筛选。
+    document.querySelectorAll('.tag-filter-input').forEach(input => { input.checked = false; });
+    state.picked.clear();
+    const radio = document.querySelector('input[name="selection"][value="selected"]');
+    if (radio) { radio.checked = true; radio.dispatchEvent(new Event('change')); }
+    $('count-select').value = '1';
+    refreshFilteredTemplates();
+    const known = state.filteredTemplates.some(t => String(t.id) === tid);
+    if (tid && known) state.picked.add(tid);
+    renderPickGrid();
+
+    // 只预填「前缀连续可用」的图：中间缺一张就把后面的全丢掉，
+    // 否则图3 会被悄悄顶成图2，模型收到的 imageUrls 顺序就变了。
+    const allImages = Array.isArray(c.images) ? c.images : [];
+    const usable = [];
+    for (const slot of allImages) {
+      if (!slot || !slot.available || !slot.upload_id) break;
+      usable.push(slot);
+    }
+    const dropped = allImages.length - usable.length;
+    imageSlots.resetSlots(state.images);
+    for (const slot of usable) {
+      state.images.push({
+        file: null, name: slot.name || '定妆图', sizeMb: 0,
+        uploadId: slot.upload_id, status: 'done', progress: 100, error: '',
+        previewUrl: '', url: slot.url || `/api/uploads/${slot.upload_id}`,
+      });
+    }
+    renderImageSlots();
+
+    const promptSelect = $('prompt-select');
+    const promptId = String(c.prompt_id || '');
+    if ([...promptSelect.options].some(option => option.value === promptId)) promptSelect.value = promptId;
+    $('prompt-body').value = String(c.prompt || promptSelect.selectedOptions[0]?.dataset.body || '');
+    updatePromptCount();
+
+    const tags = Object.assign({}, c.tags || {});
+    if (!tags.top && c.style_no) tags.top = c.style_no;   // 老任务只有 style_no
+    fillTagSlots('style-tags', tags);
+    const setSelect = (id, value) => {
+      if (value === undefined || value === null || value === '') return;
+      const node = $(id), wanted = String(value);
+      if (![...node.options].some(option => option.value === wanted)) {
+        // 大批量固定 7 秒，而小批量默认只给「5 秒 / 跟随场景」：临时补一个
+        // 「原任务」选项，别把 7 秒静默改成 5 秒（那等于换了一条视频）。
+        if (id !== 'duration' || !/^\d+$/.test(wanted)) return;
+        const option = document.createElement('option');
+        option.value = wanted;
+        option.textContent = `${wanted} 秒（原任务）`;
+        node.append(option);
+      }
+      node.value = wanted;
+    };
+    setSelect('resolution', c.resolution);
+    setSelect('duration', c.duration);
+
+    updateTemplatePreview();
+    updateSummary();
+    scheduleStyleUsed();
+    state.rerunDupWarnOnce = true;   // 重跑就是明确要重复该场景，免掉一次软提醒
+
+    switchView('create-view');
+    setCreatePane('make');
+    showCreateError('');
+
+    const notes = [];
+    if (!tid || !known) notes.push('原场景已不在候选里，请重新点选一个');
+    if (!usable.length) notes.push('原图片已失效，请在槽位 1 重新上传定妆图');
+    else if (dropped) notes.push(`另有 ${dropped} 张细节图已失效，需要时请补上`);
+    $('image-info').textContent = [
+      `重跑预填：${usable.length} 张原图 · 场景 ${tid || '未指定'} · 上次的提示词与参数已带入。`,
+      '可以替换图片、改提示词或改场景，确认后点「确认提交」。',
+      ...notes,
+    ].join(' ');
+    toast(notes.length ? `已带入上次配置，但${notes.join('；')}`
+      : '已带入上次的图片、提示词和场景，修改后点「确认提交」即可重跑。');
+    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (_) { /* 老浏览器忽略 */ }
+  }
 
   function renderUsage(data) {
     const root = $('usage-table'); root.replaceChildren();
@@ -778,10 +928,12 @@
 
   // 供 batch.js 复用：同一套 api 封装、共享 state、同一个详情面板。
   window.OutfitApp = { api, toast, state, switchView, openJob, refreshFlatJobs, statusText,
-    smallHistory: (id) => smallHistories[id], setCreatePane,
+    smallHistory: (id) => smallHistories[id], setCreatePane, applyRerun,
     collectTagSlots, fillTagSlots, tagSummaryText, TAG_LABELS,
     // 标签页改完标签/弃用后要刷新小批量页的模板下拉，否则仍能选到已弃用的场景
-    reloadTemplates: loadTemplates };
+    reloadTemplates: loadTemplates,
+    // 大批量页复用同一套 10 槽位组件与并发上传
+    imageSlots: window.ImageSlots };
   // Esc：先关任务详情，再关账户明细，符合"从最上层开始退"的直觉。
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
