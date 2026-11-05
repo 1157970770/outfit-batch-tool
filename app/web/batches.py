@@ -515,6 +515,14 @@ class BatchManager:
         limit = _as_int(data.get("limit"), 500) or 500
         if not 1 <= limit <= 1000:
             raise BatchError("limit 需要 1–1000。")
+        # 评分筛选：rating_min=3 表示只要打了 3 星及以上的；0 / 缺省 = 不过滤
+        rating_min = _as_int(data.get("rating_min"), 0) or 0
+        if not 0 <= rating_min <= 5:
+            raise BatchError("rating_min 需要 0–5。")
+        # 排序：rating = 评分从高到低（同分按编号升序稳定排列）；缺省保持标签库原顺序
+        sort = str(data.get("sort") or "").strip().lower()
+        if sort not in ("", "rating"):
+            raise BatchError("sort 仅支持空（默认）或 rating（评分高到低）。")
         with self.mutex:
             batch = self._authorized(batch_id, user)
             resolution = str(batch.get("resolution") or "720P")
@@ -524,6 +532,12 @@ class BatchManager:
             matched = catalog.filter_items(tag_filters)
         except TemplateError as exc:
             raise BatchError(str(exc)) from None
+        if rating_min > 0:
+            matched = [item for item in matched
+                       if int(item.get("rating") or 0) >= rating_min]
+        if sort == "rating":
+            matched = sorted(matched,
+                             key=lambda item: (-int(item.get("rating") or 0), str(item.get("id"))))
         rows = []
         for item in matched[:limit]:
             rows.append({
@@ -531,6 +545,7 @@ class BatchManager:
                 "name": str(item.get("name") or ""),
                 "tags": list(item.get("tags") or []),
                 "ready": bool(item.get("url") or item.get("key")),
+                "rating": int(item.get("rating") or 0),
             })
         ready_count = sum(1 for item in matched if item.get("url") or item.get("key"))
         return {

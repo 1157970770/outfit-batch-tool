@@ -7,10 +7,10 @@
   <title>换装视频工作台</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/tag-filter.css">
-  <link rel="stylesheet" href="/static/batch.css?v=20261104c">
+  <link rel="stylesheet" href="/static/batch.css?v=20261105a">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <script defer src="/static/app.js?v=20261104e"></script>
-  <script defer src="/static/batch.js?v=20261104d"></script>
+  <script defer src="/static/batch.js?v=20261105a"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
 <body>
@@ -217,6 +217,8 @@
               </div>
               <div class="batch-toolbar-actions">
                 <button id="batch-tag-toggle" class="quiet" type="button" aria-expanded="false" aria-controls="batch-tag-card">标签筛选</button>
+                <label class="field batch-filter-field">评分<select id="batch-rating-filter"><option value="0" selected>全部</option><option value="3">3★ 及以上</option><option value="4">4★ 及以上</option><option value="5">仅 5★</option></select></label>
+                <label class="field batch-filter-field">排序<select id="batch-rating-sort"><option value="" selected>默认顺序</option><option value="rating">评分高→低</option></select></label>
                 <button id="batch-select-page" class="quiet" type="button">全选本页</button>
                 <button id="batch-invert" class="quiet" type="button">反选本页</button>
                 <button id="batch-select-all" class="quiet" type="button">全选全部 0 条</button>

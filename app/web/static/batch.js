@@ -38,6 +38,8 @@
     batches: [], listLoaded: false,
     current: null, items: [],
     candidates: [], selected: new Set(), candTotal: 0, candReady: 0,
+    // 评分筛选 / 排序：candRatingMin=0 不过滤；candSort='' 默认顺序、'rating' 评分高→低
+    candRatingMin: 0, candSort: '',
     candTagFilter: new Set(), onlySelected: false, candPage: 1, candPageItems: [], candPageBackup: 0,
     // 每页条数由 candCapacity() 实测写入（列数 × 行数，保底 CAND_PAGE_MIN），页面尺寸变了就重算
     candPageSize: CAND_PAGE_MIN, candObserver: null,
@@ -517,7 +519,12 @@
     try {
       const data = await api(`/api/batches/${encodeURIComponent(batch.id)}/candidates`, {
         method: 'POST',
-        body: JSON.stringify({ tag_filters: b.tagFilters, limit: CAND_FETCH_LIMIT }),
+        body: JSON.stringify({
+          tag_filters: b.tagFilters,
+          limit: CAND_FETCH_LIMIT,
+          rating_min: b.candRatingMin,
+          sort: b.candSort,
+        }),
       });
       const items = Array.isArray(data.items) ? data.items : [];
       b.candidates = items.map((item) => ({
@@ -525,6 +532,7 @@
         name: txt(item.name) || `场景 ${txt(item.id)}`,
         tags: Array.isArray(item.tags) ? item.tags.map(txt) : [],
         ready: item.ready !== false,
+        rating: Math.min(5, Math.max(0, num(item.rating, 0))),
       }));
       // filtered_total 是「筛选命中总数」（可能大于本次返回条数），total 只是这一批的条数。
       b.candTotal = num(data.filtered_total, num(data.total, b.candidates.length));
@@ -742,6 +750,8 @@
     const name = el('span', 'batch-cand-name', item.name);
     name.title = item.name;
     line.append(name);
+    // 评分徽标：标签库打的分（1-5 星），没打分不显示，不占格子
+    if (item.rating > 0) line.append(el('span', 'batch-cand-badge batch-cand-badge-rating', `★${item.rating}`));
     if (!item.ready) line.append(el('span', 'batch-cand-badge', '未上传'));
     const usedInfo = b.styleUsed[item.id];
     if (usedInfo) {
@@ -1904,6 +1914,15 @@
       else { b.candPage = b.candPageBackup || 1; b.candPageBackup = 0; }
       b.onlySelected = on;
       renderCandidates();
+    });
+    // 评分筛选 / 排序：走服务端重拉（和标签筛选一个待遇），换条件后回到第 1 页由 fetchCandidates 复位
+    $('batch-rating-filter').addEventListener('change', (event) => {
+      b.candRatingMin = Math.min(5, Math.max(0, num(event.target.value, 0)));
+      fetchCandidates().catch(() => {});
+    });
+    $('batch-rating-sort').addEventListener('change', (event) => {
+      b.candSort = event.target.value === 'rating' ? 'rating' : '';
+      fetchCandidates().catch(() => {});
     });
     $('batch-page-prev').addEventListener('click', () => goCandPage(b.candPage - 1));
     $('batch-page-next').addEventListener('click', () => goCandPage(b.candPage + 1));
