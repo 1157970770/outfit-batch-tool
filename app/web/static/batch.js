@@ -88,8 +88,9 @@
   // 剩余不足最小单位时下限降到 1（否则零头永远提交不出去）。
   function produceRange(batch) {
     const limits = serviceLimits();
-    const total = num(batch && batch.total_items, b.items.length);
-    const pending = Math.max(0, num(batch && batch.pending, total - num(batch && batch.done) - num(batch && batch.failed)));
+    if (!batch) return { pending: 0, cap: 0, min: limits.produceMin };
+    const total = num(batch.total_items, b.items.length);
+    const pending = Math.max(0, num(batch.pending, total - num(batch.done) - num(batch.failed)));
     const cap = Math.min(limits.maxRunItems, pending);
     const min = cap < limits.produceMin ? Math.min(1, cap) : limits.produceMin;
     return { pending, cap, min };
