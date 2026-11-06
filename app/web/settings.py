@@ -49,6 +49,9 @@ class WebSettings:
     manifest_overlay_path: Path | None = None
     manifest_warning: str = ""
     manifest_pulled_at: float = 0.0
+    # 开发实例标记（web.json 里 dev_mode: true，只有设计区/开发副本会开）：
+    # 页面据此显示「开发版」徽标，生产不显示。
+    dev_mode: bool = False
 
     @property
     def users(self) -> dict:
@@ -306,4 +309,5 @@ def load_settings(*, base_dir: str | Path | None = None,
                        manifest_overlay=overlay_items,
                        manifest_overlay_path=overlay_path,
                        manifest_warning=(f"云端模板索引不可用（{manifest_error}）" if manifest_error else ""),
-                       manifest_pulled_at=0.0)
+                       manifest_pulled_at=0.0,
+                       dev_mode=appconfig.truthy(web.get("dev_mode")))

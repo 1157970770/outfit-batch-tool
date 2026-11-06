@@ -97,6 +97,13 @@
   });
   $('logout-btn').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } catch (_) {} showLogin(); });
 
+  // 开发版标记：登录页靠 /healthz、登录后靠 /api/bootstrap，两处都调用这里
+  function markDev(isDev) {
+    const on = Boolean(isDev);
+    document.querySelectorAll('.dev-badge').forEach(el => el.classList.toggle('hidden', !on));
+    document.title = on ? '换装视频工作台（开发版）' : '换装视频工作台';
+  }
+
   async function bootstrap() {
     const data = await api('/api/bootstrap'); state.user = data.user; state.service = data.service; state.prompts = data.prompts || []; showApp();
     // 图片槽位上限以后端为准（官方 reference_image 上限 10），前端不硬编码。
@@ -108,6 +115,8 @@
     $('service-status').textContent = data.service.templates_error ? '视频场景暂不可用'
       : `${data.service.templates_count} 个${data.service.tag_filter_enabled ? '已标注视频场景' : '视频场景'}已就绪${data.service.templates_count ? `（${ready} 个可生成）` : ''}`;
     $('server-summary').textContent = `${data.service.provider || 'Wan3'} · 本机服务`;
+    // 开发版标记由后端下发（web.json → dev_mode），生产环境永远不亮
+    markDev(data.service.dev_mode);
     if (data.service.notice) { $('notice').textContent = data.service.notice; $('notice').classList.remove('hidden'); }
     if (data.service.templates_error) { $('notice').textContent = '视频场景暂时无法加载，请联系管理员。'; $('notice').classList.remove('hidden'); }
     else if (data.service.templates_count && !ready) { $('notice').textContent = `${data.service.templates_count} 个场景已标注标签，但都还没上传到云端模板库：现在可以按标签筛选和预览，生成功能要等上传完成。`; $('notice').classList.remove('hidden'); }
@@ -958,6 +967,6 @@
     const account = $('account-detail');
     if (account && !account.classList.contains('hidden')) $('account-close').click();
   });
-  async function init() { try { const data = await api('/api/me'); state.user = data.user; await bootstrap(); } catch (_) { showLogin(); } }
+  async function init() { fetch('/healthz', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(d => { if (d && d.dev) markDev(true); }).catch(() => {}); try { const data = await api('/api/me'); state.user = data.user; await bootstrap(); } catch (_) { showLogin(); } }
   init();
 })();

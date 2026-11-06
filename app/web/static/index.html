@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261105l">
+  <link rel="stylesheet" href="/static/style.css?v=20261106a">
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css?v=20261105l">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
-  <script defer src="/static/app.js?v=20261105l"></script>
+  <script defer src="/static/app.js?v=20261106a"></script>
   <script defer src="/static/batch.js?v=20261105l"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
@@ -24,7 +24,7 @@
 
   <main id="login-view" class="login-wrap hidden">
     <section class="login-card">
-      <div class="login-brand"><span class="brand-mark" aria-hidden="true">换</span><div><strong>换装视频生产</strong><small>局域网工作台</small></div></div>
+      <div class="login-brand"><span class="brand-mark" aria-hidden="true">换</span><div><strong>换装视频生产<span class="dev-badge hidden" title="开发实例：数据在 web-data-dev，提交会真实计费">开发版</span></strong><small>局域网工作台</small></div></div>
       <form id="login-form">
         <label>账号<input id="login-name" autocomplete="username" required maxlength="32" placeholder="请输入账号"></label>
         <label>密码<input id="login-password" type="password" autocomplete="current-password" required placeholder="请输入密码"></label>
@@ -37,7 +37,7 @@
 
   <div id="app-view" class="hidden">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark small" aria-hidden="true">换</span><div class="brand-text"><strong>换装视频工作台</strong><small id="server-summary">本机服务</small></div></div>
+      <div class="brand"><span class="brand-mark small" aria-hidden="true">换</span><div class="brand-text"><strong>换装视频工作台<span class="dev-badge hidden" title="开发实例：数据在 web-data-dev，提交会真实计费">开发版</span></strong><small id="server-summary">本机服务</small></div></div>
       <div class="top-actions">
         <span class="chip"><span class="dot" aria-hidden="true"></span><span id="service-status">正在检查服务</span></span>
         <span id="welcome-user" class="user-name"></span>

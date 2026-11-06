@@ -445,7 +445,8 @@ def make_handler(app: WebApplication):
             parsed = urllib.parse.urlsplit(self.path)
             path = urllib.parse.unquote(parsed.path)
             if path == "/healthz":
-                return self._json({"ok": True, "version": WEB_VERSION})
+                return self._json({"ok": True, "version": WEB_VERSION,
+                                   "dev": bool(app.settings.dev_mode)})
             if path == "/":
                 return self._static("index.html")
             if path.startswith("/static/"):
@@ -460,6 +461,7 @@ def make_handler(app: WebApplication):
                 cfg = app.settings.config
                 return self._json({"ok": True, "user": user,
                                    "service": {"provider": cfg.get("WAN_PROVIDER"), "model": cfg.get("WAN_MODEL"),
+                                               "dev_mode": bool(app.settings.dev_mode),
                                                "cos_enabled": appconfig.truthy(cfg.get("COS_ENABLED")),
                                                "templates_count": len(app.catalog.items),
                                                "templates_error": app.settings.templates_error,
