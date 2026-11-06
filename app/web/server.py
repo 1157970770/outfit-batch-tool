@@ -33,6 +33,7 @@ from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
 from app.web.batches import PRODUCE_CHOICES, PRODUCE_MIN, BatchError, BatchManager
 from app.web.jobs import MAX_IMAGE_SLOTS, JobManager, _redact, image_slots
+from app.web.paths import relocate
 from app.web.settings import WebSettings, load_settings
 from app.web.templates import TemplateCatalog, TemplateError
 from app.web import WEB_VERSION
@@ -165,8 +166,13 @@ class WebApplication:
             return None
         if not isinstance(meta, dict) or meta.get("owner") != owner:
             return None
-        if not Path(str(meta.get("path") or "")).is_file():
+        # 历史 meta 存的是上传那一刻的绝对路径；换代码文件夹后按当前数据根重锚。
+        # 回写修正后的 path，让下游拿 meta["path"] 的地方（建任务 / 建批次）自动用新路径。
+        path = relocate(meta.get("path"), self.settings.data_dir)
+        if not path.is_file():
             return None
+        meta = dict(meta)
+        meta["path"] = str(path)
         return meta
 
     def user_for_token(self, token: str) -> dict | None:
@@ -1035,7 +1041,7 @@ def make_handler(app: WebApplication):
                 return self._error("找不到这张图片。", 404)
             if user.get("role") != "admin" and meta.get("owner") != user.get("username"):
                 return self._error("无权查看这张图片。", 403)
-            path = Path(str(meta.get("path") or ""))
+            path = relocate(meta.get("path"), app.settings.data_dir)
             if not path.is_file():
                 return self._error("图片已失效，请重新上传。", 404)
             mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -1518,7 +1524,7 @@ def make_handler(app: WebApplication):
             hit = next((tpl for tpl in job.get("templates") or []
                         if isinstance(tpl, dict) and str(tpl.get("id")) == template_id), {})
             images = []
-            for slot in image_slots(job)[:MAX_IMAGE_SLOTS]:
+            for slot in image_slots(job, app.settings.data_dir)[:MAX_IMAGE_SLOTS]:
                 upload_id = str(slot.get("upload_id") or "")
                 # 图片归属看的是**原任务**的 owner，不是当前登录名。管理员点别人
                 # 账户的历史行重跑时，按 admin 去查会全部判失效（误报「图片已失效」

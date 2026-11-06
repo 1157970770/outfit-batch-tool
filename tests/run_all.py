@@ -36,6 +36,7 @@ REQUIRED = [
     "test_style_usage",
     "test_web_auth",
     "test_jobs_state",
+    "test_path_relocate",
     "test_resume",
     "test_billing",
     "test_web_hardening",

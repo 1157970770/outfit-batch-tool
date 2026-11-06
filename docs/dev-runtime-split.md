@@ -15,8 +15,12 @@
 | 打标器 | **从这里启动**（真源=运行区 `web-data`） | 不要从这里启动（会写进 dev 副本） |
 | 前端 | 生效以 git pull 为准 | 静态文件改完即生效（dev 实例） |
 
-两个文件夹的代码**完全同源**：所有路径按代码所在根解析（`app/config.py` 的 `app_dir()`），
-不依赖工作目录，也不依赖绝对路径。
+两个文件夹的代码**完全同源**：运行时的目录按代码所在根解析（`app/config.py` 的
+`app_dir()`），不依赖工作目录；数据根由 `server/web.json` 的 `data_root` 决定。
+**但任务 / 批次 / 上传记录里存的是生成那一刻的绝对路径**（`out_dir`、`images[].path`、
+`uploads/meta/*.json` 的 `path`），换文件夹后旧路径会悬空。读数据时由
+`app/web/paths.py` 的 `relocate()` 按当前 `data_dir` 重锚定，历史 JSON 一个字都不用改；
+详见下节「历史任务路径」。
 
 ## 日常发布（设计区 → 运行区）
 
@@ -47,7 +51,7 @@ python scripts/deploy_runtime.py
 
 | 脚本 | 用途 |
 | --- | --- |
-| `切换服务到本文件夹-需管理员.bat` | 当初一次性迁移：停旧服 → 复制 web-data → 重定向计划任务 → 启动自检 |
+| `切换服务到本文件夹-需管理员.bat` | 当初一次性迁移：停旧服 → 复制 web-data → 重定向计划任务 → 启动自检（**漏了重写历史 JSON 里的绝对路径**，见「历史任务路径」） |
 | `回滚到设计区-需管理员.bat` | 紧急回滚：把计划任务指回设计区并启动；切换后产生的新任务会列出来提示搬回 |
 
 两个脚本都自带安全检查：检测到 running/queued 任务会拒绝执行。
@@ -66,6 +70,27 @@ python scripts/deploy_runtime.py
   运行区稳定运行一周后可整体归档/删除。
 - 运行区 `web-data` 是唯一真数据；它的备份策略照旧（标签真源每日 COS 导出，
   见 [backup-tag-store.md](backup-tag-store.md)）。
+
+## 历史任务路径（2026-11-06 故障与根治）
+
+现象：切换到运行区当天，旧任务在历史页里显示「成功」，但点下载 / 预览 / 对比全部 404；
+同期新提交的任务正常。视频文件其实一直在运行区 `web-data\output`，COS 归档也在。
+
+根因：切换脚本只「复制 web-data」，没有重写历史 JSON 里持久化的旧绝对路径
+（指向 `D:\批量视频任务设计区\web-data\...`）；设计区原 `web-data` 归档改名后路径悬空。
+当时 `JobManager.output_path()`、`_upload_file()`、`image_slots()` 都直接 `Path(旧绝对路径)`。
+
+- **即时止血（不改数据、不重启）**：在设计区建 `web-data\output`、`web-data\uploads`
+  两个目录联接（junction）指向运行区同名目录，让旧路径立即重新可读。该桥是临时的，
+  见 `设计区\web-data\README.md`；代码发布重启后即可删除。
+- **代码根治**：新增 `app/web/paths.py::relocate()`，读 `out_dir` / `images[].path` /
+  上传 meta / 批次条目时按当前 `data_dir` 重锚定；`must_exist=True` 只在目标确实存在时
+  替换，绝不误伤外部文件；`must_exist=False` 用于重启接回时准备新输出目录。
+  覆盖：任务下载 / zip、整批 zip、图片预览、重跑与重试、批次生产。
+- **以后再切换**：要么靠发布后的代码自动重锚（推荐），要么在切换脚本里重写历史 JSON
+  的绝对路径；不要只复制目录就以为数据可用。
+
+回归测试：`tests/test_path_relocate.py`（已加入 `tests/run_all.py`）。
 
 ## 已知边界
 

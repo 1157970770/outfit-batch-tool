@@ -31,6 +31,7 @@ from app.web.jobs import (
     MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _FAILED_RECORD_STATES, _redact,
     clean_style_no, clean_tags, duration_ok, image_slots,
 )
+from app.web.paths import relocate
 from app.web.style_usage import StyleUsageLedger
 from app.web.templates import TemplateError
 
@@ -382,12 +383,14 @@ class BatchManager:
     # ------------------------------------------------------------------ 多图槽位
     def _image_slots(self, batch: dict) -> list[dict]:
         """统一读图：images[] 为真源；老批次回退成单元素列表。顺序 = 槽位 = 模型「图N」。"""
-        return image_slots(batch)
+        return image_slots(batch, self.settings.data_dir)
 
-    @staticmethod
-    def _sync_image_aliases(batch: dict) -> None:
-        """images[0] 回写单值别名，让老代码/老前端/历史对比层继续只认主图。"""
-        slots = image_slots(batch)
+    def _sync_image_aliases(self, batch: dict) -> None:
+        """images[0] 回写单值别名，让老代码/老前端/历史对比层继续只认主图。
+
+        别名同样按当前数据根重锚，避免把失效的旧绝对路径又写回批次 JSON。
+        """
+        slots = image_slots(batch, self.settings.data_dir)
         first = slots[0] if slots else {}
         batch["image_upload_id"] = str(first.get("upload_id") or "")
         batch["image_path"] = str(first.get("path") or "")
@@ -1023,7 +1026,7 @@ class BatchManager:
                 jid = str(job.get("id") or "")
                 out = self.jobs.output_path(jid) if self.jobs else None
                 if not out and job.get("out_dir"):
-                    out = Path(str(job["out_dir"]))
+                    out = relocate(job["out_dir"], self.settings.data_dir)
                 if not out:
                     continue
                 for rec in job.get("records") or []:
@@ -1238,7 +1241,7 @@ class BatchManager:
                 image_url = ""
                 # 优先读多图真源的首张，老 job 由 image_slots() 从 image_path 反解兜底；
                 # 历史对比层本次仍只展示主图一张。
-                job_slots = image_slots(job)
+                job_slots = image_slots(job, self.settings.data_dir)
                 first_id = str(job_slots[0].get("upload_id") or "") if job_slots else ""
                 if not first_id:
                     upload_hit = UPLOAD_IMAGE_RE.search(str(job.get("image_path") or ""))

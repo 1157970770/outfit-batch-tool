@@ -16,6 +16,7 @@ from app.core import TAG_SLOTS, BatchRunner, BatchSpec, unique_batch_dir
 from app.media import base64_budget_error
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, global_inflight, global_small_inflight
+from app.web.paths import relocate
 
 _SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _STYLE_MAX = 40
@@ -24,9 +25,19 @@ MAX_IMAGE_SLOTS = MAX_IMAGES
 UPLOAD_PATH_RE = re.compile(r"uploads[\\/][0-9a-f]{2}[\\/](?P<id>[0-9a-f]{32})\.[A-Za-z0-9]{1,8}$")
 
 
-def image_slots(record: dict) -> list[dict]:
+def image_slots(record: dict, data_dir: Path | None = None) -> list[dict]:
     """统一读图：images[] 是唯一真源（下标=槽位=imageUrls 顺序）；老 job / 老 batch
-    只有单值 image_path/image_name，回退成 1 个元素，upload_id 从路径反解。"""
+    只有单值 image_path/image_name，回退成 1 个元素，upload_id 从路径反解。
+
+    传入 data_dir 时，把记录里持久化的绝对路径按当前数据根重锚定（见 app.web.paths）；
+    不传则完全保持旧行为，让只关心 upload_id / 名称的调用方零改动。
+    """
+    def fix(raw_path) -> str:
+        text = str(raw_path or "")
+        if not text or data_dir is None:
+            return text
+        return str(relocate(text, data_dir))
+
     raw = record.get("images")
     if isinstance(raw, list) and raw:
         slots = []
@@ -35,7 +46,7 @@ def image_slots(record: dict) -> list[dict]:
                 continue
             slots.append({"upload_id": str(item.get("upload_id") or ""),
                           "name": str(item.get("name") or ""),
-                          "path": str(item.get("path") or "")})
+                          "path": fix(item.get("path"))})
         if slots:
             return slots
     path = str(record.get("image_path") or "")
@@ -44,7 +55,7 @@ def image_slots(record: dict) -> list[dict]:
     hit = UPLOAD_PATH_RE.search(path)
     return [{"upload_id": hit.group("id") if hit else "",
              "name": str(record.get("image_name") or ""),
-             "path": path}]
+             "path": fix(path)}]
 
 
 def normalize_images(raw, image_path: Path, image_name: str) -> list[dict]:
@@ -554,7 +565,10 @@ class JobManager:
                             resume_records[str(rec["id"])] = dict(rec)
                     job["message"] = "服务重启后已自动接回，正在继续跟进云端进度。"
                     job.pop("resume", None)
-                old_out = str(job.get("out_dir") or "")
+                # 代码目录搬家后，旧 out_dir 可能指向已失效的绝对路径：按当前数据根
+                # 重锚，避免接回任务时把新视频又写回旧文件夹（must_exist=False 允许
+                # 目标目录尚未生成）。
+                old_out = str(relocate(job.get("out_dir"), self.root, must_exist=False))
                 if resume_mode and old_out and Path(old_out).is_dir():
                     out_dir = Path(old_out)
                 else:
@@ -567,7 +581,7 @@ class JobManager:
             cfg = self.settings.config
             # 线程数只是工作线程，不再与 API 并发/速率绑在一起；上限 50 防止误配。
             concurrency = self.settings.max_concurrency
-            job_slots = image_slots(job)
+            job_slots = image_slots(job, self.root)
             job_image_paths = [s["path"] for s in job_slots]
             spec = BatchSpec(
                 batch_id=Path(job["out_dir"]).name,
@@ -677,7 +691,7 @@ class JobManager:
                         "请先到控制台核对，确认没有重复后再新建任务"
                     )
                 raise ValueError("该任务没有可重试的失败项")
-            slots = image_slots(source)
+            slots = image_slots(source, self.root)
             if not slots:
                 raise ValueError("原任务没有可用的图片，请重新上传后新建任务")
             for index, slot in enumerate(slots, 1):
@@ -938,7 +952,7 @@ class JobManager:
                 "lane", "style_no", "tags")}
             safe["batch_ref"] = str(safe.get("batch_ref") or "")
             # 只下发可访问的缩略 URL 与文件名；images 里有服务器绝对路径，绝不出公网。
-            slots = image_slots(job)
+            slots = image_slots(job, self.root)
             safe["image_urls"] = [f"/api/uploads/{s['upload_id']}" for s in slots if s.get("upload_id")]
             safe["image_names"] = [s["name"] for s in slots]
             if safe.get("message"):
@@ -978,7 +992,10 @@ class JobManager:
     def output_path(self, job_id: str) -> Path | None:
         with self.lock:
             job = self.jobs.get(job_id)
-            return Path(job["out_dir"]) if job and job.get("out_dir") else None
+            if not job or not job.get("out_dir"):
+                return None
+            # 历史任务存的是生成那一刻的绝对路径；换代码文件夹后按当前数据根重锚。
+            return relocate(job["out_dir"], self.root)
 
     def shutdown(self) -> None:
         self.stop_event.set()
