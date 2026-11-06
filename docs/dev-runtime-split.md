@@ -31,9 +31,12 @@ python scripts/deploy_runtime.py
 
 **为什么用 git 而不是复制文件**：只发布「已提交」的状态——没写完的实验天然不会漏到线上；
 运行区 `git status` 恒干净，能 diff 上次发布，也能 `git reset --hard ORIG_HEAD` 一键回退一次发布。
+发布助手只拦**已跟踪文件**的改动；运行区的 `运维/`、本机日志等未跟踪文件已被忽略，不会卡住发布。
 
 ## dev 实例（设计区）
 
+- 启动：双击 `启动器\启动网页服务.bat`（或 `启动网页服务.vbs`）——启动器读 `server/web.json`
+  决定端口与数据目录，两区同一个脚本；也可以直接 `python run_web.py`。
 - `python run_web.py` 读设计区 `server/web.json`：端口 **8766**、`data_root: web-data-dev`、
   独立 `session_secret`（浏览器 cookie 不区分端口，生产/开发会话互不通用）。
 - 账号与生产相同；历史页里旧任务的图片/视频 404 属预期（uploads/output 不在 dev 副本里）。
@@ -48,6 +51,8 @@ python scripts/deploy_runtime.py
 | `回滚到设计区-需管理员.bat` | 紧急回滚：把计划任务指回设计区并启动；切换后产生的新任务会列出来提示搬回 |
 
 两个脚本都自带安全检查：检测到 running/queued 任务会拒绝执行。
+`运维/` 不入库（`.gitignore` 里的本机运维目录）：重新克隆运行区后需要在
+`运行区\运维\` 重建这两个脚本，或直接照本文档里的步骤手工切换。
 
 ## 打标器归属
 
