@@ -60,7 +60,9 @@ def main() -> int:
         return 1
 
     # 1. 运行区必须是干净的（只 pull 不改码的铁律）
-    st = git(runtime, "status", "--porcelain")
+    #    只看已被跟踪文件的改动：未跟踪的本机文件（运维/、日志等）不阻塞 ff-only 合并，
+    #    真撞车（pull 要新建同名文件）时 pull 自己会失败，不会静默覆盖。
+    st = git(runtime, "status", "--porcelain", "--untracked-files=no")
     if st.returncode != 0:
         print(f"[失败] 运行区不是有效 git 仓库：{st.stderr.strip()}")
         return 1
@@ -78,11 +80,18 @@ def main() -> int:
         return 1
 
     # 3. 提醒：设计区未提交的改动不会发布（这是特性，不是遗漏）
-    ds = git(design, "status", "--porcelain")
+    ds = git(design, "status", "--porcelain", "--untracked-files=no")
     if ds.returncode == 0 and ds.stdout.strip():
         print("[提醒] 设计区有未提交改动，本次不会发布（只发布已 commit 的状态）：")
         print("\n".join(ds.stdout.strip().splitlines()[:8]))
         if len(ds.stdout.strip().splitlines()) > 8:
+            print("  ……（更多省略）")
+    du = git(design, "status", "--porcelain")
+    loose = [ln for ln in du.stdout.splitlines() if ln.startswith("??")]
+    if du.returncode == 0 and loose:
+        print(f"[提示] 设计区另有 {len(loose)} 个未跟踪文件（不会发布）：")
+        print("\n".join(loose[:5]))
+        if len(loose) > 5:
             print("  ……（更多省略）")
 
     # 4. pull --ff-only
