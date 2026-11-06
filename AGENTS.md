@@ -5,8 +5,10 @@
 
 ## 0. 两区布局（2026-11-06 起，先读这一节）
 
-一个仓库、两个文件夹，代码完全同源；所有路径按「代码所在文件夹」解析（`app/config.py` 的 `app_dir()`），
-所以整目录克隆即自包含，不依赖工作目录或绝对路径。
+一个仓库、两个文件夹，代码完全同源；代码里的相对路径按「代码所在文件夹」解析
+（`app/config.py` 的 `app_dir()`），所以整目录克隆即自包含、不依赖工作目录。
+但**任务 / 批次 / 上传记录里存的是生成那一刻的绝对路径**，换文件夹后会悬空；读数据时
+由 `app/web/paths.py::relocate()` 按当前 `data_dir` 重锚（见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)）。
 
 | | `D:\批量视频任务运行区`（**生产**） | `D:\批量视频任务设计区`（**开发**） |
 | --- | --- | --- |
@@ -29,12 +31,38 @@
 4. **启动器两区通用**：`启动网页服务.vbs` 从本文件夹 `server/web.json` 读 `port` / `data_root`，
    换端口/数据目录只改配置，别改脚本；两个实例同时存在是正常的（8765 生产 + 8766 dev）。
 
-**dev 实例边界**：`web-data-dev` 是轻量副本（jobs / batches / template_tags / tag_versions），
-**不含 uploads 与 output**，所以历史页旧任务的图片/视频 404 属预期；账号与生产相同；
+**dev 实例边界**：`web-data-dev` 是轻量副本（jobs / batches / template_tags / tag_versions）；
+`uploads` 是指向运行区 uploads 的目录联接（见下节），`output` 仍为空，历史视频靠
+`设计区\web-data\output` 的临时桥接回运行区。账号与生产相同；
 `server/config.json` 是**真实 Key**——dev 提交 = 真实计费，且与生产共用 250 RPM / 100 在飞，别在生产高峰压测。
 切换前的完整生产数据归档在 `设计区\web-data-生产快照-20261106\`（只读兜底，运行区稳定一周后可删）。
 
 细节（布局理由、一次性切换/回滚脚本、数据归档）见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
+
+### dev 的 uploads 目录联接（2026-11-06）
+
+`设计区\web-data-dev\uploads` 是指向 `D:\批量视频任务运行区\web-data\uploads` 的 **junction**。
+起因：dev 历史记录 / 对比页的定妆图丢了——历史 job 只存 `upload_id`，图片要经
+`/api/uploads/<id>` 读 `uploads\meta\*.json` 与图片文件，而 dev 副本里这些是空的；
+`app/web/static/batch.js:2700-2702` 在图片 404 时会把「定妆图」面板整块收起，
+于是三栏「定妆图 + 生成的视频 + 模板视频」只剩两栏视频。两个视频不依赖本地 uploads：
+生成的视频走 `设计区\web-data\output` 的桥，模板视频是 COS 云端预览。
+
+**提示（写入不隔离）**：联接是双向的，dev 之后新上传的图片和 meta 会**写进生产运行区的
+uploads**；真源始终在 `运行区\web-data\uploads`。别在 dev 上传敏感 / 大量素材；要彻底隔离
+就删掉联接、改成一次性复制快照（约 235 MB）。联接不入库、不随 git 发布，重新克隆或换机器
+后需重建：
+
+```powershell
+# 先确认 web-data-dev\uploads 是空目录或联接，再执行
+Remove-Item 'D:\批量视频任务设计区\web-data-dev\uploads' -Recurse -Force
+New-Item -ItemType Junction -Path 'D:\批量视频任务设计区\web-data-dev\uploads' `
+  -Target 'D:\批量视频任务运行区\web-data\uploads'
+```
+
+**别删 `设计区\web-data\output` 的桥**：dev 旧任务的 `out_dir` 仍指向设计区旧路径，
+历史视频靠它接回运行区；生产代码发布重启后生产不再需要，但 dev 仍依赖。
+两条桥的本机说明在 `设计区\web-data\README.md`（该目录被 `.gitignore` 忽略，不入库）。
 
 ## 1. 这是什么
 
@@ -166,7 +194,7 @@ python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分
 python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格 / probe / HTTP zip
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端，全部离线运行。
+`tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端（23 套，含 `test_path_relocate`），全部离线运行。
 
 ## 7. 别动 / 小心
 

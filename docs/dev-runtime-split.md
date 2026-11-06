@@ -43,7 +43,9 @@ python scripts/deploy_runtime.py
   决定端口与数据目录，两区同一个脚本；也可以直接 `python run_web.py`。
 - `python run_web.py` 读设计区 `server/web.json`：端口 **8766**、`data_root: web-data-dev`、
   独立 `session_secret`（浏览器 cookie 不区分端口，生产/开发会话互不通用）。
-- 账号与生产相同；历史页里旧任务的图片/视频 404 属预期（uploads/output 不在 dev 副本里）。
+- 账号与生产相同；`web-data-dev\uploads` 是指向运行区 uploads 的 junction，历史定妆图靠它显示
+  （重建命令与「写入会落到生产」的提示见 [AGENTS.md §0](../AGENTS.md)）；`output` 仍为空，
+  历史视频靠 `设计区\web-data\output` 的临时桥，别删那条桥。
 - `server/config.json` 是**真实 Key**（用户决定）：dev 提交 = 真实计费，且与生产共用
   250 RPM / 100 在飞额度——跑测试批次时省着点，别在生产高峰期压测。
 
