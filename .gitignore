@@ -60,6 +60,8 @@ server/passwords.json
 # 局域网网页服务的本机数据与秘密配置
 dist-web/
 web-data/
+# 分区后的 dev 数据目录与生产快照归档（web-data-dev/、web-data-生产快照-*）
+web-data*/
 server/web.json
 
 # 配置文件备份（web.json / config.json 的历史副本，可能含明文 Key，只留本机）
