@@ -183,7 +183,7 @@ def to_data_uri(path: str | Path) -> str:
 # ---------------------------------------------------------------------------
 
 def probe_video(path: str | Path) -> dict:
-    """ffprobe 读时长/分辨率/帧率；没有 ffprobe 返回空字典。"""
+    """ffprobe 读容器名/时长/分辨率/帧率；没有 ffprobe 时只给 size_mb + warn。"""
     src = Path(path)
     info = {"path": str(src), "size_mb": round(src.stat().st_size / 1024 / 1024, 3)}
     exe = shutil.which("ffprobe")
@@ -193,7 +193,7 @@ def probe_video(path: str | Path) -> dict:
     try:
         result = subprocess.run(
             [exe, "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,r_frame_rate:format=duration",
+             "-show_entries", "stream=width,height,r_frame_rate:format=duration,format_name",
              "-of", "json", str(src)],
             capture_output=True, text=True, timeout=30,
         )
@@ -203,6 +203,11 @@ def probe_video(path: str | Path) -> dict:
         import json
         data = json.loads(result.stdout or "{}")
         stream = (data.get("streams") or [{}])[0]
+        container = (data.get("format") or {}).get("format_name")
+        if container:
+            # validate_video 靠这条判断"ffprobe 能解析出容器"；早先漏了它，
+            # 结果是只要本机装了 ffprobe，所有正常视频都被判成"不是有效容器"。
+            info["format"] = str(container)
         duration = (data.get("format") or {}).get("duration")
         if duration is not None:
             info["duration"] = round(float(duration), 2)

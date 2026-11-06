@@ -438,8 +438,11 @@ def make_handler(app: WebApplication):
             try:
                 return self._json(fn(), status)
             except ApiError as exc:
+                if exc.status >= 400:
+                    self.log_message("%s -> %s: %s", self.path, exc.status, exc)
                 return self._json({"ok": False, "error": str(exc), **exc.payload()}, exc.status)
             except ValueError as exc:
+                self.log_message("%s -> 400: %s", self.path, exc)
                 return self._error(str(exc), 400)
 
         def do_HEAD(self):
@@ -874,24 +877,31 @@ def make_handler(app: WebApplication):
         def _upload_template(self, user):
             """接收单个视频（原始字节流）：暂存 → 校验 → 传 COS → 登记清单。"""
             from app.web import tag_api
+
+            def reject(message, status=400):
+                # 上传失败的真正原因（扩展名/时长/容器/标签）只写在响应体里，
+                # 日志只留一行 400 的话事后完全查不出原因，这里补一条带原因的。
+                self.log_message("upload rejected [%s]: %s", status, message)
+                return self._error(message, status)
+
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except (TypeError, ValueError):
                 length = 0
             if length <= 0:
-                return self._error("请选择要上传的视频文件。", 400)
+                return reject("请选择要上传的视频文件。", 400)
             if length > tag_api.MAX_UPLOAD_MB * 1024 * 1024:
-                return self._error(f"单个视频不能超过 {tag_api.MAX_UPLOAD_MB}MB。", 413)
+                return reject(f"单个视频不能超过 {tag_api.MAX_UPLOAD_MB}MB。", 413)
             filename = Path(urllib.parse.unquote(self.headers.get("X-File-Name", ""))).name or "video.mp4"
             suffix = Path(filename).suffix.lower()
             if suffix not in {".mp4", ".mov", ".m4v"}:
-                return self._error("只支持 mp4 / mov / m4v 视频。", 400)
+                return reject(f"只支持 mp4 / mov / m4v 视频（收到 {suffix or '无扩展名'}）。", 400)
             try:
                 tags = json.loads(urllib.parse.unquote(self.headers.get("X-Tags", "[]")) or "[]")
             except json.JSONDecodeError:
-                return self._error("标签参数无效。", 400)
+                return reject("标签参数无效。", 400)
             if not isinstance(tags, list):
-                return self._error("标签参数无效。", 400)
+                return reject("标签参数无效。", 400)
 
             auto_number = str(self.headers.get("X-Auto-Number", "") or "").strip() == "1"
             folder = app.settings.data_dir / "uploads" / "tpl"
@@ -910,7 +920,7 @@ def make_handler(app: WebApplication):
                     lambda: tag_api.upload_video(app, temp, filename, tags, user,
                                                  auto_number=auto_number), 201)
             except (ConnectionError, OSError) as exc:
-                return self._error(f"接收文件失败：{exc}", 400)
+                return reject(f"接收文件失败：{exc}", 400)
             finally:
                 temp.unlink(missing_ok=True)
 

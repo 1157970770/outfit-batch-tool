@@ -8,6 +8,8 @@
 3. 弃用 = 软删除：候选集 /api/templates 里消失，快照里仍可见且可恢复。
 4. 标签库删除必须先看影响面（没有 confirm 就 400 并回带 impact）。
 5. 页面能拿到 tag-view 与静态资源，CSP 仍然是 script-src 'self'。
+6. 上传视频端点（真起服务 + provider=local 的假 COS）：正常 mp4 落桶并登记真源；
+   ffprobe 能解析时绝不能被误判成「不是有效的容器」；扩展名/缺标签要回可读原因。
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ import socket
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -398,6 +401,62 @@ def main() -> int:
         code, _, raw = call(alice, base, "/api/tags/videos/tags", "POST",
                             {"revision": "abc", "ids": ["004"], "tags": [], "mode": "replace"})
         assert code == 400, (code, body(raw))
+
+        # ---------- 上传视频：真走 validate_video → 本地 COS → 真源登记 ----------
+        # 回归点：probe_video 必须把「容器名」写进 info["format"]，否则装了 ffprobe 的
+        # 机器上任何正常视频都会被 validate_video 判成「内容不是有效的 mp4/mov 容器」，
+        # 而这个端点此前零覆盖，代码坏了测试也看不出来。
+        import types
+
+        import app.media as media_mod
+
+        probe_json = json.dumps({
+            "streams": [{"width": 1280, "height": 720, "r_frame_rate": "30/1"}],
+            "format": {"duration": "7.0", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        })
+        real_which, real_run = media_mod.shutil.which, media_mod.subprocess.run
+        media_mod.shutil.which = lambda name: "ffprobe" if name == "ffprobe" else real_which(name)
+        media_mod.subprocess.run = lambda *args, **kwargs: types.SimpleNamespace(
+            returncode=0, stdout=probe_json, stderr="")
+        # 前面的用例改过标签库，这里按当前库里真实存在的标签上传
+        label = body(call(alice, base, "/api/tags/snapshot")[2])["library"]["tags"][0]
+        try:
+            headers = {
+                "X-File-Name": urllib.parse.quote("新视频-7.mp4"),
+                "X-Tags": urllib.parse.quote(json.dumps([label], ensure_ascii=False)),
+            }
+            code, _, raw = post_raw(alice, base, "/api/tags/videos/upload",
+                                    b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 1024, headers)
+            assert code == 201, (code, body(raw))
+            uploaded = body(raw)
+            assert uploaded["row"]["tags"] == [label], uploaded["row"]
+            assert uploaded["row"]["uploaded"] is True, uploaded["row"]
+            new_id = str(uploaded["row"]["id"])
+            assert new_id not in {"001", "002", "003", "004"}, new_id
+
+            cos_files = list((tmp / "cos-root").rglob("*.mp4"))
+            assert cos_files, "视频没有真正落到本地 COS 桶"
+            assert uploaded["key"] in str(cos_files[0]).replace("\\", "/"), (uploaded["key"], cos_files)
+
+            snap = body(call(alice, base, "/api/tags/snapshot")[2])
+            assert new_id in {video["id"] for video in snap["videos"]}, snap["videos"]
+            row = {video["id"]: video for video in snap["videos"]}[new_id]
+            assert row["tags"] == [label] and not row.get("deprecated"), row
+
+            # 拒绝路径要带上能看懂的原因（以前只回一句笼统的容器错误）
+            code, _, raw = post_raw(bob, base, "/api/tags/videos/upload", b"\x00" * 64, {
+                "X-File-Name": urllib.parse.quote("老视频.avi"),
+                "X-Tags": urllib.parse.quote("[]"),
+            })
+            assert code == 400 and "只支持" in body(raw)["error"], (code, body(raw))
+
+            code, _, raw = post_raw(bob, base, "/api/tags/videos/upload", b"\x00" * 64, {
+                "X-File-Name": urllib.parse.quote("没标签.mp4"),
+                "X-Tags": urllib.parse.quote("[]"),
+            })
+            assert code == 400 and "至少选择一个标签" in body(raw)["error"], (code, body(raw))
+        finally:
+            media_mod.shutil.which, media_mod.subprocess.run = real_which, real_run
     finally:
         server.shutdown()
         server.server_close()

@@ -28,6 +28,7 @@ REQUIRED = [
     "test_wan_api",
     "test_storage",
     "test_core",
+    "test_media",
     "test_template_catalog",
     "test_template_store",
     "test_tag_truth",
