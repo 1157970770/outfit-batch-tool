@@ -3,6 +3,39 @@
 > 先读这一页，再读代码。这里只写“事实与边界”，不重复业务细节；
 > 业务与参数口径见 [docs/architecture.md](docs/architecture.md) 与 [docs/project-summary-20261102.md](docs/project-summary-20261102.md)。
 
+## 0. 两区布局（2026-11-06 起，先读这一节）
+
+一个仓库、两个文件夹，代码完全同源；所有路径按「代码所在文件夹」解析（`app/config.py` 的 `app_dir()`），
+所以整目录克隆即自包含，不依赖工作目录或绝对路径。
+
+| | `D:\批量视频任务运行区`（**生产**） | `D:\批量视频任务设计区`（**开发**） |
+| --- | --- | --- |
+| 谁在用 | 局域网同事，`http://192.168.10.179:8765` | 只有开发者，`http://127.0.0.1:8766` |
+| 端口 / 数据 | `server/web.json` → 8765 / `web-data` | 8766 / `web-data-dev` |
+| 进程 | 计划任务 `OutfitWebServer`（session 0，开机自启） | 手动：双击 `启动器\启动网页服务.bat` |
+| git | **只 `pull --ff-only`，不改码、不提交** | 开发 + commit + push GitHub |
+| 打标器 | **只能从这里启动**（真源=运行区 `web-data`） | 别从这里启动（会写进 dev 副本） |
+
+四条铁律：
+
+1. **生产代码只经 git 进入运行区**：`git pull --ff-only` 或 `python scripts/deploy_runtime.py`；
+   所有修改都发生在设计区。发布助手只发布**已提交**状态、只拦已跟踪文件的改动
+   （运行区的 `运维/`、本机日志是未跟踪文件，不阻塞发布）。
+2. **发布流程**：设计区改码 → `python tests/run_all.py` → commit →
+   `python scripts/deploy_runtime.py`（查 running/queued → pull → 自检）→
+   需要时右键运行区 `启动器\重启网页服务-管理员.bat`（管理员）。只有启动器/文档/脚本类改动可免重启。
+3. **回滚**：撤掉上一次发布用 `git -C "D:\批量视频任务运行区" reset --hard ORIG_HEAD`；
+   整体退回设计区用 `运行区\运维\回滚到设计区-需管理员.bat`（`运维/` 已被 `.gitignore` 忽略，重新克隆运行区需重建）。
+4. **启动器两区通用**：`启动网页服务.vbs` 从本文件夹 `server/web.json` 读 `port` / `data_root`，
+   换端口/数据目录只改配置，别改脚本；两个实例同时存在是正常的（8765 生产 + 8766 dev）。
+
+**dev 实例边界**：`web-data-dev` 是轻量副本（jobs / batches / template_tags / tag_versions），
+**不含 uploads 与 output**，所以历史页旧任务的图片/视频 404 属预期；账号与生产相同；
+`server/config.json` 是**真实 Key**——dev 提交 = 真实计费，且与生产共用 250 RPM / 100 在飞，别在生产高峰压测。
+切换前的完整生产数据归档在 `设计区\web-data-生产快照-20261106\`（只读兜底，运行区稳定一周后可删）。
+
+细节（布局理由、一次性切换/回滚脚本、数据归档）见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
+
 ## 1. 这是什么
 
 局域网网页版批量视频生产器：1 张定妆图 + 最多 9 张细节图 + N 个视频模板 → N 条 7 秒换装视频，
@@ -15,18 +48,16 @@
 
 ## 2. 三分钟跑起来
 
-> **分区提示（2026-11-06 起）**：生产服务固定跑在 `D:\批量视频任务运行区`
-> （计划任务 `OutfitWebServer`，端口 8765；重启用运行区 `启动器\重启网页服务-管理员.bat`）。
-> 本设计区只做开发：`python run_web.py` 起的是 dev 实例（8766 + `web-data-dev`）。
-> 布局、发布与回滚见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
+> 分区（2026-11-06 起）：生产固定在**运行区**跑 8765；本设计区只做开发（8766 + `web-data-dev`）。
+> 见上节 §0 与 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
 
 ```bash
 # 首次：创建管理员（写入 server/web.json）
 python run_web.py --init
 
-# 启动（默认 0.0.0.0:8765，启动后约 7 秒才 bind 端口，别急着判失败）
+# 启动（设计区读到 8766；启动后约 7 秒才 bind 端口，别急着判失败）
 python run_web.py
-# 或双击「启动网页服务.vbs」
+# 或双击「启动网页服务.vbs」（端口/数据目录从 server/web.json 读，两区通用）
 ```
 
 Windows 上解释器通常是 `%USERPROFILE%\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe`；
@@ -142,8 +173,9 @@ python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格
 - `app/web/__init__.py`：`.gitignore` 里的 `_*.py` 曾误伤所有 `__init__.py`，现已加例外。
   新建包时若发现 `__init__.py` 没进版本库，先查 `.gitignore`。
 - `web-data/`、`server/web.json`、`server/config.json`：本机运行数据，不要为了“干净”删掉。
-- 服务启动**约 7 秒后**才监听端口；用 `netstat -ano | findstr 8765` 确认只有一个 LISTENING，
-  别重复启动（Windows 的 `SO_REUSEADDR` 会让两个进程同时绑上同一端口）。
+- 服务启动**约 7 秒后**才监听端口；用 `netstat -ano | findstr 8765` 确认只有一个 LISTENING。
+  别对**同一个数据目录**起第二个进程（`SO_REUSEADDR` 允许双绑同一端口，实例锁只按 `data_dir` 区分）；
+  「8765 生产 + 8766 dev」同时存在是正常状态。设计区 `server/web.json` 不要改回 8765 / `web-data`。
 - 重启会打断 running 任务；重启前先看 `web-data/jobs/*.json` 里有没有 `running/queued`。
 - 旧的 `cordis.patch.yml.bak-*`、`probe-registry.mjs` 是历史残留，不要当入口。
 - 打标器只能从**运行区**启动（`启动器\启动视频标签整理.bat`）：它按所在文件夹定位

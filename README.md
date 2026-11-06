@@ -14,13 +14,18 @@
 
 ## 一、快速开始（网页版）
 
+> **本机两区布局（2026-11-06 起）**：生产跑在 `D:\批量视频任务运行区`（8765，同事访问），
+> 本仓库目录是开发副本（dev 实例 8766 + `web-data-dev`）。端口与数据目录都由
+> `server/web.json` 决定，启动器两区通用。详见 [AGENTS.md §0](AGENTS.md) 与
+> [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。下面是全新机器首次部署的通用步骤。
+
 ```bash
 # 1) 首次：创建管理员，写入 server/web.json（不会覆盖已有配置）
 python run_web.py --init
 
 # 2) 准备 Key：server/config.json → wan.api_key（全站共用这一把）
 
-# 3) 启动（默认 0.0.0.0:8765）
+# 3) 启动（端口取自 server/web.json，全新机器是 0.0.0.0:8765）
 #    日常：双击「启动网页服务.vbs」——不弹任何命令行窗口，
 #          服务已在跑就直接打开浏览器；启动日志写 web-data/logs/launcher.log
 #    排错：双击「启动器\启动网页服务.bat」，窗口里能看到实时输出
