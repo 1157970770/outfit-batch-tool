@@ -15,6 +15,11 @@
 
 ## 2. 三分钟跑起来
 
+> **分区提示（2026-11-06 起）**：生产服务固定跑在 `D:\批量视频任务运行区`
+> （计划任务 `OutfitWebServer`，端口 8765；重启用运行区 `启动器\重启网页服务-管理员.bat`）。
+> 本设计区只做开发：`python run_web.py` 起的是 dev 实例（8766 + `web-data-dev`）。
+> 布局、发布与回滚见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
+
 ```bash
 # 首次：创建管理员（写入 server/web.json）
 python run_web.py --init
@@ -60,7 +65,7 @@ app/storage.py         COS / 本地存储适配
 → 调度线程 `_dispatch` → `_run_job` → `BatchRunner.run()` → 事件回写 `records/done`
 → 前端每 3.5 秒轮询 `/api/jobs` → 完成后 `GET /api/jobs/<id>/files/...` 下载。
 
-## 4. 五条硬约束（改代码前必须知道）
+## 4. 七条硬约束（改代码前必须知道）
 
 1. **全站只有一把 API Key**：`server/config.json → wan.api_key`，所有账户共用。
    历史上做过“每账户一把 Key”，已在 v0.4.0 全部移除，别再引入。
@@ -75,8 +80,14 @@ app/storage.py         COS / 本地存储适配
    （`run_web.py --import-tags / --export-tags`），不要再把它当真源写。
    「弃用」是软删除：不删本机视频、不删 COS 对象、不重建 manifest，随时可恢复；
    「标签为空」是未打标，两者都不进候选集但语义不同。
+7. **运行区只 pull 不改码**：`D:\批量视频任务运行区` 是生产，只通过
+   `git pull --ff-only`（或 `python scripts/deploy_runtime.py`）接收已提交的代码；
+   一切修改都发生在设计区，见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
 
 ## 5. 配置与数据放在哪
+
+> 下表路径按「当前文件夹」解析：运行区与设计区各自持有一套 `server/*.json` 与
+> `web-data/`（设计区的生产数据已归档为 `web-data-生产快照-20261106/`，dev 用 `web-data-dev/`）。
 
 | 路径 | 内容 | 是否入库 |
 | --- | --- | --- |
@@ -104,9 +115,11 @@ app/storage.py         COS / 本地存储适配
 | 换地域/业务空间 | `wan.base_url`、`wan.region` | 三者必须与 Key 同地域，否则鉴权失败 |
 | 换单价 | `wan.price_per_second` | 只影响管理端金额估算 |
 
+改的是**运行区**的 `server/config.json`（生产配置在设计区只是副本）。改完重启生产：
+
 ```bash
-# 改完重启（先确认 web-data/jobs 里没有 running/queued）
-python run_web.py
+# 右键 D:\批量视频任务运行区\启动器\重启网页服务-管理员.bat → 以管理员身份运行
+# （重启前先确认运行区 web-data/jobs 里没有 running/queued）
 ```
 
 注意：`wan_configured()` 只校验 Key 与 model **非空**，Key 填错也能启动，
@@ -133,6 +146,9 @@ python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格
   别重复启动（Windows 的 `SO_REUSEADDR` 会让两个进程同时绑上同一端口）。
 - 重启会打断 running 任务；重启前先看 `web-data/jobs/*.json` 里有没有 `running/queued`。
 - 旧的 `cordis.patch.yml.bak-*`、`probe-registry.mjs` 是历史残留，不要当入口。
+- 打标器只能从**运行区**启动（`启动器\启动视频标签整理.bat`）：它按所在文件夹定位
+  标签真源（`启动打标器.py` 设 `OUTFIT_TAG_STORE=BASE/web-data/template_tags.json`），
+  从设计区启动会写进 dev 副本。
 
 ## 8. 已知债（别当成 bug 修）
 
@@ -149,6 +165,7 @@ python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格
 | [docs/project-summary-20261102.md](docs/project-summary-20261102.md) | v0.6.0 现状、参数表、运维与风险 |
 | [docs/account-usage-and-quota.md](docs/account-usage-and-quota.md) | 单 Key 共用与账户用量监控口径 |
 | [docs/web-lan.md](docs/web-lan.md) | 局域网部署与访问 |
+| [docs/dev-runtime-split.md](docs/dev-runtime-split.md) | 运行区/设计区分区：布局、发布与回滚 |
 | [docs/ui-rollback.md](docs/ui-rollback.md) | 界面改版的基线与回滚步骤 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
 | [README.md](README.md) | 对外说明与快速开始 |

@@ -11,6 +11,7 @@
 | [project-summary-20261102.md](project-summary-20261102.md) | 现状：参数表、能力清单、运维手册、风险 | 2026-11-02 |
 | [account-usage-and-quota.md](account-usage-and-quota.md) | 单 Key 共用、创建/轮询双额度、账户用量与金额口径 | 2026-11-02 |
 | [web-lan.md](web-lan.md) | 局域网部署、访问地址、常见网络问题 | 2026-10 |
+| [dev-runtime-split.md](dev-runtime-split.md) | **运行区/开发区分区**：布局、发布流程、切换与回滚、打标器归属 | 2026-11-06 |
 | [ui-rollback.md](ui-rollback.md) | 界面改版的基线、回滚步骤与改版约定 | 2026-11-02 |
 | [web-tag-filter-handover.md](web-tag-filter-handover.md) | 标签筛选改造交接（含清单适配细节） | 2026-10-30 |
 

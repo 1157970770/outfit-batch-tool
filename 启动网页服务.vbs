@@ -13,7 +13,7 @@ Set shell = CreateObject("WScript.Shell")
 
 base = fso.GetParentFolderName(WScript.ScriptFullName)
 If Not fso.FileExists(base & "\run_web.py") Then
-    base = "D:\批量视频任务设计区"
+    base = "D:\批量视频任务运行区"
 End If
 runWeb = base & "\run_web.py"
 
