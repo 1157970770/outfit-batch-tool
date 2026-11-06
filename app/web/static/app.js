@@ -44,7 +44,7 @@
   // 首屏占位在 session 判定后立刻撤掉，登录页/主界面才有机会显示
   function hideBoot() { const el = $('boot-view'); if (el) el.classList.add('hidden'); }
   function showLogin() { hideBoot(); $('app-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); state.user = null; state.showAll = false; clearInterval(state.timer); }
-  function showApp() { hideBoot(); $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('history-group-by').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
+  function showApp() { hideBoot(); $('login-view').classList.add('hidden'); $('app-view').classList.remove('hidden'); state.showAll = false; state.ownerFilter = ''; $('owner-filter').value = ''; $('owner-filter').classList.add('hidden'); $('jobs-heading').textContent = '历史任务'; $('scope-toggle').textContent = '查看全部用户'; $('welcome-user').textContent = state.user.username; $('admin-tab').classList.toggle('hidden', state.user.role !== 'admin'); $('scope-toggle').classList.toggle('hidden', state.user.role !== 'admin'); restoreView(); }
   // 管理员"查看全部"时的账户维度：scope=all 再加 owner 过滤，普通账号永远只看自己。
   function scopeQuery() {
     if (!(state.user && state.user.role === 'admin' && state.showAll)) return 'mine';
@@ -54,8 +54,9 @@
     const select = $('owner-filter');
     const adminAll = state.user && state.user.role === 'admin' && state.showAll;
     select.classList.toggle('hidden', !adminAll);
+    // 分组方式对所有账号都有用（按日期 / 按批次），只有「按账户」需要管理员看全部用户。
     const groupBy = $('history-group-by');
-    if (groupBy) groupBy.classList.toggle('hidden', !adminAll);
+    if (groupBy) groupBy.classList.remove('hidden');
     if (!adminAll) { state.ownerFilter = ''; select.value = ''; return; }
     if (!state.adminUsers.length) {
       try { const data = await api('/api/admin/users'); state.adminUsers = data.users || []; } catch (_) { /* 取不到就只留"全部账户" */ }
@@ -634,9 +635,9 @@
       loadMore: () => load(false),
     };
   }
+  // 历史任务页的「小批量」已并入统一分组视图，这里只剩小批量试跑页自己的历史子页。
   const smallHistories = {
     create: createSmallHistory('create-history-list', 'create-history-more'),
-    history: createSmallHistory('history-small-list', 'history-small-more'),
   };
 
   let createPane = 'make';

@@ -248,6 +248,8 @@
 .batch-retry .muted{font-size:12px}
 .batch-items-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:12px 0 6px}
 .batch-items-head h3{margin:0;font-size:14px}
+/* 整批下载按钮靠状态筛选左侧，不与 h3 抢空间 */
+.batch-download-all{margin-left:auto;flex:none}
 .batch-filter-field{margin:0;flex:none;font-size:12px}
 .batch-filter-field select{min-height:32px}
 
@@ -317,6 +319,9 @@
 .history-group-title small{display:block;margin-top:3px;font-size:12px;color:var(--muted)}
 .history-group-side{display:flex;align-items:center;gap:8px;flex:none}
 .history-chevron{font-size:12px;font-weight:700;color:var(--blue)}
+/* 真实大批量批次的整批下载条：与 head 平级，折叠状态下也能直接下载 */
+.history-group-tools{display:flex;justify-content:flex-end;gap:8px;padding:0 16px 12px}
+.history-group-tools .quiet{font-size:12px}
 .history-group-body{padding:0 16px 14px}
 .history-record{display:grid;grid-template-columns:minmax(0,1.2fr) 88px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:13px}
 .history-record.is-admin{grid-template-columns:minmax(0,1.1fr) 92px minmax(0,1.1fr) auto}

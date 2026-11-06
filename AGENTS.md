@@ -119,6 +119,7 @@ python run_web.py
 python tests/run_all.py          # 全部离线套件（不花钱、不联网）
 python tests/test_web.py         # 网页端端到端：登录/上传/任务/用量/权限
 python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分组 + 额度断言
+python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格 / probe / HTTP zip
 ```
 
 `tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端，全部离线运行。

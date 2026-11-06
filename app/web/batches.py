@@ -45,6 +45,8 @@ DEFAULT_PRODUCE_COUNT = 50
 RETRY_MIN = 1
 RETRY_MAX = 100
 UNGROUPED_KEY = "__ungrouped__"
+# 按日期分组的虚拟 key 前缀（试跑没有 batch_ref，光按批次/账户拆不出可用的分类）。
+DAY_KEY = "__day__"
 # job.image_path 里的上传图：web-data/uploads/<xx>/<32位id>.<ext>（Windows 反斜杠同样匹配）。
 # 命中即说明这张图能通过 /api/uploads/<id>（带 owner 校验）取回来。
 # 命名保持对外不变，正则统一收在 jobs.py（读老 job 时两边用同一套）。
@@ -62,6 +64,20 @@ _TERMINAL_JOB = {"succeeded", "partial", "failed", "canceled", "interrupted"}
 _RECORD_DONE = {"success"}
 # 记录里这些状态算「没跑成但也没花掉」：条目回 pending，可以再排一次。
 _RECORD_UNTOUCHED = {"pending", "skipped"}
+
+
+def _lane_of(job: dict) -> str:
+    """job 的通道。老数据没有 lane 字段，按大批量处理（与 jobs.lane_of 同口径）。"""
+    return "small" if str(job.get("lane") or "") == "small" else "big"
+
+
+def _day_key(ts) -> str:
+    """按服务器本地时区把时间戳归到 YYYY-MM-DD；缺时间戳归 unknown，绝不丢记录。"""
+    try:
+        value = float(ts or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return time.strftime("%Y-%m-%d", time.localtime(value)) if value > 0 else "unknown"
 
 
 class BatchError(Exception):
@@ -961,28 +977,79 @@ class BatchManager:
             data["cost_estimate"] = self._money_view(user, self.estimate_for_pending(batch))
             return data, self.public_items(batch, item_state)
 
-    # ------------------------------------------------------------------ #10 打包
-    def zip_path(self, batch_id: str, user: dict) -> Path:
-        files: list[tuple[str, Path]] = []
+    # ------------------------------------------------------------------ #10 整批打包
+    def _batch_jobs(self, batch: dict) -> list[dict]:
+        """按时间顺序取这个批次名下的大批量 job：runs 为主，items / batch_ref 兜底。
+
+        一个批次会分多轮生产（produce / retry_failed 各建一个 job），items 里只留
+        最后一轮的 job_id；只扫 items 会漏掉前面几轮已经出片的视频。
+        """
+        jobs = self.jobs.jobs if self.jobs else {}
+        ordered: list[str] = []
+        for run in batch.get("runs") or []:
+            jid = str(run.get("job_id") or "")
+            if jid and jid not in ordered:
+                ordered.append(jid)
+        for item in batch.get("items") or []:
+            jid = str(item.get("job_id") or "")
+            if jid and jid not in ordered:
+                ordered.append(jid)
+        if not ordered:
+            # 老批次没有 runs：按 batch_ref 兜底，按创建时间排，保证后面覆盖前面。
+            linked = [job for job in jobs.values()
+                      if str(job.get("batch_ref") or "") == str(batch.get("id"))]
+            linked.sort(key=lambda job: job.get("created_at") or 0)
+            return [job for job in linked if _lane_of(job) == "big"]
+        return [jobs[jid] for jid in ordered
+                if jid in jobs and _lane_of(jobs[jid]) == "big"]
+
+    def batch_videos(self, batch_id: str, user: dict) -> dict:
+        """按批次收集全部已出片视频：{"id","batch_no","files":[(zip 名, 本地路径)]}。
+
+        资格：必须是真实的大批量批次。小批量试跑不建批次；万一历史数据里有试跑
+        job 被挂到 batch_ref 上，也只在大批量 job 存在时才允许整批下载。
+        口径：遍历每一轮 run 的成功记录，按场景 id 去重、保留最新一次成功的视频，
+        与「单条下载」同源（job 输出目录里的 <场景id>.mp4）。
+        """
         with self.mutex:
             batch = self._authorized(batch_id, user)
             self._reconcile(batch)
-            for item in batch.get("items") or []:
-                if item.get("state") != "done":
+            linked = [job for job in (self.jobs.jobs.values() if self.jobs else ())
+                      if str(job.get("batch_ref") or "") == str(batch.get("id"))]
+            if linked and not any(_lane_of(job) == "big" for job in linked):
+                raise BatchError("试跑记录不支持按批次打包下载。", 403)
+            found: dict[str, Path] = {}
+            for job in self._batch_jobs(batch):
+                jid = str(job.get("id") or "")
+                out = self.jobs.output_path(jid) if self.jobs else None
+                if not out and job.get("out_dir"):
+                    out = Path(str(job["out_dir"]))
+                if not out:
                     continue
-                job = self.jobs.jobs.get(str(item.get("job_id") or "")) if self.jobs else None
-                out_dir = Path(str(job.get("out_dir"))) if job and job.get("out_dir") else None
-                if not out_dir:
-                    continue
-                video = out_dir / f"{item.get('template_id')}.mp4"
-                if video.is_file():
-                    files.append((f"{item.get('template_id')}.mp4", video))
+                for rec in job.get("records") or []:
+                    if str(rec.get("status") or "") != "success":
+                        continue
+                    tid = str(rec.get("id") or "")
+                    # 场景 id 要进 zip 条目名，先挡掉路径穿越与异常字符。
+                    if not tid or not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", tid):
+                        continue
+                    video = out / f"{tid}.mp4"
+                    if video.is_file():
+                        found[tid] = video
+            return {"id": str(batch.get("id") or ""),
+                    "batch_no": str(batch.get("batch_no") or ""),
+                    "files": [(f"{tid}.mp4", path) for tid, path in sorted(found.items())]}
+
+    def zip_path(self, batch_id: str, user: dict,
+                 files: list[tuple[str, Path]] | None = None) -> Path:
+        if files is None:
+            files = self.batch_videos(batch_id, user)["files"]
         if not files:
             raise BatchError("暂时没有可下载的视频。", 404)
         # 每次打包一个唯一文件名：固定名会让同一批次的两个并发下载互相 truncate，
         # 客户端拿到半截 zip（调用方负责发完就删）。
         zip_path = (self.settings.data_dir / "tmp"
-                    / f"batch-{batch['id']}-{uuid.uuid4().hex[:10]}.zip")
+                    / f"batch-{uuid.uuid4().hex[:10]}.zip")
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -998,7 +1065,7 @@ class BatchManager:
 
     # ------------------------------------------------------------------ #11 历史分组
     def history_groups(self, user: dict, all_users: bool = False, owner: str = "",
-                       group_by: str = "batch") -> list[dict]:
+                       group_by: str = "batch", lane: str = "") -> list[dict]:
         """按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务 + 批次已删除）进未分组。
 
         归属只认「批次文件还在不在」：job.batch_ref 不回写（历史数据只读），批次一旦被删除，
@@ -1006,10 +1073,17 @@ class BatchManager:
         owner 仅对管理员生效：只看某个账户的历史。
         group_by="owner"（仅管理员看全部用户时生效）：把未分组再按账户拆成
         `__ungrouped__:<owner>` 虚拟组，避免多个账户的试跑挤成一张大列表。
+        group_by="day"：忽略批次，全部按提交日期拆成 `__day__:<YYYY-MM-DD>`。试跑记录
+        没有 batch_ref，普通账号只有自己一个账户，只有按日期才能把平铺拆成可读的分类。
+        lane="small" / "big"：只统计该通道的 job，卡片数字与明细才会对得上。
         虚拟 key 只存在于接口层，job / batch 的落盘结构一律不动。
         """
         filter_owner = str(owner or "") if all_users else ""
         split_owner = bool(all_users and group_by == "owner")
+        by_day = group_by == "day"
+        lane = str(lane or "").strip().lower()
+        if lane not in ("small", "big"):
+            lane = ""
         with self.mutex:
             groups: dict[str, dict] = {}
             for job in self.jobs.jobs.values() if self.jobs else ():
@@ -1017,8 +1091,12 @@ class BatchManager:
                     continue
                 if filter_owner and job.get("owner") != filter_owner:
                     continue
+                if lane and _lane_of(job) != lane:
+                    continue
                 ref = str(job.get("batch_ref") or "")
-                if ref and ref in self.batches:
+                if by_day:
+                    key = f"{DAY_KEY}:{_day_key(job.get('created_at'))}"
+                elif ref and ref in self.batches:
                     key = ref
                 elif split_owner:
                     key = f"{UNGROUPED_KEY}:{str(job.get('owner') or 'unknown')}"
@@ -1032,7 +1110,7 @@ class BatchManager:
                     "small_jobs": 0, "big_jobs": 0,
                 })
                 slot["job_count"] += 1
-                if str(job.get("lane") or "") == "small":
+                if _lane_of(job) == "small":
                     slot["small_jobs"] += 1
                 else:
                     slot["big_jobs"] += 1
@@ -1063,8 +1141,9 @@ class BatchManager:
                         slot["unfinished"] += 1
             rows = []
             for key, slot in groups.items():
+                is_day_group = key.startswith(DAY_KEY + ":")
                 is_owner_group = key.startswith(UNGROUPED_KEY + ":")
-                is_ungrouped = key == UNGROUPED_KEY or is_owner_group
+                is_ungrouped = key == UNGROUPED_KEY or is_owner_group or is_day_group
                 batch = None if is_ungrouped else self.batches.get(key)
                 batch_no = str((batch or {}).get("batch_no") or "")
                 # 管理员看全部时，分组卡片要能看出这批是谁跑的；多人混在一起就标"多人"。
@@ -1072,8 +1151,11 @@ class BatchManager:
                 owner_label = next(iter(owners)) if len(owners) == 1 else ("多人" if owners else "")
                 rows.append({
                     "key": key,
-                    "batch_no": "未分组" if is_ungrouped else batch_no,
-                    "group_kind": "owner" if is_owner_group else "batch",
+                    "day": key[len(DAY_KEY) + 1:] if is_day_group else "",
+                    # 按日期的组没有批次号，留空让明细行不显示「批次 xxx」。
+                    "batch_no": "" if is_day_group else ("未分组" if is_ungrouped else batch_no),
+                    "group_kind": ("day" if is_day_group
+                                   else "owner" if is_owner_group else "batch"),
                     "is_ungrouped": is_ungrouped,
                     "small_jobs": slot["small_jobs"], "big_jobs": slot["big_jobs"],
                     "owner": owner_label,
@@ -1089,12 +1171,27 @@ class BatchManager:
             return rows
 
     def history_items(self, key: str, user: dict, offset: int = 0, limit: int = 200,
-                      owner: str = "") -> dict:
+                      owner: str = "", all_users=None, lane: str = "") -> dict:
+        """分组明细。all_users 显式传 False 时（管理员「只看我的任务」）连明细也只列自己，
+        否则卡片写 9 条、点开却是全账户 20 条，数字对不上。None = 沿用旧行为，兼容离线调用。
+        lane 与 history_groups 同口径，避免同一个分组 key 在小批量栏混进大批量的记录。
+        """
         offset = max(0, int(offset or 0))
         limit = max(1, min(500, int(limit or 200)))
         owner = str(owner or "") if user.get("role") == "admin" else ""
+        if all_users is False:
+            owner = str(user.get("username") or "")
+        lane = str(lane or "").strip().lower()
+        if lane not in ("small", "big"):
+            lane = ""
         with self.mutex:
-            if key.startswith(UNGROUPED_KEY + ":"):
+            if key.startswith(DAY_KEY + ":"):
+                # 按日期分组：忽略批次归属，取这一天的全部可见 job。
+                target_day = key[len(DAY_KEY) + 1:]
+                batch_no = ""
+                jobs = [job for job in (self.jobs.jobs.values() if self.jobs else ())
+                        if _day_key(job.get("created_at")) == target_day]
+            elif key.startswith(UNGROUPED_KEY + ":"):
                 # 管理员按账户拆出来的虚拟组：只取该账户、且不属于任何现存批次的任务。
                 if user.get("role") != "admin":
                     raise BatchError("无权查看该分组。", 403)
@@ -1124,6 +1221,8 @@ class BatchManager:
                 if user.get("role") != "admin":
                     mine = [job for job in mine if job.get("owner") == user.get("username")]
                 jobs = mine
+            if lane:
+                jobs = [job for job in jobs if _lane_of(job) == lane]
             rows = []
             for job in sorted(jobs, key=lambda item: item.get("created_at") or 0):
                 job_owner = job.get("owner")

@@ -144,10 +144,33 @@
     const owner = App.state.ownerFilter ? `&owner=${encodeURIComponent(App.state.ownerFilter)}` : '';
     return `all${owner}`;
   }
-  function ownerParam() {
-    const user = App.state.user;
-    return user && user.role === 'admin' && App.state.ownerFilter
-      ? `&owner=${encodeURIComponent(App.state.ownerFilter)}` : '';
+  /* 按批次整批下载：只给真实的大批量批次用（小批量试跑 / 未分组都没有批次）。
+     先 probe 拿数量，再交给浏览器原生下载 —— 直接 <a href=zip> 时后端一旦报错，
+     浏览器会把那段 JSON 当附件存下来，用户还以为下到了视频。 */
+  async function downloadBatchZip(batchId, button) {
+    const id = txt(batchId);
+    if (!id || (button && button.disabled)) return;
+    const label = button ? button.textContent : '';
+    if (button) { button.disabled = true; button.textContent = '检查中…'; }
+    try {
+      const probe = await api(`/api/batches/${encodeURIComponent(id)}/files.zip?probe=1`);
+      const count = num(probe.count);
+      if (!count) { toast('这个批次暂时没有可下载的视频。'); return; }
+      const a = document.createElement('a');
+      a.href = txt(probe.download_url) || `/api/batches/${encodeURIComponent(id)}/files.zip`;
+      a.rel = 'noopener';
+      document.body.append(a);
+      a.click();
+      a.remove();
+      toast(`正在打包 ${count} 个视频，浏览器稍后会提示保存。`);
+    } catch (err) {
+      toast(`整批下载失败：${err.message}`);
+    } finally {
+      if (button && button.isConnected) {
+        button.disabled = false;
+        button.textContent = label || '下载整批视频';
+      }
+    }
   }
   function openJobDetail(jobId) {
     if (!jobId) return;
@@ -241,6 +264,18 @@
       closeBtn.title = running
         ? '还有生产任务在跑，等它跑完才能关闭批次'
         : '关闭后不能再提交生产；清单、记录与已出的视频都保留';
+    }
+    // 整批下载：只有已锁定/已关闭、且确实出过片的大批量批次才给入口。
+    // 草稿态、小批量试跑页不渲染；后端另有一道「非试跑」资格校验。
+    const dlBtn = $('batch-download-all');
+    if (dlBtn) {
+      const done = num(b.current && b.current.done);
+      const canDownload = b.mode === 'view' && !!txt(b.current && b.current.id)
+        && state !== 'draft' && done > 0;
+      dlBtn.classList.toggle('hidden', !canDownload);
+      dlBtn.disabled = !canDownload || b.busy;
+      dlBtn.title = canDownload
+        ? `打包下载本批次全部已出片视频（清单显示已完成 ${done} 条）` : '';
     }
   }
   function exitBatch() {
@@ -1784,7 +1819,17 @@
     const open = el('button', 'quiet', state === 'draft' ? '继续筛选' : '打开');
     open.type = 'button';
     open.addEventListener('click', () => openBatch(txt(batch.id)));
-    side.append(del, open);
+    const actions = [del];
+    // 批次列表也是「按批次下载」的入口：只有真的出过片才出现，试跑没有批次。
+    if (done > 0) {
+      const dl = el('button', 'quiet btn-sm', '下载整批');
+      dl.type = 'button';
+      dl.title = '打包下载本批次全部已出片视频（ZIP）';
+      dl.addEventListener('click', () => downloadBatchZip(txt(batch.id), dl));
+      actions.push(dl);
+    }
+    actions.push(open);
+    side.append(...actions);
     card.append(main, side);
     return card;
   }
@@ -1881,16 +1926,58 @@
       group.unfinished, group.last_at].map(value => num(value)).join('|');
     return `${txt(group.state_sig) || 'none'}|${counts}`;
   }
-  // 历史范围：全部 / 大批量 / 小批量。小批量是平铺列表（一轮 1–3 条，按批次分组反而多点一次），
-  // 大批量与全部仍走批次分组；分组数据里带了 small_jobs / big_jobs，用来剔除纯试跑的「未分组」。
+  // 历史范围：全部 / 大批量 / 小批量，三个栏共用同一套分组卡片与明细行。
+  // 以前「小批量」单独走 /api/jobs 平铺列表，分组方式对它完全不生效，多个账户的
+  // 试跑挤成一条流水；现在统一接到 /api/history/groups，只靠 lane 参数区分范围。
   let historyScope = 'all';
-  // 管理员看全部用户时默认按账户拆「未分组」；「按批次」是原来的单一大组。
-  let historyGroupBy = 'owner';
+  // 每个范围各记一套分组方式：试跑没有 batch_ref、普通账号也只有一个账户，
+  // 只有按日期才能把小批量拆成可读的分类；管理员看全部用户时可切到按账户。
+  const GROUP_BY_DEFAULT = { all: 'owner', big: 'owner', small: 'day' };
+  const VALID_GROUP_BY = ['day', 'owner', 'batch'];
+  // 记的是「用户偏好」，不是本次生效值：管理员从「只看我的」切回「查看全部用户」
+  // 时，之前选的按账户分组要能自动回来，不能被权限降级永久覆盖。
+  const historyGroupBy = Object.create(null);
+  function adminAllUsers() {
+    return !!(App.state.user && App.state.user.role === 'admin' && App.state.showAll);
+  }
+  function currentGroupBy() {
+    const preferred = historyGroupBy[historyScope] || GROUP_BY_DEFAULT[historyScope] || 'batch';
+    // 只有一个账户时按账户拆不出组，临时降级，但偏好保留。
+    if (!adminAllUsers() && preferred === 'owner') {
+      return historyScope === 'small' ? 'day' : 'batch';
+    }
+    return preferred;
+  }
+  function laneParam() {
+    return historyScope === 'small' ? 'small' : historyScope === 'big' ? 'big' : '';
+  }
+  function clearGroupCaches() {
+    b.openGroups.clear(); b.groupDetails.clear(); b.groupSig.clear();
+  }
+  // 同一个分组 key 在不同范围 / 维度 / 账户筛选下明细不同（「未分组」里既有试跑
+  // 也有老任务）；查询指纹一变就把展开态与明细缓存作废，避免串出另一通道的记录。
+  let groupQueryKey = '';
+  function syncGroupQuery(groupBy, lane) {
+    const key = [historyScope, groupBy, lane, adminAllUsers() ? 'all' : 'mine',
+      App.state.ownerFilter || ''].join('|');
+    if (groupQueryKey !== key) { clearGroupCaches(); groupQueryKey = key; }
+  }
+  function syncGroupByUI() {
+    const select = $('history-group-by');
+    if (!select) return;
+    const ownerOption = select.querySelector('option[value="owner"]');
+    if (ownerOption) {
+      ownerOption.disabled = !adminAllUsers();
+      ownerOption.title = adminAllUsers() ? '' : '点「查看全部用户」后可按账户拆组';
+    }
+    if (select.value !== currentGroupBy()) select.value = currentGroupBy();
+  }
   function setHistoryScope(scope, silent) {
     historyScope = ['all', 'big', 'small'].includes(scope) ? scope : 'all';
     document.querySelectorAll('#history-scope button').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.scope === historyScope);
     });
+    syncGroupByUI();
     if (!silent) refreshHistory();
   }
   document.querySelectorAll('#history-scope button').forEach(btn => {
@@ -1898,11 +1985,9 @@
   });
   const groupBySelect = $('history-group-by');
   if (groupBySelect) {
-    groupBySelect.value = historyGroupBy;
     groupBySelect.addEventListener('change', () => {
-      historyGroupBy = groupBySelect.value === 'batch' ? 'batch' : 'owner';
-      // 虚拟组 key 变了，旧的展开态/明细缓存/签名全部作废，否则会拿旧 key 去拉明细。
-      b.openGroups.clear(); b.groupDetails.clear(); b.groupSig.clear();
+      historyGroupBy[historyScope] = VALID_GROUP_BY.includes(groupBySelect.value)
+        ? groupBySelect.value : 'batch';
       refreshHistory();
     });
   }
@@ -1911,18 +1996,12 @@
     if (!App.state.user) return;
     // 不在历史页时不发请求：切回历史页时 switchView 会再调一次。
     if (!$('history-view').classList.contains('active-view')) return;
-    if (historyScope === 'small') {
-      $('history-groups').classList.add('hidden');
-      $('jobs-list').classList.add('hidden');
-      $('history-small').classList.remove('hidden');
-      b.historyMode = 'small';
-      await App.smallHistory('history').reload(scopeParam());
-      if (openId) App.openJob(openId);
-      return;
-    }
-    $('history-small').classList.add('hidden');
+    syncGroupByUI();
+    const groupBy = currentGroupBy();
+    const lane = laneParam();
+    syncGroupQuery(groupBy, lane);
     try {
-      const data = await api(`/api/history/groups?scope=${scopeParam()}&group_by=${encodeURIComponent(historyGroupBy)}`);
+      const data = await api(`/api/history/groups?scope=${scopeParam()}&group_by=${encodeURIComponent(groupBy)}&lane=${encodeURIComponent(lane)}`);
       b.groups = Array.isArray(data.groups) ? data.groups : [];
       b.emptyBatches = num(data.empty_batches);
       b.historyMode = 'groups';
@@ -1952,28 +2031,58 @@
   function renderGroups() {
     const root = $('history-groups');
     root.replaceChildren();
-    // 只看大批量时，把只有试跑记录的「未分组」整组隐掉。
-    const groups = historyScope === 'big'
-      ? b.groups.filter((group) => num(group.big_jobs, num(group.job_count)) > 0)
-      : b.groups;
+    // 后端已按 lane 过滤，这里不再二次剔除，否则「小批量」栏会把所有组误删。
+    const groups = b.groups;
     if (!groups.length) {
-      root.append(el('div', 'empty', historyScope === 'big'
+      const hint = historyScope === 'big'
         ? '还没有大批量任务。到「大批量生产」建一个批次试试。'
-        : '暂无任务记录。先去「小批量试跑」或「大批量生产」提交一次。'));
+        : historyScope === 'small'
+          ? '还没有试跑记录。到「小批量试跑」提交一次就会出现在这里。'
+          : '暂无任务记录。先去「小批量试跑」或「大批量生产」提交一次。';
+      root.append(el('div', 'empty', hint));
       return;
     }
     const fragment = document.createDocumentFragment();
-    if (num(b.emptyBatches)) {
+    // 空批次提示与小批量无关，别在试跑栏里冒出一句「另有 N 个批次」。
+    if (num(b.emptyBatches) && historyScope !== 'small') {
       fragment.append(el('p', 'muted history-empty-note',
         `另有 ${num(b.emptyBatches)} 个批次还没有生产记录，可在「大批量生产」里查看。`));
     }
     for (const group of groups) fragment.append(groupCard(group));
     root.append(fragment);
   }
+  function localDay(date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+  function dayGroupTitle(group) {
+    const day = txt(group.day);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return '日期未知 · 提交记录';
+    const today = new Date();
+    const yesterday = new Date(today.getTime() - 86400000);
+    const label = day === localDay(today) ? `今天 ${day}`
+      : day === localDay(yesterday) ? `昨天 ${day}` : day;
+    return `${label} · 提交记录`;
+  }
+  // 只有真实的大批量批次分组能整批下载：未分组 / 按账户 / 按日期都是虚拟组，
+  // 「小批量」栏本身也不含批次，一律不给按钮。
+  function canBatchDownload(group) {
+    return group.group_kind === 'batch' && !group.is_ungrouped
+      && laneParam() !== 'small' && num(group.success) > 0 && !!txt(group.key);
+  }
+  function batchDownloadBar(group) {
+    const bar = el('div', 'history-group-tools');
+    const btn = el('button', 'quiet btn-sm', '下载本批次全部视频（ZIP）');
+    btn.type = 'button';
+    btn.title = '按批次打包下载全部已出片视频；试跑与未分组任务不提供整批下载';
+    btn.addEventListener('click', () => downloadBatchZip(txt(group.key), btn));
+    bar.append(btn);
+    return bar;
+  }
   function groupCard(group) {
     const key = txt(group.key);
     const isUngrouped = key === '__ungrouped__' || group.is_ungrouped === true;
     const isOwnerGroup = group.group_kind === 'owner';
+    const isDayGroup = group.group_kind === 'day';
     const open = b.openGroups.has(key);
     const card = el('article', 'card history-group');
     card.dataset.key = key;
@@ -1981,9 +2090,11 @@
     head.type = 'button';
     head.setAttribute('aria-expanded', open ? 'true' : 'false');
     const titleWrap = el('div', 'history-group-title');
-    const title = isOwnerGroup
-      ? `${txt(group.owner) || '未知账户'} · 未分组试跑`
-      : (isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次'));
+    const title = isDayGroup
+      ? dayGroupTitle(group)
+      : isOwnerGroup
+        ? `${txt(group.owner) || '未知账户'} · 未分组试跑`
+        : (isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次'));
     titleWrap.append(el('b', null, title));
     // 数字统一按「记录条数」口径，与账户用量页一致；任务数单独标，不再混写。
     const parts = [`${num(group.total)} 条记录`, `成功 ${num(group.success)}`,
@@ -2014,7 +2125,7 @@
       if (!b.groupDetails.has(key)) await loadGroupDetail(key, false);
       else renderGroupBody(key, body);
     });
-    card.append(head, body);
+    card.append(...(canBatchDownload(group) ? [head, batchDownloadBar(group), body] : [head, body]));
     if (open) {
       renderGroupBody(key, body);
       if (!b.groupDetails.has(key)) loadGroupDetail(key, false);
@@ -2029,7 +2140,8 @@
   async function loadGroupDetail(key, silent) {
     const body = groupBody(key);
     try {
-      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=0&limit=${HISTORY_PAGE}${ownerParam()}`);
+      // scope 里已含 owner；lane 必须与列表同口径，否则「未分组」展开会混进另一通道的记录。
+      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=0&limit=${HISTORY_PAGE}&scope=${scopeParam()}&lane=${encodeURIComponent(laneParam())}`);
       b.groupDetails.set(key, {
         items: Array.isArray(data.items) ? data.items : [],
         total: num(data.total, (data.items || []).length),
@@ -2043,7 +2155,7 @@
   }
   async function loadMoreGroup(key, detail) {
     try {
-      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=${detail.items.length}&limit=${HISTORY_PAGE}${ownerParam()}`);
+      const data = await api(`/api/history/groups/${encodeURIComponent(key)}?offset=${detail.items.length}&limit=${HISTORY_PAGE}&scope=${scopeParam()}&lane=${encodeURIComponent(laneParam())}`);
       const more = Array.isArray(data.items) ? data.items : [];
       detail.items = detail.items.concat(more);
       detail.total = num(data.total, detail.items.length);
@@ -2246,9 +2358,9 @@
     const tid = txt(item.template_id);
     const batchLabel = batchNo && batchNo !== '未分组' ? ` · 批次 ${batchNo}` : '';
     c.title.textContent = `${name}（${tid}）${batchLabel}`;
-    // 按账户拆出来的 __ungrouped__:<owner> 是虚拟 key，不是批次 id，别拿去查批次图。
+    // 虚拟分组 key（未分组 / 按账户 / 按日期）都不是批次 id，别拿去查批次级定妆图。
     const gk = String(groupKey || '');
-    const batchId = gk && gk !== '__ungrouped__' && !gk.startsWith('__ungrouped__:') ? gk : '';
+    const batchId = gk && !gk.startsWith('__') ? gk : '';
     // 先把视频和覆盖层亮出来，图再异步补 —— 不让图片请求拖着整个对比层不出现。
     c.gen.src = txt(item.download_url);
     // 历史任务用的模板可能已被标记弃用：不带 allow_deprecated 会直接 404，
@@ -2289,6 +2401,8 @@
   /* ---------- 事件绑定与入口 ---------- */
   function bindEvents() {
     bindDropZone();
+    const dlAll = $('batch-download-all');
+    if (dlAll) dlAll.addEventListener('click', () => downloadBatchZip(txt(b.current && b.current.id), dlAll));
     // 追加细节图：锁定之后仍可用（只影响之后的生产）
     $('batch-slot-add').addEventListener('click', () => { $('batch-slot-file').value = ''; $('batch-slot-file').click(); });
     $('batch-slot-file').addEventListener('change', () => {

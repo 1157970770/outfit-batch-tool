@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261105j">
+  <link rel="stylesheet" href="/static/style.css?v=20261105l">
   <link rel="stylesheet" href="/static/tag-filter.css">
-  <link rel="stylesheet" href="/static/batch.css?v=20261105j">
+  <link rel="stylesheet" href="/static/batch.css?v=20261105l">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
-  <script defer src="/static/image-slots.js?v=20261105j"></script>
-  <script defer src="/static/app.js?v=20261105j"></script>
-  <script defer src="/static/batch.js?v=20261105j"></script>
+  <script defer src="/static/image-slots.js?v=20261105l"></script>
+  <script defer src="/static/app.js?v=20261105l"></script>
+  <script defer src="/static/batch.js?v=20261105l"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
 </head>
 <body>
@@ -312,6 +312,7 @@
             <p id="batch-produce-error" class="error hidden"></p>
             <div class="batch-items-head">
               <h3>清单条目</h3>
+              <button id="batch-download-all" class="quiet btn-sm batch-download-all hidden" type="button">下载整批视频（ZIP）</button>
               <label class="field batch-filter-field">状态<select id="batch-item-filter"><option value="all" selected>全部</option><option value="pending">待生产</option><option value="producing">生产中</option><option value="done">已完成</option><option value="failed">失败</option></select></label>
             </div>
             <div id="batch-item-list" class="batch-item-list"></div>
@@ -321,13 +322,9 @@
       </section>
 
       <section id="history-view" class="view">
-        <div class="section-head"><div><h1 id="jobs-heading">历史任务</h1><p class="muted">大批量按批次分组查看；小批量是独立列表，也可以直接到「小批量试跑 → 历史」里看。</p></div><div class="top-actions"><div class="segmented segmented-sm" id="history-scope" role="group" aria-label="历史范围"><button type="button" data-scope="all" class="active">全部</button><button type="button" data-scope="big">大批量</button><button type="button" data-scope="small">小批量</button></div><select id="owner-filter" class="quiet hidden" aria-label="按账户筛选"><option value="">全部账户</option></select><select id="history-group-by" class="quiet hidden" aria-label="分组方式"><option value="owner">按账户分组</option><option value="batch">按批次分组</option></select><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
+        <div class="section-head"><div><h1 id="jobs-heading">历史任务</h1><p class="muted">全部 / 大批量 / 小批量共用同一套分组；小批量默认按提交日期拆开，管理员看全部用户时可切按账户。</p></div><div class="top-actions"><div class="segmented segmented-sm" id="history-scope" role="group" aria-label="历史范围"><button type="button" data-scope="all" class="active">全部</button><button type="button" data-scope="big">大批量</button><button type="button" data-scope="small">小批量</button></div><select id="owner-filter" class="quiet hidden" aria-label="按账户筛选"><option value="">全部账户</option></select><select id="history-group-by" class="quiet" aria-label="分组方式"><option value="day">按日期分组</option><option value="owner">按账户分组</option><option value="batch">按批次分组</option></select><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
         <div id="history-groups" class="history-groups"></div>
         <div id="jobs-list" class="jobs-list hidden"><div class="empty">暂无任务。开始新建一个试试。</div></div>
-        <div id="history-small" class="hidden">
-          <div id="history-small-list" class="jobs-list small-history-list"></div>
-          <div class="batch-more"><button id="history-small-more" class="quiet hidden" type="button">加载更多</button></div>
-        </div>
         <article id="job-detail" class="card detail-card hidden"></article>
       </section>
 

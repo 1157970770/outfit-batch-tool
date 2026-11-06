@@ -224,8 +224,9 @@ web-data/
 | GET | `/api/jobs/<id>` `/api/jobs/<id>/files/...` | 登录（限本人） | 详情 / 成片、报告 CSV、ZIP |
 | POST | `/api/jobs/<id>/cancel` `/retry` | 登录（限本人） | 取消 / 只重试失败项 |
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
-| GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、lock、produce、retry-failed、close、zip |
-| GET | `/api/history/groups[/<key>]` | 登录 | 历史按批次分组 / 组内条目；分组带 `small_jobs`/`big_jobs` 用于分离试跑 |
+| GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、lock、produce、retry-failed、close |
+| GET | `/api/batches/<id>/files.zip[?probe=1]` | 登录（限本人） | 整批打包下载，**仅大批量且非试跑的批次**；按 runs 收集每一轮成功视频、按场景去重保留最新。`?probe=1` 只回 `{count,batch_no,download_url}` 不落盘，供前端先确认再触发原生下载 |
+| GET | `/api/history/groups[/<key>]` | 登录 | 历史分组 / 组内条目；`group_by=batch\|owner\|day`，`lane=small\|big` 按通道过滤；明细带 `scope` 保证与列表同口径 |
 | GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |
 | GET | `/api/admin/status` | admin | 服务状态、队列、额度、账号 |
 | GET | `/api/admin/usage` | admin | 按账户汇总 |

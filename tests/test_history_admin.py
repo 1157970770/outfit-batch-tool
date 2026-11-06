@@ -20,7 +20,7 @@ from _tmpdir import tempdir  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
 from app.web.auth import make_password  # noqa: E402
-from app.web.batches import BatchError, BatchManager  # noqa: E402
+from app.web.batches import BatchError, BatchManager, _day_key  # noqa: E402
 from app.web.jobs import JobManager  # noqa: E402
 from app.web.settings import load_settings  # noqa: E402
 
@@ -57,7 +57,8 @@ def write_job(settings, job: dict) -> None:
 
 
 def new_job(job_id: str, owner: str, records: list[dict], *, created_at: float,
-            batch_ref: str = "", templates=None, record_template: str = "") -> dict:
+            batch_ref: str = "", templates=None, record_template: str = "",
+            lane: str = "small") -> dict:
     recs = []
     for rec in records:
         item = dict(rec)
@@ -75,7 +76,7 @@ def new_job(job_id: str, owner: str, records: list[dict], *, created_at: float,
         "resolution": "720P", "duration": 7, "total": len(records), "done": len(records),
         "records": recs, "summary": None, "message": "", "out_dir": "", "log_tail": [],
         "cancel_requested": False, "batch_ref": batch_ref, "tags": {}, "style_no": "",
-        "lane": "small",
+        "lane": lane,
     }
 
 
@@ -190,6 +191,53 @@ def main() -> int:
         assert ordered[-1]["key"] == "batchOLD", ordered
         assert ordered[0]["key"].startswith("__ungrouped__:"), ordered
         print("  ✓ 排序：最新的未分组试跑排在老批次前面")
+
+        # ---------- 8. 通道过滤：三个范围栏共用分组接口，卡片与明细必须同口径
+        # 加一条大批量（挂在现存批次下）+ 一条前天的试跑，覆盖 small / big / 跨日期。
+        big_job = new_job("histBIG00001", "bob",
+                          [{"id": "101", "status": "success"},
+                           {"id": "102", "status": "running"}],
+                          created_at=now - 200, batch_ref="batchOLD", lane="big")
+        old_small = new_job("histOLD00001", "alice",
+                            [{"id": "103", "status": "success"}],
+                            created_at=now - 36 * 3600, lane="small")
+        for extra in (big_job, old_small):
+            write_job(settings, extra)
+            manager.jobs[extra["id"]] = extra
+
+        small_groups = batches.history_groups(admin, True, "", "batch", "small")
+        big_groups = batches.history_groups(admin, True, "", "batch", "big")
+        assert sum(row["total"] for row in small_groups) == 12, small_groups
+        assert sum(row["job_count"] for row in small_groups) == 4, small_groups
+        assert sum(row["total"] for row in big_groups) == 2, big_groups
+        assert sum(row["job_count"] for row in big_groups) == 1, big_groups
+        # 同一个 batchOLD 分组 key，明细必须跟着 lane 走，不能混进另一通道。
+        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "small")["total"] == 1
+        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "big")["total"] == 2
+        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "")["total"] == 3
+        print("  ✓ 通道过滤：小批量 / 大批量栏的分组与明细都只算各自通道")
+
+        # ---------- 9. 按日期分组：普通账号也能把平铺的试跑拆成可读分类
+        day_groups = batches.history_groups(admin, True, "", "day", "small")
+        assert day_groups and all(row["group_kind"] == "day" and row["is_ungrouped"]
+                                  and row["batch_no"] == "" for row in day_groups), day_groups
+        assert _day_key(now - 36 * 3600) in {row["day"] for row in day_groups}, day_groups
+        assert sum(row["total"] for row in day_groups) == 12, day_groups
+        for row in day_groups:
+            detail = batches.history_items(row["key"], admin, 0, 50, "", None, "small")
+            assert detail["total"] == row["total"], (row, detail["total"])
+            assert all(item["owner"] in ("alice", "bob") for item in detail["items"])
+            # 管理员切「只看我的任务」时，明细不能把别人的记录一起列出来。
+            assert batches.history_items(row["key"], admin, 0, 50, "", False, "small")["total"] == 0
+        print("  ✓ 按日期分组：卡片数字 = 明细条数，明细按 scope 隔离")
+
+        # ---------- 10. 小批量栏的分组方式切换：按账户 / 按批次 / 按日期都可用
+        owner_small = batches.history_groups(admin, True, "", "owner", "small")
+        keys = {row["key"] for row in owner_small}
+        assert {"__ungrouped__:alice", "__ungrouped__:bob"} <= keys, keys
+        assert sum(row["total"] for row in owner_small) == 12, owner_small
+        assert all(row["group_kind"] != "day" for row in owner_small)
+        print("  ✓ 分组方式切换：小批量栏三种维度都能拆，且都只含试跑")
     finally:
         manager.shutdown()
     print("  OK 管理员历史记录：状态口径 / 明细字段 / 指纹 / 权限 全部通过")

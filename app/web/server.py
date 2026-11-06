@@ -548,7 +548,7 @@ def make_handler(app: WebApplication):
                     return
                 parts = path.strip("/").split("/")
                 if len(parts) == 4 and parts[3] == "files.zip":
-                    return self._batch_zip(parts[2], user)
+                    return self._batch_zip(parts[2], urllib.parse.parse_qs(parsed.query), user)
                 if len(parts) == 3:
                     return self._batch_detail(parts[2], urllib.parse.parse_qs(parsed.query), user)
             if path == "/api/history/groups":
@@ -1135,13 +1135,31 @@ def make_handler(app: WebApplication):
                 return self._error(exc, exc.status)
             return self._json({"ok": True, "batch": batch, "items": items})
 
-        def _batch_zip(self, batch_id, user):
+        def _batch_zip(self, batch_id, query, user):
+            """整批下载。?probe=1 只回可下载数量，让前端先确认再触发原生下载，
+            免得后端报错时浏览器把一段 JSON 当成 zip 存下来。
+            """
             try:
-                path = app.batches.zip_path(batch_id, user)
+                info = app.batches.batch_videos(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            if str((query.get("probe", [""])[0] or "")).strip() == "1":
+                return self._json({
+                    "ok": True, "count": len(info["files"]),
+                    "batch_no": info["batch_no"],
+                    "download_url": (f"/api/batches/"
+                                     f"{urllib.parse.quote(info['id'])}/files.zip"),
+                })
+            if not info["files"]:
+                return self._error("暂时没有可下载的视频。", 404)
+            label = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", info["batch_no"]).strip("-")[:60]
+            try:
+                path = app.batches.zip_path(batch_id, user, info["files"])
             except BatchError as exc:
                 return self._error(exc, exc.status)
             try:
-                return self._send_file(path, "application/zip", f"batch-{batch_id}.zip")
+                return self._send_file(path, "application/zip",
+                                       f"{label or info['id']}.zip")
             finally:
                 _remove_quiet(path)
 
@@ -1153,7 +1171,10 @@ def make_handler(app: WebApplication):
                 return self._error("此操作需要管理员权限。", 403)
             owner = str((query.get("owner", [""])[0] or "")).strip()
             group_by = str((query.get("group_by", [""])[0] or "")).strip()
-            groups = app.batches.history_groups(user, all_users, owner, group_by)
+            lane = str((query.get("lane", [""])[0] or "")).strip().lower()
+            if lane not in ("small", "big"):
+                lane = ""
+            groups = app.batches.history_groups(user, all_users, owner, group_by, lane)
             # 空批次（还没有任何生产记录）不生成一个点不开的分组，只给个计数：
             # 否则「大批量生产」里 4 个批次、历史里只看到 1 个，会以为数据丢了。
             with app.batches.mutex:
@@ -1175,8 +1196,22 @@ def make_handler(app: WebApplication):
             except (TypeError, ValueError):
                 return self._error("分页参数无效。", 400)
             owner = str((query.get("owner", [""])[0] or "")).strip()
+            # 明细必须跟着列表的「只看我的 / 全部用户」走：管理员看自己时，
+            # 分组卡片只统计自己的 job，明细也要只列自己的，否则点开数字对不上。
+            scope = str((query.get("scope", [""])[0] or "")).strip()
+            all_users = None
+            if scope == "all":
+                if user.get("role") != "admin":
+                    return self._error("此操作需要管理员权限。", 403)
+                all_users = True
+            elif scope == "mine":
+                all_users = False
+            lane = str((query.get("lane", [""])[0] or "")).strip().lower()
+            if lane not in ("small", "big"):
+                lane = ""
             try:
-                result = app.batches.history_items(key, user, offset, limit, owner)
+                result = app.batches.history_items(key, user, offset, limit, owner,
+                                                   all_users, lane)
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, **result})
