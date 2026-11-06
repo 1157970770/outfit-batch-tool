@@ -64,6 +64,9 @@ web-data/
 web-data*/
 server/web.json
 
+# 运行区专用运维脚本（切换/回滚，含本机绝对路径，只存运行区本机）
+运维/
+
 # 配置文件备份（web.json / config.json 的历史副本，可能含明文 Key，只留本机）
 *.bak-*
 
