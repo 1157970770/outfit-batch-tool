@@ -21,8 +21,10 @@
     键 = 日期 + 账户；已存在的行比对后有变化才更新，缺的补建；
     建表自带的整行空白占位记录顺手清掉。
     同时维护「每日总消耗」汇总表（每天一行全账户合计：生产视频数量 /
-    消费金额 / 任务数 / 生产账户数），表不存在时自动创建；
-    --no-summary 可只写明细表。
+    消费金额 / 任务数 / 生产账户数）和「每日视频统计」表（日期 /
+    当日生产的视频总数 / 可用视频数量——最后一列是人工列，脚本只写前两列，
+    绝不覆盖），两张表不存在时都会自动创建；
+    --no-summary / --no-daily 可单独关掉对应的表。
 
 用法：
     python scripts/feishu_daily_report.py                    # 同步 D-3..今天（默认含当天，18:00 定时任务用）
@@ -74,6 +76,10 @@ DEFAULT_FIELD_NAMES = {"account": "账户", "date": "日期",
 SUMMARY_TABLE_NAME = "每日总消耗"
 SUMMARY_FIELD_NAMES = {"date": "日期", "count": "生产视频数量",
                        "cost": "消费金额", "jobs": "任务数", "accounts": "生产账户数"}
+# 质量统计表：脚本只填「当日生产的视频总数」，「可用视频数量」由人工填，回写时不碰
+DAILY_TABLE_NAME = "每日视频统计"
+DAILY_FIELD_NAMES = {"date": "日期", "count": "当日生产的视频总数",
+                     "available": "可用视频数量"}
 DEFAULT_DAYS = 4          # 默认窗口 D-3..D0（含今天，当日快照次日修正）
 LOCK_STALE_SECONDS = 6 * 3600
 BATCH_CHUNK = 200         # 批量写每批条数上限（飞书单批上限 1000，留余量）
@@ -100,6 +106,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--setup-fields", action="store_true", help="只建字段/清空行，不写数据")
     p.add_argument("--no-summary", action="store_true",
                    help="不同步「每日总消耗」汇总表（默认每次一起写）")
+    p.add_argument("--no-daily", action="store_true",
+                   help="不同步「每日视频统计」表（默认每次一起写）")
     p.add_argument("--dry-run", action="store_true", help="只打印聚合结果，不联网不写入")
     p.add_argument("--quiet", action="store_true", help="只写日志不打印（计划任务用）")
     return p.parse_args(argv)
@@ -634,6 +642,72 @@ def sync_summary(fs: Feishu, table_id: str, sums: dict[str, dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 质量统计表：脚本只填「当日生产的视频总数」，「可用视频数量」留给人工
+# ---------------------------------------------------------------------------
+
+def ensure_daily_table(fs: Feishu, name: str) -> tuple[str, str]:
+    """按名字找统计表，没有就建（自愈）；返回 (table_id, 说明或空串)。"""
+    for table in fs.list_tables():
+        if str(table.get("name") or "") == name:
+            return str(table.get("table_id") or ""), ""
+    fields = [
+        {"field_name": DAILY_FIELD_NAMES["date"], "type": 5,
+         "property": {"date_formatter": "yyyy/MM/dd"}},
+        {"field_name": DAILY_FIELD_NAMES["count"], "type": 2, "property": {"formatter": "0"}},
+        {"field_name": DAILY_FIELD_NAMES["available"], "type": 2, "property": {"formatter": "0"}},
+    ]
+    return fs.create_table(name, fields), f"新建统计表「{name}」"
+
+
+def sync_daily(fs: Feishu, table_id: str, sums: dict[str, dict]) -> dict:
+    """统计表 upsert（键 = 日期）：只写「日期 + 当日生产的视频总数」。
+
+    「可用视频数量」是人工列——更新时只发自己这两个字段（飞书是部分更新），
+    绝不覆盖；删除也极其保守：只删整行全空的占位行，带日期的行一律保留，
+    重复日期也不删（可能挂着人工数据）。
+    """
+    names = DAILY_FIELD_NAMES
+    by_date: dict[str, dict] = {}
+    empty_ids: list[str] = []
+    for item in fs.search_records(table_id):
+        record_id = str(item.get("record_id") or "")
+        fields = item.get("fields") or {}
+        ts = ts_value(fields.get(names["date"]))
+        if ts is None:
+            if not fields:                      # 整行全空 = 建表自带占位行
+                empty_ids.append(record_id)
+            continue                            # 有人工数据但没日期的行：保留
+        iso = ms_to_iso(ts)
+        if iso in by_date:
+            continue                            # 重复日期：保留原行，不再新建
+        by_date[iso] = {"record_id": record_id,
+                        "count": num_value(fields.get(names["count"]))}
+
+    creates: list[dict] = []
+    updates: list[dict] = []
+    skipped = 0
+    for iso in sorted(sums):
+        desired_count = int(sums[iso]["count"])
+        desired = {names["date"]: date_ms(iso), names["count"]: desired_count}
+        current = by_date.get(iso)
+        if current is None:
+            creates.append(desired)
+        elif current["count"] == desired_count:
+            skipped += 1
+        else:
+            updates.append({"record_id": current["record_id"], "fields": desired})
+
+    result = {"created": 0, "updated": 0, "skipped": skipped, "deleted": 0}
+    if creates:
+        result["created"] = fs.batch_create(creates, table_id)
+    if updates:
+        result["updated"] = fs.batch_update(updates, table_id)
+    if empty_ids:
+        result["deleted"] = fs.batch_delete(empty_ids, table_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 锁与日志：计划任务与手动执行可能撞车
 # ---------------------------------------------------------------------------
 
@@ -774,6 +848,7 @@ def main(argv: list[str] | None = None) -> int:
             if key in names and str(value or "").strip():
                 names[key] = str(value).strip()
     summary_name = str(cfg.get("summary_table_name") or "").strip() or SUMMARY_TABLE_NAME
+    daily_name = str(cfg.get("daily_table_name") or "").strip() or DAILY_TABLE_NAME
 
     if not acquire_lock(args):
         emit(args, "[锁] 已有实例在跑，本次跳过（默认回补三天，明天会自动补上）")
@@ -794,10 +869,15 @@ def main(argv: list[str] | None = None) -> int:
                     summary_id, note = ensure_summary_table(fs, summary_name)
                     if note:
                         emit(args, f"[汇总] {note}（{summary_id}）")
+                if not args.no_daily:
+                    daily_id, note = ensure_daily_table(fs, daily_name)
+                    if note:
+                        emit(args, f"[统计] {note}（{daily_id}）")
                 return 0
             result = sync_rows(fs, names, rows)
             emit(args, f"[同步] 新建 {result['created']} / 更新 {result['updated']} / "
                        f"无变化 {result['skipped']} / 清空行 {result['deleted']}")
+            sums = summarize(rows)
             if not args.no_summary:
                 summary_id, note = ensure_summary_table(fs, summary_name)
                 if not summary_id:
@@ -805,9 +885,19 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     if note:
                         emit(args, f"[汇总] {note}（{summary_id}）")
-                    sresult = sync_summary(fs, summary_id, summarize(rows))
+                    sresult = sync_summary(fs, summary_id, sums)
                     emit(args, f"[汇总] 新建 {sresult['created']} / 更新 {sresult['updated']} / "
                                f"无变化 {sresult['skipped']} / 清空行 {sresult['deleted']}")
+            if not args.no_daily:
+                daily_id, note = ensure_daily_table(fs, daily_name)
+                if not daily_id:
+                    emit(args, "[统计] 统计表创建失败（table_id 为空），本次跳过")
+                else:
+                    if note:
+                        emit(args, f"[统计] {note}（{daily_id}）")
+                    dresult = sync_daily(fs, daily_id, sums)
+                    emit(args, f"[统计] 新建 {dresult['created']} / 更新 {dresult['updated']} / "
+                               f"无变化 {dresult['skipped']} / 清空行 {dresult['deleted']}")
             return 0
         except FeishuError as exc:
             emit(args, f"[失败] {exc}")
