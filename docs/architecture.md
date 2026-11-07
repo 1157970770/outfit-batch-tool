@@ -82,6 +82,7 @@ POST /api/batches                 建草稿（批次号唯一、绑图、提示�
 POST /api/batches/<id>/image       草稿态整组重设（换定妆图/重新选 1+9 张）
 POST /api/batches/<id>/images      op=add 追加细节图 / op=remove 删细节图（锁定后仍可用；主图不可删）
 POST /api/batches/<id>/candidates 按标签筛选 → 命中清单（写入 items，状态 pending）
+                                   body: tag_filters（包含）/ tag_excludes（排除）/ hide_used / rating_min / sort
 POST /api/batches/<id>/lock       锁定这批清单；之后可反复生产
 POST /api/batches/<id>/produce    取前 N 条 pending → JobManager.create(batch_ref=...)
                                   一个批次可以跑多轮，直到 pending 耗尽
@@ -216,6 +217,23 @@ web-data/
 - 前端：批次候选行挂「已用·批次号」徽标，锁定清单时弹确认；第 2 步候选工具栏有
   「隐藏已用」开关（服务端筛，非本地过滤），候选被筛空时提示关掉开关可看全部；
   小批量下拉选项尾部加「【已用】」，提交时弹确认。
+
+### 5.4 标签包含 / 排除条件
+
+候选与锁定都接受两个独立参数，形状相同：`{ "<分类>": ["<标签>", ...] }`。
+
+- `tag_filters`（包含，原有语义）：同一分类内命中任一标签即可（OR），不同分类必须同时满足（AND）。
+- `tag_excludes`（排除，黑名单）：模板只要命中**任一**排除标签就剔除，**不再按分类分组**；
+  与 `tag_filters` 相互独立，两个都给时先按包含筛、再按排除剔，
+  同一标签同时出现在两边时**排除优先**（黑名单永远赢）。
+- 校验：未知分类、分类下不存在的标签、值不是列表都返回 400（`TemplateError` 文案透传），
+  不会静默失效——写错标签时宁可报错也不要给出一个看似正常的候选集。
+- 响应 `exclude_skipped`：被排除条件额外剔掉的条数（仅提示用，`filtered_total` 已是筛后口径）；
+  没有排除条件时为 0。
+- 锁定（`POST /api/batches/<id>/lock`）会把当时的 `tag_filters` / `tag_excludes` 快照存进批次，
+  详情接口原样返回，用于复盘「这批是怎么选出来的」。老批次没有 `tag_excludes` 字段，按空处理。
+- 前端（`app/web/static/batch.js`）：标签 chip 三态循环 不选 → 包含（✓）→ 排除（✕ 划线）→ 不选；
+  改动后自动重新拉候选，候选被排空时优先提示是排除条件筛掉的。
 
 ## 7. HTTP 接口
 

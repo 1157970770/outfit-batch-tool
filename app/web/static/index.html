@@ -203,12 +203,12 @@
           </article>
 
           <article class="card batch-panel hidden" id="batch-step-b">
-            <div class="step-title"><span class="step">2</span><div><h2>筛选候选</h2><p>点卡片即选中并在右侧播放；同一类别内满足任一标签，不同类别之间同时满足。</p></div></div>
+            <div class="step-title"><span class="step">2</span><div><h2>筛选候选</h2><p>点卡片即选中并在右侧播放；同一类别内满足任一标签，不同类别之间同时满足。标「✕」的是排除标签，命中的模板不会进候选。</p></div></div>
             <div id="batch-tag-card" class="tag-filter-card hidden">
               <div id="batch-tag-groups" class="tag-filter-groups"></div>
               <div class="tag-filter-footer">
                 <button id="batch-clear-tags" class="quiet" type="button">清除筛选</button>
-                <span class="muted batch-tag-hint">改完标签筛选会自动重新匹配候选。</span>
+                <span class="muted batch-tag-hint">点标签循环切换：包含 → 排除（划线）→ 取消；改完自动重新匹配候选。</span>
               </div>
             </div>
             <div class="batch-cand-toolbar">

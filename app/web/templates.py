@@ -464,17 +464,21 @@ class TemplateCatalog:
                  "ready": bool(t.get("url") or t.get("key")),
                  "upload_state": str(t.get("upload_state") or "")} for t in self.items]
 
-    def filter_items(self, tag_filters: dict | None = None) -> list[dict]:
-        if not tag_filters:
-            return list(self.items)
-        if not isinstance(tag_filters, dict):
-            raise TemplateError("标签筛选条件格式无效")
-        selected = {}
-        for category, values in tag_filters.items():
+    def _normalize_tag_selection(self, raw: dict | None, *, what: str) -> dict[str, set[str]]:
+        """把 {分类: [标签]} 校验成 {分类: set(标签)}，空分类忽略。
+
+        what 只用于错误文案：包含条件报「筛选」，排除条件报「排除」。
+        """
+        if not raw:
+            return {}
+        if not isinstance(raw, dict):
+            raise TemplateError(f"标签{what}条件格式无效")
+        selected: dict[str, set[str]] = {}
+        for category, values in raw.items():
             if category not in self.tag_categories:
                 raise TemplateError(f"未知标签分类：{category}")
             if not isinstance(values, (list, tuple)):
-                raise TemplateError(f"{category} 筛选必须为标签列表")
+                raise TemplateError(f"{category} {what}必须为标签列表")
             values = list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
             if not values:
                 continue
@@ -483,18 +487,37 @@ class TemplateCatalog:
             if unknown:
                 raise TemplateError(f"{category} 中不存在标签：{unknown[0]}")
             selected[category] = set(values)
-        if not selected:
+        return selected
+
+    @staticmethod
+    def _matches_include(item: dict, selected: dict[str, set[str]]) -> bool:
+        """包含条件：同一大类内命中任一标签即可（OR），跨大类必须全部命中（AND）。"""
+        item_cats = item.get("tag_categories", {})
+        for category, values in selected.items():
+            if not any(tag in values and item_cats.get(tag) == category for tag in item.get("tags", [])):
+                return False
+        return True
+
+    def filter_items(self, tag_filters: dict | None = None,
+                     tag_excludes: dict | None = None) -> list[dict]:
+        """按标签筛选候选。
+
+        - tag_filters：同类 OR、跨类 AND（原有语义）；
+        - tag_excludes：黑名单。模板只要命中**任一**排除标签就剔除，不再分大类；
+          同一标签同时出现在包含与排除里时，排除优先（黑名单永远赢）。
+        """
+        include = self._normalize_tag_selection(tag_filters, what="筛选")
+        exclude = self._normalize_tag_selection(tag_excludes, what="排除")
+        if not include and not exclude:
             return list(self.items)
+        excluded_tags = set().union(*exclude.values()) if exclude else set()
         result = []
         for item in self.items:
-            item_cats = item.get("tag_categories", {})
-            keep = True
-            for category, values in selected.items():
-                if not any(tag in values and item_cats.get(tag) == category for tag in item.get("tags", [])):
-                    keep = False
-                    break
-            if keep:
-                result.append(item)
+            if excluded_tags and set(item.get("tags") or []) & excluded_tags:
+                continue
+            if include and not self._matches_include(item, include):
+                continue
+            result.append(item)
         return result
 
     def choose(self, mode: str, count: int = 1, template_id: str = "", max_items: int = 20,

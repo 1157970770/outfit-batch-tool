@@ -536,7 +536,8 @@ class BatchManager:
         with self.mutex:
             data = {key: batch.get(key) for key in (
                 "id", "batch_no", "title", "owner", "state", "image_upload_id", "image_name",
-                "prompt_id", "prompt", "resolution", "duration", "tag_filters", "style_no", "tags",
+                "prompt_id", "prompt", "resolution", "duration", "tag_filters", "tag_excludes",
+                "style_no", "tags",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
                 "created_at", "updated_at", "locked_at", "closed_at")}
             # image_url 语义固定为「主图（定妆图）」，老前端/历史对比层靠它，不能改。
@@ -660,7 +661,7 @@ class BatchManager:
                 "image_name": (slots[0]["name"] if slots else ""),
                 "prompt_id": prompt_id, "prompt": prompt,
                 "resolution": resolution, "duration": duration,
-                "tag_filters": {},
+                "tag_filters": {}, "tag_excludes": {},
                 "items": [], "runs": [],
                 "active_job_id": "",
                 "total_items": 0, "done": 0, "failed": 0, "pending": 0, "producing": 0,
@@ -742,6 +743,10 @@ class BatchManager:
         tag_filters = data.get("tag_filters") or {}
         if not isinstance(tag_filters, dict):
             raise BatchError("标签筛选条件格式无效。")
+        # 排除标签：黑名单，模板命中任一排除标签就不进候选（与包含条件相互独立）。
+        tag_excludes = data.get("tag_excludes") or {}
+        if not isinstance(tag_excludes, dict):
+            raise BatchError("排除标签条件格式无效。")
         limit = _as_int(data.get("limit"), 500) or 500
         if not 1 <= limit <= 1000:
             raise BatchError("limit 需要 1–1000。")
@@ -763,9 +768,13 @@ class BatchManager:
             out_seconds = self.output_seconds_of(batch)
         catalog = self._catalog()
         try:
-            matched = catalog.filter_items(tag_filters)
+            matched = catalog.filter_items(tag_filters, tag_excludes)
         except TemplateError as exc:
             raise BatchError(str(exc)) from None
+        # 排除标签筛掉多少条：只用于说明「候选为什么变少」，量级是内存里几百条，重复算一次不心疼。
+        exclude_skipped = 0
+        if any(tag_excludes.values()):
+            exclude_skipped = max(0, len(catalog.filter_items(tag_filters)) - len(matched))
         used_skipped = 0
         if hide_used:
             used_ids = set(self.usage.used(self._usage_style(batch)))
@@ -796,6 +805,7 @@ class BatchManager:
             "ready_count": ready_count,
             "hide_used": hide_used,
             "used_skipped": used_skipped,
+            "exclude_skipped": exclude_skipped,
             "cost_estimate": self._money_view(user, self.estimate(matched[:limit], resolution, out_seconds)),
         }
 
@@ -828,6 +838,9 @@ class BatchManager:
             } for item in templates]
             batch["tag_filters"] = dict(data.get("tag_filters") or {}) if isinstance(
                 data.get("tag_filters"), dict) else {}
+            # 排除标签也进快照：锁定后回看批次时要知道这份清单是按什么黑名单筛出来的。
+            batch["tag_excludes"] = dict(data.get("tag_excludes") or {}) if isinstance(
+                data.get("tag_excludes"), dict) else {}
             batch["state"] = "locked"
             batch["locked_at"] = time.time()
             batch["updated_at"] = batch["locked_at"]

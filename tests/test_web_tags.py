@@ -94,6 +94,28 @@ def main() -> int:
     # 同类别 OR / 跨类别 AND
     assert [i["id"] for i in catalog.filter_items({"景别": ["近景", "中远景"], "适合季节": ["适合秋冬"]})] == ["001", "002"]
     assert [i["id"] for i in catalog.filter_items({"景别": ["近景"], "适合季节": ["适合秋冬"]})] == ["001"]
+
+    # 排除标签（黑名单）：命中任一即剔除，跨类别也是「任一命中」
+    assert [i["id"] for i in catalog.filter_items(tag_excludes={"景别": ["近景"]})] == ["002"]
+    assert [i["id"] for i in catalog.filter_items(tag_excludes={"适合季节": ["适合秋冬"]})] == ["003"]
+    # 包含与排除叠加：先包含、再排除；同一标签同时出现时排除优先（黑名单永远赢）
+    assert [i["id"] for i in catalog.filter_items(
+        {"适合季节": ["适合秋冬"]}, {"景别": ["近景"]})] == ["002"]
+    assert [i["id"] for i in catalog.filter_items(
+        {"适合季节": ["适合秋冬"]}, {"景别": ["中远景"]})] == ["001"]
+    assert catalog.filter_items({"景别": ["近景"]}, {"景别": ["近景"]}) == []
+    # 空排除 / None 不改变结果
+    assert [i["id"] for i in catalog.filter_items(tag_excludes={})] == ["001", "002", "003"]
+    assert [i["id"] for i in catalog.filter_items(tag_excludes={"景别": []})] == ["001", "002", "003"]
+    # 排除条件同样要校验：未知标签 / 未知分类 / 结构不对都要报错，不能静默失效
+    for bad in ({"景别": ["不存在的标签"]}, {"不存在的分类": ["近景"]}, {"景别": "近景"}):
+        try:
+            catalog.filter_items(tag_excludes=bad)
+        except TemplateError:
+            pass
+        else:
+            raise AssertionError(f"非法排除条件必须报错：{bad}")
+
     # 手选必须服从筛选
     try:
         catalog.choose("selected", template_id="002", tag_filters={"景别": ["近景"]})

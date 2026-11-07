@@ -129,8 +129,10 @@ def build_rows() -> list[list]:
     for index in range(1, READY_COUNT + 2):          # 001–051，其中 051 未上传云端
         template_id = f"{index:03d}"
         name = f"{index:04d}.mp4"
+        # 051 单独给一组标签，用来验证「排除标签」能真的把某条候选剔掉。
+        tags = "近景;适合秋冬" if index <= READY_COUNT else "中远景;适合春夏"
         rows.append([template_id, f"input/tpl/{name}", name, TEMPLATE_SECONDS, 12.0,
-                     f"fp{template_id}", "近景;适合秋冬", "已上传" if index <= READY_COUNT else "待上传"])
+                     f"fp{template_id}", tags, "已上传" if index <= READY_COUNT else "待上传"])
     # 没打标签 = 废弃素材：不进候选集
     rows.append(["052", "input/tpl/0052.mp4", "0052.mp4", 1.5, 12.0, "fp052", "", "待上传"])
     rows.append(["053", "input/tpl/0053.mp4", "0053.mp4", 1.5, 12.0, "fp053", "", "待上传"])
@@ -350,6 +352,34 @@ def main() -> int:
         admin_estimate = body(admin_cands)["cost_estimate"]
         assert admin_estimate["unit_price"] == UNIT_PRICE and admin_estimate["price_source"] == "default", admin_estimate
         assert abs(admin_estimate["amount"] - 51 * (TEMPLATE_SECONDS + 7) * UNIT_PRICE) < 0.05, admin_estimate
+
+        # 排除标签（黑名单）：命中任一排除标签即剔除，优先于包含条件
+        code, _, excl = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                             {"tag_filters": {}, "tag_excludes": {"景别": ["中远景"]}, "limit": 1000})
+        assert code == 200, (code, excl)
+        excl_payload = body(excl)
+        excl_ids = [item["id"] for item in excl_payload["items"]]
+        assert "051" not in excl_ids, "排除中远景应剔掉 051"
+        assert len(excl_ids) == READY_COUNT, len(excl_ids)
+        assert excl_payload["exclude_skipped"] == 1, excl_payload["exclude_skipped"]
+        assert excl_payload["filtered_total"] == READY_COUNT, excl_payload["filtered_total"]
+        code, _, excl2 = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                              {"tag_filters": {}, "tag_excludes": {"景别": ["近景"]}, "limit": 1000})
+        assert code == 200, (code, excl2)
+        assert [item["id"] for item in body(excl2)["items"]] == ["051"], body(excl2)["items"]
+        assert body(excl2)["exclude_skipped"] == READY_COUNT, body(excl2)["exclude_skipped"]
+        # 包含与排除叠加：秋冬全中，但排除近景后只剩 051（051 是 适合春夏，不在秋冬里）
+        code, _, excl3 = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                              {"tag_filters": {"景别": ["近景"]},
+                               "tag_excludes": {"景别": ["近景"]}, "limit": 1000})
+        assert code == 200 and body(excl3)["items"] == [], "同一标签同时包含与排除：排除优先"
+        code, _, bad_excl = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                                 {"tag_filters": {}, "tag_excludes": {"景别": ["不存在的标签"]}})
+        assert code == 400, (code, bad_excl)
+        code, _, bad_excl2 = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                                  {"tag_filters": {}, "tag_excludes": {"不存在的分类": ["近景"]}})
+        assert code == 400, (code, bad_excl2)
+        print("  ✓ 排除标签：命中即剔除、计数 exclude_skipped、包含与排除叠加时排除优先、未知标签 400")
         code, _, bad = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
                             {"tag_filters": {"景别": ["不存在的标签"]}})
         assert code == 400, (code, bad)
@@ -362,16 +392,20 @@ def main() -> int:
         assert code == 400, (code, locked)                    # 含未上云模板必须拦下
         assert "云端" in body(locked)["error"], locked
         code, _, locked = call(alice, base, f"/api/batches/{batch_id}/lock", "POST",
-                               {"template_ids": ready_ids + ready_ids[:3], "confirmed": True})
+                               {"template_ids": ready_ids + ready_ids[:3],
+                                "tag_excludes": {"景别": ["中远景"]}, "confirmed": True})
         assert code == 200, (code, locked)
         batch = body(locked)["batch"]
         assert batch["state"] == "locked" and batch["total_items"] == READY_COUNT, batch
         assert batch["pending"] == READY_COUNT, batch
+        assert batch["tag_excludes"] == {"景别": ["中远景"]}, batch["tag_excludes"]
         code, _, again = call(alice, base, f"/api/batches/{batch_id}/lock", "POST",
                               {"template_ids": ready_ids, "confirmed": True})
         assert code == 409, (code, again)
         code, _, locked_detail = call(alice, base, f"/api/batches/{batch_id}")
-        locked_estimate = body(locked_detail)["batch"]["cost_estimate"]
+        locked_batch = body(locked_detail)["batch"]
+        locked_estimate = locked_batch["cost_estimate"]
+        assert locked_batch["tag_excludes"] == {"景别": ["中远景"]}, locked_batch["tag_excludes"]
         assert locked_estimate["count"] == READY_COUNT, locked_estimate
         assert "amount" not in locked_estimate, locked_estimate   # P1-5：alice 非 admin 不回金额
         code, _, swap = call(alice, base, f"/api/batches/{batch_id}/image", "POST", {"upload_id": upload_id})

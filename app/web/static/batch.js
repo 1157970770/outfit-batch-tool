@@ -45,10 +45,12 @@
     // 隐藏已用：本款号在之前批次里生产过的模板不进候选（服务端按款号-模板账本筛）。
     // usedSkipped 是这次被筛掉的条数，只用于提示，不参与筛选判断。
     hideUsed: false, usedSkipped: 0,
+    // 排除标签：服务端黑名单筛掉的条数，只用于提示（标签面板的三态才是条件本身）。
+    excludeSkipped: 0,
     candTagFilter: new Set(), onlySelected: false, candPage: 1, candPageItems: [], candPageBackup: 0,
     // 每页条数由 candCapacity() 实测写入（列数 × 行数，保底 CAND_PAGE_MIN），页面尺寸变了就重算
     candPageSize: CAND_PAGE_MIN, candObserver: null,
-    tagFilters: {}, tagPanelOpen: false, formOpen: true,
+    tagFilters: {}, tagExcludes: {}, tagPanelOpen: false, formOpen: true,
     previewId: '', resizeRaf: 0,
     itemFilter: 'all', itemLimit: ITEM_PAGE, itemsSignature: '',
     busy: false, pollTimer: null, activeJob: null,
@@ -523,6 +525,21 @@
   }
 
   /* ---------- 步骤 B：标签筛选与候选 ---------- */
+  /* 每个标签三态循环：不选 → 包含（同色描边）→ 排除（红色划线）→ 不选。
+     包含沿用原来的「同类 OR、跨类 AND」；排除是黑名单，命中任一排除标签即剔除。 */
+  const TAG_STATE_NEXT = { '': 'include', include: 'exclude', exclude: '' };
+  const TAG_STATE_MARK = { '': '', include: '✓', exclude: '✕' };
+  function tagStateOf(category, tag) {
+    if ((b.tagExcludes[category] || []).includes(tag)) return 'exclude';
+    if ((b.tagFilters[category] || []).includes(tag)) return 'include';
+    return '';
+  }
+  function paintTagChip(chip, state) {
+    chip.dataset.state = state;
+    chip.setAttribute('aria-pressed', state ? 'true' : 'false');
+    const mark = chip.querySelector('.tag-filter-mark');
+    if (mark) mark.textContent = TAG_STATE_MARK[state] || '';
+  }
   function renderBatchTagFilters() {
     const root = $('batch-tag-groups');
     if (!root) return;
@@ -543,34 +560,42 @@
       group.append(el('legend', null, category));
       const wrap = el('div', 'tag-filter-options');
       for (const tag of tags) {
-        const label = el('label', 'tag-filter-option');
-        const input = document.createElement('input');
-        input.type = 'checkbox';
-        input.className = 'batch-tag-input';
-        input.dataset.category = category;
-        input.value = tag;
-        input.checked = (b.tagFilters[category] || []).includes(tag);
-        input.addEventListener('change', () => {
-          b.tagFilters = collectBatchTagFilters();
+        // 用 button 而不是 checkbox：三态（包含/排除/取消）用 data-state 表达，点击即循环。
+        const chip = el('button', 'tag-filter-option');
+        chip.type = 'button';
+        chip.dataset.category = category;
+        chip.dataset.tag = tag;
+        chip.title = `${category} · ${tag}\n点击切换：包含 → 排除 → 取消`;
+        chip.append(el('span', 'tag-filter-mark', ''), el('span', null, tag));
+        paintTagChip(chip, tagStateOf(category, tag));
+        chip.addEventListener('click', () => {
+          paintTagChip(chip, TAG_STATE_NEXT[chip.dataset.state] || '');
+          const picked = collectBatchTagSelection();
+          b.tagFilters = picked.filters;
+          b.tagExcludes = picked.excludes;
           scheduleCandidatesRefresh();
         });
-        label.append(input, el('span', null, tag));
-        wrap.append(label);
+        wrap.append(chip);
       }
       group.append(wrap);
       root.append(group);
     }
   }
-  function collectBatchTagFilters() {
+  function collectBatchTagSelection() {
     const filters = {};
-    document.querySelectorAll('#batch-tag-groups .batch-tag-input:checked').forEach((input) => {
-      (filters[input.dataset.category] || (filters[input.dataset.category] = [])).push(input.value);
+    const excludes = {};
+    document.querySelectorAll('#batch-tag-groups .tag-filter-option').forEach((chip) => {
+      const state = chip.dataset.state;
+      if (state !== 'include' && state !== 'exclude') return;
+      const bucket = state === 'include' ? filters : excludes;
+      const category = chip.dataset.category;
+      (bucket[category] || (bucket[category] = [])).push(chip.dataset.tag);
     });
-    return filters;
+    return { filters, excludes };
   }
   function syncTagInputs() {
-    document.querySelectorAll('#batch-tag-groups .batch-tag-input').forEach((input) => {
-      input.checked = (b.tagFilters[input.dataset.category] || []).includes(input.value);
+    document.querySelectorAll('#batch-tag-groups .tag-filter-option').forEach((chip) => {
+      paintTagChip(chip, tagStateOf(chip.dataset.category, chip.dataset.tag));
     });
   }
   // 标签面板开合：收起时只留工具条上的按钮，候选区就能多吃几行。
@@ -622,7 +647,9 @@
     if (!batch || !batch.id) return;
     await refreshStyleUsed(batch);   // 先查该款号已用模板，候选行才能挂「已用」标记
     const btn = $('batch-candidates-btn');   // 按钮已移除，保留空值兜底以兼容旧调用点
-    b.tagFilters = collectBatchTagFilters();
+    const picked = collectBatchTagSelection();
+    b.tagFilters = picked.filters;
+    b.tagExcludes = picked.excludes;
     if (btn) { btn.disabled = true; btn.textContent = '正在筛选…'; }
     $('batch-tag-summary').textContent = '正在匹配候选…';
     try {
@@ -630,6 +657,7 @@
         method: 'POST',
         body: JSON.stringify({
           tag_filters: b.tagFilters,
+          tag_excludes: b.tagExcludes,
           limit: CAND_FETCH_LIMIT,
           rating_min: b.candRatingMin,
           sort: b.candSort,
@@ -649,6 +677,8 @@
       b.candReady = num(data.ready_count, b.candidates.filter((item) => item.ready).length);
       // 服务端按款号-模板账本筛掉的条数：只用于说清「为什么候选变少了」
       b.usedSkipped = num(data.used_skipped);
+      // 排除标签筛掉的条数：同样只用于提示，候选本身已经不含被排除的模板。
+      b.excludeSkipped = num(data.exclude_skipped);
       // 默认不选中任何项：分页后「已选 480」与第一页可见的 50 张极易混淆，
       // 用户若误以为 480 是本页数量，锁定后连点几次「生产 100」会意外产生数千元费用。
       // 想全做就点一次「全选全部 N 条」，多一步换来不会误操作。
@@ -661,8 +691,11 @@
       const matched = b.candTotal || b.candidates.length;
       // 「隐藏已用」筛掉多少条要说出来，否则用户只会觉得候选突然变少了
       const skipped = b.hideUsed && b.usedSkipped ? ` · 已隐藏 ${b.usedSkipped} 条本款号用过的` : '';
-      $('batch-tag-summary').textContent = `匹配 ${matched} 个场景 · 可生产 ${b.candReady} 个${skipped}`;
-      if (!b.candidates.length && b.hideUsed && b.usedSkipped) {
+      const excluded = b.excludeSkipped ? ` · 排除标签筛掉 ${b.excludeSkipped} 条` : '';
+      $('batch-tag-summary').textContent = `匹配 ${matched} 个场景 · 可生产 ${b.candReady} 个${excluded}${skipped}`;
+      if (!b.candidates.length && b.excludeSkipped) {
+        showCandNote(`排除标签筛掉了 ${b.excludeSkipped} 条候选，没有剩余结果；放宽排除条件再试。`);
+      } else if (!b.candidates.length && b.hideUsed && b.usedSkipped) {
         showCandNote(`本款号的模板已经用完了：筛掉 ${b.usedSkipped} 条用过的之后没有剩余候选；关掉「隐藏已用」可以看全部。`);
       } else if (b.candidates.length < matched) {
         showCandNote(`服务端只返回了前 ${b.candidates.length} 条候选（共 ${matched} 条），分页只覆盖返回的这批，请再用标签收窄范围。`);
@@ -674,9 +707,11 @@
       renderCandChips();
       renderCandidates();
       if (!b.candidates.length) {
-        toast(b.hideUsed && b.usedSkipped
-          ? `本款号能用的模板已经用完了（筛掉 ${b.usedSkipped} 条用过的）；关掉「隐藏已用」可以看全部。`
-          : '当前筛选没有匹配的场景，换一组标签试试。');
+        toast(b.excludeSkipped
+          ? `排除标签筛掉了 ${b.excludeSkipped} 条候选，没有剩余结果；放宽排除条件再试。`
+          : b.hideUsed && b.usedSkipped
+            ? `本款号能用的模板已经用完了（筛掉 ${b.usedSkipped} 条用过的）；关掉「隐藏已用」可以看全部。`
+            : '当前筛选没有匹配的场景，换一组标签试试。');
       }
     } catch (err) {
       b.candidates = [];
@@ -1134,7 +1169,9 @@
     try {
       await api(`/api/batches/${encodeURIComponent(batch.id)}/lock`, {
         method: 'POST',
-        body: JSON.stringify({ template_ids: ids, tag_filters: b.tagFilters, confirmed: true }),
+        body: JSON.stringify({
+          template_ids: ids, tag_filters: b.tagFilters, tag_excludes: b.tagExcludes, confirmed: true,
+        }),
       });
       toast(`已锁定 ${ids.length} 条清单，可以开始分批生产。`);
       await refreshBatch(false);
@@ -1231,10 +1268,19 @@
     const durationValue = batch.duration === null || batch.duration === undefined
       ? BATCH_DURATION_PARAM : num(batch.duration, BATCH_DURATION_PARAM);
     const prompt = txt(batch.prompt);
-    const filters = batch.tag_filters && typeof batch.tag_filters === 'object' ? batch.tag_filters : null;
-    const filterText = filters
-      ? Object.entries(filters).map(([category, values]) => `${category}: ${Array.isArray(values) ? values.join('/') : txt(values)}`).join('；')
-      : '';
+    // 标签快照：包含条件与原格式一致；有排除条件时追加「排除 …」，
+    // 老批次没有 tag_excludes 字段（undefined），不会多出一段。
+    const tagText = (raw) => {
+      if (!raw || typeof raw !== 'object') return '';
+      return Object.entries(raw)
+        .filter(([, values]) => (Array.isArray(values) ? values.length : Boolean(values)))
+        .map(([category, values]) => `${category}: ${Array.isArray(values) ? values.join('/') : txt(values)}`)
+        .join('；');
+    };
+    const includeText = tagText(batch.tag_filters);
+    const excludeText = tagText(batch.tag_excludes);
+    const filterText = [includeText ? `包含 ${includeText}` : '',
+                        excludeText ? `排除 ${excludeText}` : ''].filter(Boolean).join(' · ');
     const rows = [
       ['批次号', txt(batch.batch_no) || '—'],
       ['状态', BATCH_STATE_TEXT[txt(batch.state)] || txt(batch.state) || '—'],
@@ -1966,6 +2012,8 @@
     if (b.current && (txt(b.current.state) || 'draft') === 'draft') {
       const snapshot = b.current.tag_filters;
       b.tagFilters = snapshot && typeof snapshot === 'object' ? snapshot : {};
+      const excluded = b.current.tag_excludes;
+      b.tagExcludes = excluded && typeof excluded === 'object' ? excluded : {};
       syncTagInputs();
       await fetchCandidates();
     }
@@ -2565,8 +2613,12 @@
     $('batch-prompt-body').addEventListener('input', updateBatchPromptCount);
     $('batch-tag-toggle').addEventListener('click', toggleTagPanel);
     $('batch-clear-tags').addEventListener('click', () => {
-      document.querySelectorAll('#batch-tag-groups .batch-tag-input').forEach((input) => { input.checked = false; });
+      document.querySelectorAll('#batch-tag-groups .tag-filter-option').forEach((chip) => {
+        paintTagChip(chip, '');
+      });
       b.tagFilters = {};
+      b.tagExcludes = {};
+      b.excludeSkipped = 0;
       scheduleCandidatesRefresh();
     });
     // 三个全选按钮 —— 已选集合跨页累计，「本页」的改动绝不碰其它页。
