@@ -299,6 +299,17 @@ textarea {
 .view { display: none; }
 .view.active-view { display: block; }
 
+/* 素材检索：内嵌 192.168.10.179:8700 的独立工具，占满一屏高度，边框与卡片一致 */
+.material-frame-wrap {
+  height: max(420px, calc(100dvh - 224px));
+  margin: 0 0 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  overflow: hidden;
+}
+.material-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--paper); }
+
 .section-head {
   display: flex;
   align-items: flex-start;

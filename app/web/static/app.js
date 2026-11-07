@@ -68,6 +68,18 @@
     if (select.value !== current) state.ownerFilter = '';
   }
   const VIEW_KEY = 'outfit.view';
+  // 素材检索是另一个局域网服务（192.168.10.179:8700），内嵌在 tab 里：
+  // 首次进入才挂 src（登录首屏不拉外部页面），之后切走再切回保留 iframe 状态。
+  function mountMaterialFrame() {
+    const frame = $('material-frame');
+    if (!frame || frame.getAttribute('src')) return;
+    frame.src = frame.dataset.src;
+  }
+  const materialReload = $('material-reload');
+  if (materialReload) materialReload.addEventListener('click', () => {
+    const frame = $('material-frame');
+    if (frame) frame.src = frame.dataset.src; // 同一地址重新赋值即强制重载
+  });
   function switchView(id) {
     document.querySelectorAll('.tab[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === id));
     document.querySelectorAll('.view').forEach(v => v.classList.toggle('active-view', v.id === id));
@@ -76,13 +88,14 @@
     if (id === 'admin-view') refreshAdmin();
     if (id === 'batch-view' && window.BatchUI) window.BatchUI.enter();
     if (id === 'tag-view' && window.TagUI) window.TagUI.enter();
+    if (id === 'material-view') mountMaterialFrame();
   }
-  // 回到上次看的页：只在 create/history/admin 之间恢复。
+  // 回到上次看的页：只在 create/history/admin/tag/material 之间恢复。
   // 批次页有自己的状态机（进入即加载批次），刷新时自动跳过去容易让人以为"上次的任务还在"。
   function restoreView() {
     let saved = '';
     try { saved = localStorage.getItem(VIEW_KEY) || ''; } catch (_) { return; }
-    if (!['create-view', 'history-view', 'admin-view', 'tag-view'].includes(saved)) return;
+    if (!['create-view', 'history-view', 'admin-view', 'tag-view', 'material-view'].includes(saved)) return;
     const tab = document.querySelector(`.tab[data-view="${saved}"]`);
     if (!tab || tab.classList.contains('hidden')) return;
     if (!document.getElementById(saved)) return;

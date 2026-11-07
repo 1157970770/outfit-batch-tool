@@ -264,17 +264,22 @@ web-data/
 
 ## 8. 前端结构
 
-无框架、无构建步骤，三个文件：
+无框架、无构建步骤，四个文件：
 
 | 文件 | 职责 |
 | --- | --- |
-| `index.html` | 四个 view：`create-view`（试跑）、`batch-view`（大批量）、`history-view`、`admin-view` |
-| `app.js` | 全局 `state`、`api()`、`toast()`，试跑/任务/历史/管理四个模块；末尾 `window.OutfitApp` 暴露 `{ api, toast, state, switchView, openJob, refreshFlatJobs, statusText }` |
+| `index.html` | 六个 view：`create-view`（试跑）、`batch-view`（大批量）、`history-view`、`admin-view`、`tag-view`（视频库）、`material-view`（素材检索，iframe 内嵌 `http://192.168.10.179:8700`） |
+| `app.js` | 全局 `state`、`api()`、`toast()`，试跑/任务/历史/管理/素材检索五个模块；末尾 `window.OutfitApp` 暴露 `{ api, toast, state, switchView, openJob, refreshFlatJobs, statusText }` |
 | `batch.js` | IIFE，从 `window.OutfitApp` 取依赖；批次列表、新建、候选、生产、条目、历史分组 |
+| `tag.js` | IIFE，视频库：打标、批量改标签、弃用/恢复、标签库管理 |
 
 - 任务列表每 **3.5 秒** 轮询一次（页面隐藏时跳过）；批次页单独 3 秒左右轮询详情；
 - 管理页只在 admin 登录时显示，`账户用量` 与逐条明细的金额渲染都在 `app.js` 的 `renderUsage` / `renderAccount`；
 - 生产页**不显示任何金额**（v0.6.1 起），按钮只标条数。
+- `material-view` 是站外工具（另一台局域网服务，账号与数据独立）：iframe 的 `src` 由
+  `app.js` 在首次进入该 tab 时从 `data-src` 挂上（登录首屏不拉外部页面）；
+  CSP 只放行这一台（`server.py` 的 `_headers` 里 `frame-src http://192.168.10.179:8700`），
+  **换地址要同时改 `index.html` 的 `data-src` 和这条 CSP**，别把 `frame-src` 放宽成 `*`。
 
 ## 9. 配置映射
 

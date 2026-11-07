@@ -354,10 +354,13 @@ def make_handler(app: WebApplication):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
+            # frame-src 只放「素材检索」这一个站外工具（index.html 的 material-view 内嵌它）。
+            # 别放宽成 * 或 http:，否则任意页面都能被嵌进工作台。
             self.send_header("Content-Security-Policy",
                              "default-src 'self'; img-src 'self' data: blob:; media-src 'self'; "
                              "connect-src 'self'; style-src 'self' 'unsafe-inline'; "
-                             "script-src 'self'; frame-ancestors 'none'")
+                             "script-src 'self'; frame-src http://192.168.10.179:8700; "
+                             "frame-ancestors 'none'")
             if extra:
                 for key, value in extra.items():
                     self.send_header(key, value)

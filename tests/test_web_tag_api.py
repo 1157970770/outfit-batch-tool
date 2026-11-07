@@ -149,8 +149,13 @@ def main() -> int:
         for needle in ('data-view="tag-view"', "/static/tag.js", "/static/tag.css", ">视频库<"):
             assert needle in html, f"页面缺少 {needle}"
         assert "视频库" in html.split('data-view="admin-view"')[1].split("RunningHub")[0], "「视频库」必须夹在管理与 RunningHub 之间"
+        assert 'data-view="material-view"' in html and ">素材检索<" in html, "缺少「素材检索」tab"
+        assert 'id="material-frame"' in html, "缺少素材检索 iframe"
+        assert "192.168.10.179:8700" in html, "素材检索 iframe 没有指向目标地址"
         csp = headers.get("Content-Security-Policy", "")
         assert "script-src 'self'" in csp, csp
+        # 内嵌站外工具必须显式放行那一台，别写成 * 或 http:
+        assert "frame-src http://192.168.10.179:8700" in csp, csp
 
         # ---------- 未登录 ----------
         code, _, _ = call(alice, base, "/api/tags/snapshot")
