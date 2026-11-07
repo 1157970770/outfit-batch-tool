@@ -86,6 +86,8 @@ POST /api/batches/<id>/candidates 按标签筛选 → 命中清单（写入 item
 POST /api/batches/<id>/lock       锁定这批清单；之后可反复生产
 POST /api/batches/<id>/produce    取前 N 条 pending → JobManager.create(batch_ref=...)
                                   一个批次可以跑多轮，直到 pending 耗尽
+POST /api/batches/<id>/prompt     改提示词（分批生产阶段就地改）：运行中也能改，
+                                  提交那一刻已快照进 job，所以只对下一轮生效；关闭后 409
 POST /api/batches/<id>/close      关闭批次（不可再生产）
 POST /api/batches/<id>/delete     删除（有运行中任务时拒绝）
 ```
@@ -179,7 +181,7 @@ while not stop:
 | `state` | `draft → locked → closed`（closed 不可再生产） |
 | `images[]` | **图片唯一真源**：`[{upload_id,name,path}]`，顺序 = 槽位 = `imageUrls`；[0]=定妆图 |
 | `image_path` / `image_name` / `image_url` | `images[0]` 的**主图别名**（老代码/老前端/历史对比层用），写图时同步回写 |
-| `prompt_id` / `prompt` | 提示词（不改 prompt；「图2…图10」由用户自己写） |
+| `prompt_id` / `prompt` | 提示词（不改 prompt；「图2…图10」由用户自己写）。绑定后仍可在步骤 4「分批生产」里改，只影响之后的生产 |
 | `resolution` / `duration` | 本批次参数 |
 | `tags` | 6 栏位标签，建批次时填，冻结后不改（旧批次只有 `style_no`） |
 | `style_no` | 旧款号字段（v0.9.0），仅老批次存在 |

@@ -218,6 +218,10 @@
 .batch-prompt-edit:focus{outline:2px solid color-mix(in srgb,var(--blue) 35%,transparent);border-color:var(--blue)}
 .batch-prompt-actions{display:flex;align-items:center;gap:8px;margin-top:8px}
 .batch-prompt-count{margin-left:auto;font-size:12px}
+.batch-prompt-note{margin:6px 0 0;font-size:11.5px}
+/* 分批生产区的提示词块：与上面的生产控制条同宽，编辑时不挤动进度条 */
+.batch-produce-prompt{margin:10px 0}
+.batch-produce-prompt .batch-prompt-block{margin-top:0;border:1px solid var(--line);background:var(--paper)}
 
 /* ---------- 生产区：计数 + 进度 + 按钮挤成一行 ---------- */
 .batch-produce-bar{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,460px);gap:14px;align-items:center;padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--bg) 60%,white)}

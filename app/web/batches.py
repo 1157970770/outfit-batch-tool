@@ -1036,8 +1036,10 @@ class BatchManager:
         为什么锁定后允许改：`_start_run` 是在**每次生产时**才读 `batch["prompt"]`
         建任务，所以改提示词不影响已生成的视频，只影响之后的分批生产 —— 这正是
         「跑了一批发现提示词要调，不想整批重开」的用法。
-        限制：有任务在跑时拒绝（避免同一次 _start_run 前后读到两份提示词的歧义）；
-        批次已关闭则整个批次不再变化，一并拒绝。
+        运行中也允许改：`_start_run` 在提交那一刻（同样持 self.mutex）就把 prompt
+        快照进了 job，之后改批次上的 prompt 只对**下一轮**生效，不会让同一轮里
+        出现两段提示词；前端据此提示「本轮已提交，下一轮生效」。
+        只有批次已关闭才拒绝（整个批次不再变化）。
         """
         prompt = str(data.get("prompt") or "").strip()
         if not prompt:
@@ -1047,8 +1049,6 @@ class BatchManager:
         with self.mutex:
             batch = self._authorized(batch_id, user)
             self._reconcile(batch)
-            if batch.get("active_job_id"):
-                raise BatchError("本批次有任务在跑，等它结束后再改提示词。", 409)
             if batch.get("state") == "closed":
                 raise BatchError("批次已关闭，提示词不可再修改。", 409)
             batch["prompt"] = prompt

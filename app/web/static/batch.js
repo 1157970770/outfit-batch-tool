@@ -340,8 +340,8 @@
     $('batch-create-btn').disabled = frozen;
     $('batch-image-slots').classList.toggle('is-frozen', frozen);
     $('batch-a-hint').textContent = frozen
-      ? '批次级设置已冻结：提示词、画质、时长、定妆图建立后不可改；细节图可在步骤 3 追加。'
-      : '提示词、画质、时长在批次级冻结；建好后要改只能新建批次。';
+      ? '批次级设置已冻结：画质、时长、定妆图建立后不可改；细节图可在步骤 3 追加，提示词在步骤 4「分批生产」里可改（只影响之后的生产）。'
+      : '画质、时长、定妆图在批次级冻结；提示词建好后仍可在分批生产阶段修改。';
   }
   // 已有批次：折叠冻结的建批次表单（省下一整屏）；新建批次时必须是展开的。
   function setBatchFormOpen(open) {
@@ -1332,19 +1332,22 @@
     bar.append(chips);
     root.append(bar);
 
-    // 提示词：默认折叠两行，点「展开」看全文；锁定后仍可修改 —— 生产时才读取批次提示词，
-    // 改完只影响之后的分批生产，已生成的视频不变。
-    root.append(buildPromptBlock(batch, prompt));
+    // 提示词在这里只读：编辑入口在步骤 4「分批生产」里（生产时就地改，正在跑也能改，
+    // 保存后下一轮生效）。这里保留全文方便核对，默认折叠两行。
+    root.append(buildPromptBlock(batch, prompt, { editable: false }));
     root.append(el('p', 'muted batch-summary-hint',
-      '清单已锁定：条目不可增删，定妆图 / 画质 / 时长都用批次创建时的设置；提示词可改，只影响之后的分批生产。'));
+      '清单已锁定：条目不可增删，定妆图 / 画质 / 时长都用批次创建时的设置；提示词在下方「分批生产」里改，只影响之后的生产。'));
   }
 
-  function buildPromptBlock(batch, prompt) {
+  function buildPromptBlock(batch, prompt, opts) {
+    const options = opts || {};
     const block = el('div', 'batch-prompt-block');
     const head = el('div', 'batch-prompt-head');
     head.append(el('small', null, `提示词 · ${prompt.length} 字`));
-    const editable = txt(batch.state) !== 'closed' && !txt(batch.active_job_id);
-    if (b.promptEditing) {
+    // 批次关闭后整批不再变化；运行中允许改，因为改的是「下一轮」用的提示词
+    const editable = options.editable !== false && txt(batch.state) !== 'closed';
+    const running = !!txt(batch.active_job_id);
+    if (b.promptEditing && editable) {
       const body = el('textarea', 'batch-prompt-edit');
       body.rows = 6;
       body.maxLength = 4000;
@@ -1353,7 +1356,7 @@
       body.setAttribute('aria-label', '编辑批次提示词');
       const count = el('span', 'muted batch-prompt-count', `${body.value.length} / 4000`);
       body.addEventListener('input', () => {
-        b.promptDraft = body.value;   // 4 秒轮询会重渲染摘要，草稿必须实时落回状态，否则输入被冲掉
+        b.promptDraft = body.value;   // 4 秒轮询会重渲染，草稿必须实时落回状态，否则输入被冲掉
         count.textContent = `${body.value.length} / 4000`;
       });
       const actions = el('div', 'batch-prompt-actions');
@@ -1365,6 +1368,7 @@
         b.promptEditing = false;
         b.promptDraft = '';
         renderSummary(batch);
+        renderProduce(batch);
       });
       save.addEventListener('click', async () => {
         const next = body.value.trim();
@@ -1378,7 +1382,9 @@
           });
           b.promptEditing = false;
           b.promptDraft = '';
-          toast('提示词已更新，之后的分批生产会用新提示词。');
+          toast(running
+            ? '已保存：本轮已提交不受影响，下一轮生产用新提示词。'
+            : '提示词已更新，之后的分批生产会用新提示词。');
           await loadBatchDetail(true);          // 拉回最新 batch.prompt 并重渲染
         } catch (err) {
           save.disabled = false; cancel.disabled = false;
@@ -1397,23 +1403,34 @@
       toggle.addEventListener('click', () => {
         b.promptOpen = !b.promptOpen;
         renderSummary(batch);
+        renderProduce(batch);
       });
-      const edit = el('button', 'quiet btn-sm batch-prompt-edit-btn', '修改提示词');
-      edit.type = 'button';
-      edit.disabled = !editable;
-      edit.title = editable ? '改完只影响之后的分批生产' : '有任务在跑或批次已关闭时不能改';
-      edit.addEventListener('click', () => {
-        b.promptDraft = txt(batch.prompt);
-        b.promptEditing = true;
-        renderSummary(batch);
-        // 聚焦编辑框，光标落末尾，改起来顺手
-        const body = document.querySelector('.batch-prompt-edit');
-        if (body) { body.focus(); body.setSelectionRange(body.value.length, body.value.length); }
-      });
-      tools.append(toggle, edit);
+      if (editable) {
+        const edit = el('button', 'quiet btn-sm batch-prompt-edit-btn', '修改提示词');
+        edit.type = 'button';
+        edit.title = running
+          ? '本轮已提交，改完从下一轮生效'
+          : '改完只影响之后的分批生产';
+        edit.addEventListener('click', () => {
+          b.promptDraft = txt(batch.prompt);
+          b.promptEditing = true;
+          renderSummary(batch);
+          renderProduce(batch);
+          // 聚焦编辑框，光标落末尾，改起来顺手
+          const body = document.querySelector('.batch-prompt-edit');
+          if (body) { body.focus(); body.setSelectionRange(body.value.length, body.value.length); }
+        });
+        tools.append(toggle, edit);
+      } else {
+        tools.append(toggle);
+      }
       head.append(tools);
       const text = el('p', 'batch-prompt-text' + (b.promptOpen ? '' : ' is-clamped'), prompt || '—');
       block.append(head, text);
+      if (editable && running) {
+        block.append(el('p', 'muted batch-prompt-note',
+          '当前这一轮已经提交，这里改的是下一轮的提示词；本轮已生成的视频不受影响。'));
+      }
     }
     return block;
   }
@@ -1426,6 +1443,14 @@
     const pending = Math.max(0, num(batch.pending, total - done - failed));
     const activeId = txt(batch.active_job_id);
     const closed = txt(batch.state) === 'closed';
+
+    // 提示词：分批生产阶段就地可改，正在跑也允许（保存后下一轮生效）。
+    // 编辑中不重建 DOM —— 否则 4 秒轮询会把光标和输入冲掉。
+    const promptBox = $('batch-produce-prompt');
+    if (promptBox && !(b.promptEditing && promptBox.dataset.editing === '1')) {
+      promptBox.dataset.editing = b.promptEditing ? '1' : '0';
+      promptBox.replaceChildren(buildPromptBlock(batch, txt(batch.prompt), { editable: true }));
+    }
 
     const counters = $('batch-counters');
     counters.replaceChildren();

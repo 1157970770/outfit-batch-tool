@@ -493,6 +493,22 @@ def main() -> int:
             "第二批生产必须使用改过之后的提示词"
         job_ids.append(produced["job"]["id"])
 
+        # 运行中也能改提示词：提交那一刻 prompt 已快照进 job（同一把锁），
+        # 所以本轮 job 的文案不变，批次上的 prompt 立刻变成新值，下一轮才用它。
+        mid_prompt = second_prompt + " 运行中改：只影响下一轮。"
+        code, _, mid = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST",
+                            {"prompt": mid_prompt})
+        assert code == 200, (code, mid)
+        assert body(mid)["batch"]["prompt"] == mid_prompt, mid
+        assert body(mid)["batch"]["active_job_id"], "此时第二批还在跑"
+        assert app.jobs.jobs[produced["job"]["id"]]["prompt"] == second_prompt, \
+            "已提交那一轮的提示词快照不能被动到"
+        # 改回第二批的文案，后面的轮次/历史断言仍按 second_prompt 等
+        code, _, restored = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST",
+                                 {"prompt": second_prompt})
+        assert code == 200, (code, restored)
+        print("  ✓ 运行中改提示词：200 且本轮快照不变（只影响下一轮）")
+
         # 分批轮次的断言放在第二批跑完之后（未完成的 job 只会在明细里留空记录）
 
         # ---------------- 款号-模板防重账本：提交时记账 + 查询接口
