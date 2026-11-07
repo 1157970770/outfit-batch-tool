@@ -63,6 +63,8 @@ web-data/
 # 分区后的 dev 数据目录与生产快照归档（web-data-dev/、web-data-生产快照-*）
 web-data*/
 server/web.json
+# 飞书自动报表凭证（app secret + 表定位，只留本机，两区各放一份）
+server/feishu.json
 
 # 运行区专用运维脚本（切换/回滚，含本机绝对路径，只存运行区本机）
 运维/
