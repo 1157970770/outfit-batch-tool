@@ -20,6 +20,9 @@
 写入（upsert，幂等，跑多少次结果一样）：
     键 = 日期 + 账户；已存在的行比对后有变化才更新，缺的补建；
     建表自带的整行空白占位记录顺手清掉。
+    同时维护「每日总消耗」汇总表（每天一行全账户合计：生产视频数量 /
+    消费金额 / 任务数 / 生产账户数），表不存在时自动创建；
+    --no-summary 可只写明细表。
 
 用法：
     python scripts/feishu_daily_report.py                    # 同步 D-3..今天（默认含当天，18:00 定时任务用）
@@ -67,6 +70,10 @@ DEFAULT_PRICE_PER_SECOND = {"480P": 0.3, "720P": 0.6, "1080P": 1.2}
 
 DEFAULT_FIELD_NAMES = {"account": "账户", "date": "日期",
                        "count": "生产视频数量", "cost": "消费金额"}
+# 汇总表（每天一行：全账户合计），表不存在时自动创建
+SUMMARY_TABLE_NAME = "每日总消耗"
+SUMMARY_FIELD_NAMES = {"date": "日期", "count": "生产视频数量",
+                       "cost": "消费金额", "jobs": "任务数", "accounts": "生产账户数"}
 DEFAULT_DAYS = 4          # 默认窗口 D-3..D0（含今天，当日快照次日修正）
 LOCK_STALE_SECONDS = 6 * 3600
 BATCH_CHUNK = 200         # 批量写每批条数上限（飞书单批上限 1000，留余量）
@@ -91,6 +98,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--include-today", action="store_true", help="兼容参数：默认已含今天，保留以兼容旧命令行")
     p.add_argument("--skip-zero", action="store_true", help="当日没有任何任务的账户不写 0 行")
     p.add_argument("--setup-fields", action="store_true", help="只建字段/清空行，不写数据")
+    p.add_argument("--no-summary", action="store_true",
+                   help="不同步「每日总消耗」汇总表（默认每次一起写）")
     p.add_argument("--dry-run", action="store_true", help="只打印聚合结果，不联网不写入")
     p.add_argument("--quiet", action="store_true", help="只写日志不打印（计划任务用）")
     return p.parse_args(argv)
@@ -294,9 +303,32 @@ class Feishu:
         """业务接口统一取 data 段。"""
         return self._request(method, path, body, query).get("data") or {}
 
+    # ---- 数据表 ----
+
+    def list_tables(self) -> list[dict]:
+        items: list[dict] = []
+        token = ""
+        while True:
+            query = {"page_size": 100}
+            if token:
+                query["page_token"] = token
+            data = self._data("GET", f"/open-apis/bitable/v1/apps/{self.app_token}/tables",
+                              query=query)
+            items.extend(data.get("items") or [])
+            if not data.get("has_more"):
+                return items
+            token = str(data.get("page_token") or "")
+
+    def create_table(self, name: str, fields: list[dict]) -> str:
+        """建表（首字段即主字段），返回 table_id。"""
+        data = self._data("POST", f"/open-apis/bitable/v1/apps/{self.app_token}/tables",
+                          {"table": {"name": name, "default_view_name": "表格", "fields": fields}})
+        return str(data.get("table_id") or "")
+
     # ---- 字段 ----
 
-    def list_fields(self) -> list[dict]:
+    def list_fields(self, table_id: str | None = None) -> list[dict]:
+        tid = table_id or self.table_id
         items: list[dict] = []
         token = ""
         while True:
@@ -304,18 +336,20 @@ class Feishu:
             if token:
                 query["page_token"] = token
             data = self._data("GET", f"/open-apis/bitable/v1/apps/{self.app_token}"
-                                      f"/tables/{self.table_id}/fields", query=query)
+                                      f"/tables/{tid}/fields", query=query)
             items.extend(data.get("items") or [])
             if not data.get("has_more"):
                 return items
             token = str(data.get("page_token") or "")
 
-    def create_field(self, name: str, ftype: int, prop: dict | None = None) -> None:
+    def create_field(self, name: str, ftype: int, prop: dict | None = None,
+                     table_id: str | None = None) -> None:
+        tid = table_id or self.table_id
         body: dict = {"field_name": name, "type": ftype}
         if prop:
             body["property"] = prop
         self._data("POST", f"/open-apis/bitable/v1/apps/{self.app_token}"
-                           f"/tables/{self.table_id}/fields", body)
+                           f"/tables/{tid}/fields", body)
 
     def rename_field(self, field_id: str, name: str, ftype: int) -> None:
         # 该接口要求 type 一并带上（99992402: "type is required"）
@@ -325,7 +359,8 @@ class Feishu:
 
     # ---- 记录 ----
 
-    def search_records(self) -> list[dict]:
+    def search_records(self, table_id: str | None = None) -> list[dict]:
+        tid = table_id or self.table_id
         items: list[dict] = []
         token = ""
         while True:
@@ -333,39 +368,42 @@ class Feishu:
             if token:
                 query["page_token"] = token
             data = self._data("POST", f"/open-apis/bitable/v1/apps/{self.app_token}"
-                                      f"/tables/{self.table_id}/records/search",
+                                      f"/tables/{tid}/records/search",
                               {}, query=query)
             items.extend(data.get("items") or [])
             if not data.get("has_more"):
                 return items
             token = str(data.get("page_token") or "")
 
-    def batch_create(self, records: list[dict]) -> int:
+    def batch_create(self, records: list[dict], table_id: str | None = None) -> int:
+        tid = table_id or self.table_id
         done = 0
         for i in range(0, len(records), BATCH_CHUNK):
             chunk = records[i:i + BATCH_CHUNK]
             self._data("POST", f"/open-apis/bitable/v1/apps/{self.app_token}"
-                               f"/tables/{self.table_id}/records/batch_create",
+                               f"/tables/{tid}/records/batch_create",
                        {"records": [{"fields": fields} for fields in chunk]})
             done += len(chunk)
         return done
 
-    def batch_update(self, records: list[dict]) -> int:
+    def batch_update(self, records: list[dict], table_id: str | None = None) -> int:
+        tid = table_id or self.table_id
         done = 0
         for i in range(0, len(records), BATCH_CHUNK):
             chunk = records[i:i + BATCH_CHUNK]
             self._data("POST", f"/open-apis/bitable/v1/apps/{self.app_token}"
-                               f"/tables/{self.table_id}/records/batch_update",
+                               f"/tables/{tid}/records/batch_update",
                        {"records": chunk})
             done += len(chunk)
         return done
 
-    def batch_delete(self, record_ids: list[str]) -> int:
+    def batch_delete(self, record_ids: list[str], table_id: str | None = None) -> int:
+        tid = table_id or self.table_id
         done = 0
         for i in range(0, len(record_ids), BATCH_CHUNK):
             chunk = record_ids[i:i + BATCH_CHUNK]
             self._data("POST", f"/open-apis/bitable/v1/apps/{self.app_token}"
-                               f"/tables/{self.table_id}/records/batch_delete",
+                               f"/tables/{tid}/records/batch_delete",
                        {"records": chunk})
             done += len(chunk)
         return done
@@ -509,6 +547,92 @@ def sync_rows(fs: Feishu, names: dict, rows: dict) -> dict:
     return result
 
 
+def summarize(rows: dict[str, dict[str, dict]]) -> dict[str, dict]:
+    """{日期iso: {count, cost, jobs, accounts}}：accounts = 当天有任务的账户数。"""
+    sums: dict[str, dict] = {}
+    for iso in sorted(rows):
+        day = rows[iso]
+        sums[iso] = {"count": sum(cell["count"] for cell in day.values()),
+                     "cost": round(sum(cell["cost"] for cell in day.values()), 2),
+                     "jobs": sum(cell["jobs"] for cell in day.values()),
+                     "accounts": sum(1 for cell in day.values() if cell["jobs"] > 0)}
+    return sums
+
+
+def ensure_summary_table(fs: Feishu, name: str) -> tuple[str, str]:
+    """按名字找汇总表，没有就建（自愈）；返回 (table_id, 说明或空串)。"""
+    for table in fs.list_tables():
+        if str(table.get("name") or "") == name:
+            return str(table.get("table_id") or ""), ""
+    fields = [
+        {"field_name": SUMMARY_FIELD_NAMES["date"], "type": 5,
+         "property": {"date_formatter": "yyyy/MM/dd"}},
+        {"field_name": SUMMARY_FIELD_NAMES["count"], "type": 2, "property": {"formatter": "0"}},
+        {"field_name": SUMMARY_FIELD_NAMES["cost"], "type": 2, "property": {"formatter": "0.00"}},
+        {"field_name": SUMMARY_FIELD_NAMES["jobs"], "type": 2, "property": {"formatter": "0"}},
+        {"field_name": SUMMARY_FIELD_NAMES["accounts"], "type": 2, "property": {"formatter": "0"}},
+    ]
+    return fs.create_table(name, fields), f"新建汇总表「{name}」"
+
+
+def sync_summary(fs: Feishu, table_id: str, sums: dict[str, dict]) -> dict:
+    """汇总表 upsert（键 = 日期）：每天一行全账户合计。"""
+    names = SUMMARY_FIELD_NAMES
+    by_date: dict[str, dict] = {}
+    empty_ids: list[str] = []
+    dup_ids: list[str] = []
+    for item in fs.search_records(table_id):
+        record_id = str(item.get("record_id") or "")
+        fields = item.get("fields") or {}
+        ts = ts_value(fields.get(names["date"]))
+        if ts is None:
+            if not fields:
+                empty_ids.append(record_id)      # 建表自带的空行
+            continue
+        iso = ms_to_iso(ts)
+        if iso in by_date:
+            dup_ids.append(record_id)
+            continue
+        by_date[iso] = {
+            "record_id": record_id,
+            "count": num_value(fields.get(names["count"])),
+            "cost": num_value(fields.get(names["cost"])),
+            "jobs": num_value(fields.get(names["jobs"])),
+            "accounts": num_value(fields.get(names["accounts"])),
+        }
+
+    creates: list[dict] = []
+    updates: list[dict] = []
+    skipped = 0
+    for iso in sorted(sums):
+        cell = sums[iso]
+        desired = {names["date"]: date_ms(iso),
+                   names["count"]: int(cell["count"]),
+                   names["cost"]: round(float(cell["cost"]), 2),
+                   names["jobs"]: int(cell["jobs"]),
+                   names["accounts"]: int(cell["accounts"])}
+        current = by_date.get(iso)
+        if current is None:
+            creates.append(desired)
+        elif (current["count"] == cell["count"]
+              and round(current["cost"] or 0.0, 2) == round(cell["cost"], 2)
+              and current["jobs"] == cell["jobs"]
+              and current["accounts"] == cell["accounts"]):
+            skipped += 1
+        else:
+            updates.append({"record_id": current["record_id"], "fields": desired})
+
+    result = {"created": 0, "updated": 0, "skipped": skipped, "deleted": 0}
+    if creates:
+        result["created"] = fs.batch_create(creates, table_id)
+    if updates:
+        result["updated"] = fs.batch_update(updates, table_id)
+    stale = empty_ids + dup_ids
+    if stale:
+        result["deleted"] = fs.batch_delete(stale, table_id)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 锁与日志：计划任务与手动执行可能撞车
 # ---------------------------------------------------------------------------
@@ -629,6 +753,11 @@ def main(argv: list[str] | None = None) -> int:
         for owner in sorted(rows[iso]):
             cell = rows[iso][owner]
             emit(args, f"  {iso}  {owner:<14} 生产={cell['count']:<4} 消费={cell['cost']:.2f} 元 (任务 {cell['jobs']})")
+    sums = summarize(rows)
+    for iso in sorted(sums):
+        s = sums[iso]
+        emit(args, f"  {iso}  合计{'':<12} 生产={s['count']:<4} 消费={s['cost']:.2f} 元 "
+                   f"(任务 {s['jobs']} / 账户 {s['accounts']})")
     if args.dry_run:
         emit(args, "[dry-run] 未联网、未写入")
         return 0
@@ -644,6 +773,7 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in cfg["fields"].items():
             if key in names and str(value or "").strip():
                 names[key] = str(value).strip()
+    summary_name = str(cfg.get("summary_table_name") or "").strip() or SUMMARY_TABLE_NAME
 
     if not acquire_lock(args):
         emit(args, "[锁] 已有实例在跑，本次跳过（默认回补三天，明天会自动补上）")
@@ -660,10 +790,24 @@ def main(argv: list[str] | None = None) -> int:
                 _, empty_ids, dup_ids = scan_existing(fs, names)
                 deleted = fs.batch_delete(empty_ids + dup_ids) if (empty_ids or dup_ids) else 0
                 emit(args, f"[setup] 建字段完成，清理空占位/重复行 {deleted} 条")
+                if not args.no_summary:
+                    summary_id, note = ensure_summary_table(fs, summary_name)
+                    if note:
+                        emit(args, f"[汇总] {note}（{summary_id}）")
                 return 0
             result = sync_rows(fs, names, rows)
             emit(args, f"[同步] 新建 {result['created']} / 更新 {result['updated']} / "
                        f"无变化 {result['skipped']} / 清空行 {result['deleted']}")
+            if not args.no_summary:
+                summary_id, note = ensure_summary_table(fs, summary_name)
+                if not summary_id:
+                    emit(args, "[汇总] 汇总表创建失败（table_id 为空），本次跳过")
+                else:
+                    if note:
+                        emit(args, f"[汇总] {note}（{summary_id}）")
+                    sresult = sync_summary(fs, summary_id, summarize(rows))
+                    emit(args, f"[汇总] 新建 {sresult['created']} / 更新 {sresult['updated']} / "
+                               f"无变化 {sresult['skipped']} / 清空行 {sresult['deleted']}")
             return 0
         except FeishuError as exc:
             emit(args, f"[失败] {exc}")
