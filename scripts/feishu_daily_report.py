@@ -22,9 +22,9 @@
     建表自带的整行空白占位记录顺手清掉。
 
 用法：
-    python scripts/feishu_daily_report.py                    # 同步 D-3..D-1（默认回补三天）
+    python scripts/feishu_daily_report.py                    # 同步 D-3..今天（默认含当天，18:00 定时任务用）
+    python scripts/feishu_daily_report.py --no-today         # 只同步到昨天（纯回补）
     python scripts/feishu_daily_report.py --from 2026-10-28 --to 2026-11-07
-    python scripts/feishu_daily_report.py --include-today    # 连今天也写（当日快照，次日会被修正）
     python scripts/feishu_daily_report.py --setup-fields     # 只建字段/清空行，不写数据
     python scripts/feishu_daily_report.py --dry-run          # 只打印聚合结果，不联网
     python scripts/feishu_daily_report.py --quiet            # 计划任务用：只写日志不打印
@@ -42,7 +42,8 @@
 从设计区跑生产数据：--data-root "D:\\批量视频任务运行区\\web-data"。
 
 计划任务：
-    scripts/install_feishu_report_task.ps1（每天 08:30，pythonw --quiet）
+    scripts/install_feishu_report_task.ps1（每天 18:00，pythonw --quiet；
+    默认窗口 D-3..今天，当天写快照，次日自动修正）
 
 退出码：0 成功 / 1 网络·接口失败 / 2 配置或参数问题。
 """
@@ -66,7 +67,7 @@ DEFAULT_PRICE_PER_SECOND = {"480P": 0.3, "720P": 0.6, "1080P": 1.2}
 
 DEFAULT_FIELD_NAMES = {"account": "账户", "date": "日期",
                        "count": "生产视频数量", "cost": "消费金额"}
-DEFAULT_DAYS = 3          # 默认回补 D-3..D-1
+DEFAULT_DAYS = 4          # 默认窗口 D-3..D0（含今天，当日快照次日修正）
 LOCK_STALE_SECONDS = 6 * 3600
 BATCH_CHUNK = 200         # 批量写每批条数上限（飞书单批上限 1000，留余量）
 
@@ -85,8 +86,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--from", dest="date_from", default="", help="起始日期 YYYY-MM-DD（含）")
     p.add_argument("--to", dest="date_to", default="", help="结束日期 YYYY-MM-DD（含）")
     p.add_argument("--days", type=int, default=DEFAULT_DAYS,
-                   help=f"不指定 --from/--to 时回补最近 N 天（默认 {DEFAULT_DAYS}，不含今天）")
-    p.add_argument("--include-today", action="store_true", help="把今天也纳入（当日快照，次日修正）")
+                   help=f"不指定 --from/--to 时的窗口天数（默认 {DEFAULT_DAYS} 天，含今天即 D-3..D0）")
+    p.add_argument("--no-today", action="store_true", help="只同步到昨天（不含今天，用于纯回补）")
+    p.add_argument("--include-today", action="store_true", help="兼容参数：默认已含今天，保留以兼容旧命令行")
     p.add_argument("--skip-zero", action="store_true", help="当日没有任何任务的账户不写 0 行")
     p.add_argument("--setup-fields", action="store_true", help="只建字段/清空行，不写数据")
     p.add_argument("--dry-run", action="store_true", help="只打印聚合结果，不联网不写入")
@@ -579,11 +581,13 @@ def resolve_range(args: argparse.Namespace) -> tuple[date, date]:
     if args.date_from or args.date_to:
         try:
             start = date.fromisoformat(args.date_from) if args.date_from else today - timedelta(days=args.days)
-            end = date.fromisoformat(args.date_to) if args.date_to else today - timedelta(days=1)
+            end = date.fromisoformat(args.date_to) if args.date_to else today
         except ValueError as exc:
             raise RuntimeError(f"日期格式错误（要 YYYY-MM-DD）：{exc}") from None
     else:
-        end = today - timedelta(days=0 if args.include_today else 1)
+        # 默认含今天：每天 18:00 的定时任务要把「当天」写进表；
+        # 今天的数据是当日快照，次日 18:00 的回补会用最终值覆盖。
+        end = today - timedelta(days=1 if args.no_today else 0)
         start = end - timedelta(days=args.days - 1)
     if start > end:
         raise RuntimeError(f"日期区间反了：{start} > {end}")

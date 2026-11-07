@@ -9,14 +9,14 @@
 
     Usage (no admin required, current user only):
         powershell -NoProfile -ExecutionPolicy Bypass -File install_feishu_report_task.ps1
-        powershell ... -File install_feishu_report_task.ps1 -Time 08:30 -TaskName FeishuDailyReport
+        powershell ... -File install_feishu_report_task.ps1 -Time 18:00 -TaskName FeishuDailyReport
 
     Uninstall:
         powershell ... -File install_feishu_report_task.ps1 -Remove
 #>
 [CmdletBinding()]
 param(
-    [string]$Time = "08:30",
+    [string]$Time = "18:00",
     [string]$TaskName = "FeishuDailyReport",
     [switch]$Remove
 )
@@ -60,7 +60,8 @@ Write-Host "pythonw : $pythonw"
 Write-Host "script  : $target"
 Write-Host "time    : daily $Time"
 
-# 默认回补 D-3..D-1：昨天为完整一天，前两天用来修正迟到状态，天然幂等。
+# 默认窗口 D-3..今天：当天写快照（18:00 的当天进度），次日自动修正；
+# 幂等 upsert，重复跑不会产生重复行。
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$target`" --quiet" -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $settings = New-ScheduledTaskSettingsSet `
