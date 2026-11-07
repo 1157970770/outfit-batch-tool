@@ -502,18 +502,20 @@
   async function openJob(id) {
     state.selectedJob = id;
     stopDetailPoll();
-    try { const data = await api(`/api/jobs/${id}`); renderDetail(data.job); scheduleDetailPoll(id, data.job && data.job.status); } catch (err) { toast(err.message); }
+    try { const data = await api(`/api/jobs/${id}`); renderDetail(data.job); scheduleDetailPoll(id, data.job && data.job.status, isRechecking(data.job)); } catch (err) { toast(err.message); }
   }
   /* 任务详情的运行中轮询：排队/生成中每 3.5s 重拉一次详情，
-     单条视频完成状态就能自动跳成「成功」，不用手动刷新。跑完/关面板/切任务即停。 */
+     单条视频完成状态就能自动跳成「成功」，不用手动刷新。跑完/关面板/切任务即停。
+     复查超时（P0）也在轮询：后台线程查云端 + 补下载时，面板要跟着刷新。 */
   const DETAIL_ACTIVE = ['queued', 'running'];
+  const isRechecking = (job) => !!(job && job.recheck && job.recheck.running);
   // 面板内容签名：状态 + 每条记录的状态。轮询时签名没变就不重渲染，
   // 避免把面板里正在播放的视频播放器每 3.5 秒重建一次。
-  const detailSig = (job) => `${job && job.status}|${((job && job.records) || []).map((r) => `${r.id}:${r.status}`).join(',')}`;
+  const detailSig = (job) => `${job && job.status}|${isRechecking(job) ? `R${(job.recheck || {}).checked || 0}` : ''}|${((job && job.records) || []).map((r) => `${r.id}:${r.status}`).join(',')}`;
   function stopDetailPoll() { if (state.detailTimer) { clearInterval(state.detailTimer); state.detailTimer = null; } }
-  function scheduleDetailPoll(jobId, status) {
+  function scheduleDetailPoll(jobId, status, rechecking = false) {
     stopDetailPoll();
-    if (!DETAIL_ACTIVE.includes(String(status || ''))) return;
+    if (!DETAIL_ACTIVE.includes(String(status || '')) && !rechecking) return;
     state.detailTimer = setInterval(async () => {
       if (document.hidden) return;
       // 面板已关 / 已切到别的任务：这轮定时器作废
@@ -524,7 +526,7 @@
         const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
         if (state.selectedJob !== jobId) { stopDetailPoll(); return; }
         if (detailSig(data.job) !== state.detailSig) renderDetail(data.job);
-        if (!DETAIL_ACTIVE.includes(String(data.job && data.job.status))) stopDetailPoll();
+        if (!DETAIL_ACTIVE.includes(String(data.job && data.job.status)) && !isRechecking(data.job)) stopDetailPoll();
       } catch (_) { /* 轮询失败保留当前画面，下一轮再试 */ }
     }, 3500);
   }
@@ -563,8 +565,27 @@
       root.append(strip);
     }
     if (job.status === 'succeeded' || job.status === 'partial') { const dl = document.createElement('a'); dl.className = 'link-btn'; dl.href = job.download_all; dl.textContent = '下载已完成视频和报告（ZIP）'; root.append(dl); const first = (job.records || []).find(r => r.status === 'success' && r.download_url); if (first) { const player = document.createElement('video'); player.controls = true; player.preload = 'metadata'; player.className = 'preview-video'; player.src = first.download_url; root.append(player); } }
+    // 等待超时（P0）：先按原 taskId 复查云端——多数超时在云端其实已出片并计费，
+    // 直接点「重试」会重新提交、二次扣费。所以复查按钮放在重试按钮**前面**。
+    const timeoutCount = (job.records || []).filter(r => r.status === 'timeout').length;
+    const recheck = job.recheck && typeof job.recheck === 'object' ? job.recheck : null;
+    if (timeoutCount || (recheck && recheck.running)) {
+      const btn = document.createElement('button'); btn.className = 'quiet'; btn.type = 'button';
+      if (recheck && recheck.running) {
+        btn.textContent = `复查中 ${recheck.checked || 0}/${recheck.total || timeoutCount}`;
+        btn.disabled = true;
+      } else {
+        btn.textContent = `复查超时任务（${timeoutCount} 条）`;
+        btn.title = '按原 taskId 查询云端：已出片的直接补下载，不重新提交、不二次计费';
+        btn.addEventListener('click', async () => {
+          if (!confirm(`按原 taskId 复查这 ${timeoutCount} 条超时记录？\n\n只查询、不重新提交：云端已出片的会直接补下载；云端确实失败的才转成「失败」，那时再重试不会二次计费。`)) return;
+          try { const data = await api(`/api/jobs/${job.id}/recheck`, { method: 'POST', body: '{}' }); toast('已开始复查，结果会自动刷新。'); state.selectedJob = job.id; renderDetail(data.job); scheduleDetailPoll(job.id, data.job && data.job.status, true); } catch (err) { toast(err.message); }
+        });
+      }
+      root.append(btn);
+    }
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled','unknown','timeout','skipped'].includes(r.status)).length;
-    if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.addEventListener('click', async () => { if (!confirm(`只重试失败的 ${failedCount} 条？`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); toast('失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
+    if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.title = timeoutCount ? '其中含等待超时的条目：建议先「复查超时任务」，直接重试会二次计费' : ''; retry.addEventListener('click', async () => { const warn = timeoutCount ? `\n\n注意：其中 ${timeoutCount} 条是等待超时——云端可能已出片并计费，直接重试会二次提交。\n建议先点「复查超时任务」。` : ''; if (!confirm(`只重试失败的 ${failedCount} 条？${warn}`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); toast('失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
     const list = document.createElement('div'); list.className = 'record-list';
     (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
     const logs = document.createElement('div'); logs.className = 'log-box'; logs.textContent = (job.log_tail || []).slice(-60).join('\n') || '任务日志将在这里显示。'; root.append(logs);

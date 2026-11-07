@@ -128,13 +128,19 @@ class WanError(RuntimeError):
 
 
 class WaitTimeout(WanError):
-    """轮询超时：任务可能还在跑，保留 task_id，不要重复提交。"""
+    """轮询超时：本机等不下去了，云端那条任务可能已出片并按秒计费。
+
+    保留 task_id，供任务页「复查超时任务」按原 taskId 续查（只查询、不重新提交）。
+    注意：普通「重试」是重新提交并重新计费，文案必须把这两条路分清。
+    """
 
     def __init__(self, task_id: str, timeout: int):
         self.task_id = task_id
         super().__init__(
             "timeout",
-            f"等待超时（{timeout}s），taskId={task_id} 可能仍在运行；重跑会续查该任务而不重复提交",
+            f"等待超时（{timeout}s）：taskId={task_id} 在云端可能还在跑或已出片。"
+            "请先点「复查超时任务」按这个 taskId 续查（不重复提交）；"
+            "直接重试会重新提交并二次计费",
             retryable=True,
         )
 

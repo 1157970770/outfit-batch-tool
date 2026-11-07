@@ -96,6 +96,9 @@ def from_remote(remote: dict, output_root: str | Path) -> dict:
         "WAN_DEFAULT_RATIO": wan.get("default_ratio"),
         "WAN_POLL_INTERVAL": float(wan.get("poll_interval") or 15),
         "WAN_POLL_TIMEOUT": int(wan.get("poll_timeout") or 1800),
+        # 等待超时后自动复查一次云端 taskId 的延迟（秒）；0 或 null = 关闭自动复查，
+        # 只保留任务页的「复查超时任务」手动按钮。
+        "WAN_TIMEOUT_RECHECK_DELAY": int(wan.get("timeout_recheck_delay") or 0),
         "WAN_MAX_CONCURRENCY": int(wan.get("max_concurrency") or 3),
         # 限流口径（2026-11-02 起）：创建任务与轮询是**两个独立额度**，
         # query_rpm 管 submit、query_rps 管 get_task；max_inflight 是同时在飞上限。

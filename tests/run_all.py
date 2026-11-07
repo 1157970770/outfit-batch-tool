@@ -39,6 +39,7 @@ REQUIRED = [
     "test_jobs_state",
     "test_path_relocate",
     "test_resume",
+    "test_timeout_recheck",
     "test_billing",
     "test_web_hardening",
     "test_batch5",

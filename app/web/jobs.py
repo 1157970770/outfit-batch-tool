@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from app import config as appconfig
-from app.core import TAG_SLOTS, BatchRunner, BatchSpec, unique_batch_dir
+from app.core import TAG_SLOTS, BatchRunner, BatchSpec, status_counts, unique_batch_dir
 from app.media import base64_budget_error
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, global_inflight, global_small_inflight
@@ -169,6 +169,9 @@ def _resume_scope(job: dict) -> tuple[int, int]:
     只有这两类才值得重排：前者接着等原 taskId（不重提、不二次计费），
     后者本来就没提交过（重排等于继续干）。「正在跑但没有 taskId」不算——
     那类只能落 unknown，让人去控制台核对后再决定。
+
+    running 与 timeout 都算「可接回」：等待超时不代表云端失败，taskId 在 24h 内
+    仍然有效；重启后接回只等结果，绝不重新提交（否则同一条模板二次计费）。
     """
     now = time.time()
     records = {}
@@ -177,7 +180,7 @@ def _resume_scope(job: dict) -> tuple[int, int]:
             records[str(rec["id"])] = rec
     reattach = 0
     for rec in records.values():
-        if str(rec.get("status") or "") != "running" or not rec.get("task_id"):
+        if str(rec.get("status") or "") not in ("running", "timeout") or not rec.get("task_id"):
             continue
         try:
             expires = float(rec.get("task_expires_at") or 0)
@@ -577,37 +580,7 @@ class JobManager:
                 self._save(job)
             if resume_mode:
                 self._append_log(job_id, f"重启接回：沿用 {len(resume_records)} 条旧记录继续")
-            template_store, output_store = build_storages(self.settings.config)
-            cfg = self.settings.config
-            # 线程数只是工作线程，不再与 API 并发/速率绑在一起；上限 50 防止误配。
-            concurrency = self.settings.max_concurrency
-            job_slots = image_slots(job, self.root)
-            job_image_paths = [s["path"] for s in job_slots]
-            spec = BatchSpec(
-                batch_id=Path(job["out_dir"]).name,
-                image_path=job_image_paths[0] if job_image_paths else "",
-                image_paths=job_image_paths,
-                prompt=job["prompt"], out_dir=Path(job["out_dir"]),
-                templates=job["templates"], api_key=app_api_key(cfg), base=str(cfg.get("WAN_BASE_URL") or ""),
-                provider=str(cfg.get("WAN_PROVIDER") or "dashscope"),
-                model=str(cfg.get("WAN_MODEL") or "wan3.0-video"), mode="edit",
-                resolution=job["resolution"], duration=job["duration"],
-                aspect_ratio=cfg.get("WAN_DEFAULT_RATIO"), concurrency=concurrency,
-                poll_interval=float(cfg.get("WAN_POLL_INTERVAL") or 15),
-                poll_timeout=int(cfg.get("WAN_POLL_TIMEOUT") or 1800),
-                expect_seconds=float(job["duration"]) if job["duration"] > 0 else 0,
-                storage=output_store, template_storage=template_store,
-                source_prefix=str(cfg.get("COS_SOURCE_PREFIX") or ""),
-                # 单价必须带兜底：引擎不兜底，传全 null 会让每条记录的费用变成 None。
-                price_per_second=self.settings.price_map(),
-                style_no=str(job.get("style_no") or ""),
-                tags=dict(job.get("tags") or {}),
-                # 快速通道用自己的在飞池，3 条小任务不会被大批量的几十条挡住。
-                inflight_semaphore=(self.small_inflight if job.get("lane") == "small"
-                                    else self.inflight),
-                # 只在重启接回时非空：引擎据此跳过已出片、接回已提交的条目。
-                resume=resume_records,
-            )
+            spec = self._build_spec(job, Path(job["out_dir"]), resume=resume_records)
             runner = BatchRunner(spec, on_event=lambda e: self._on_event(job_id, e),
                                  log=lambda m: self._append_log(job_id, m))
             with self.lock:
@@ -631,6 +604,200 @@ class JobManager:
             with self.changed:
                 self.active.pop(job_id, None)
                 self.changed.notify_all()
+
+    def _build_spec(self, job: dict, out_dir: Path, resume: dict | None = None) -> BatchSpec:
+        """按 job 记录组装引擎入参。正常跑与「复查超时」共用，避免两处口径漂移。"""
+        cfg = self.settings.config
+        template_store, output_store = build_storages(cfg)
+        # 线程数只是工作线程，不再与 API 并发/速率绑在一起；上限 50 防止误配。
+        concurrency = self.settings.max_concurrency
+        job_slots = image_slots(job, self.root)
+        job_image_paths = [s["path"] for s in job_slots]
+        return BatchSpec(
+            batch_id=Path(job["out_dir"]).name,
+            image_path=job_image_paths[0] if job_image_paths else "",
+            image_paths=job_image_paths,
+            prompt=job["prompt"], out_dir=Path(job["out_dir"]),
+            templates=job["templates"], api_key=app_api_key(cfg), base=str(cfg.get("WAN_BASE_URL") or ""),
+            provider=str(cfg.get("WAN_PROVIDER") or "dashscope"),
+            model=str(cfg.get("WAN_MODEL") or "wan3.0-video"), mode="edit",
+            resolution=job["resolution"], duration=job["duration"],
+            aspect_ratio=cfg.get("WAN_DEFAULT_RATIO"), concurrency=concurrency,
+            poll_interval=float(cfg.get("WAN_POLL_INTERVAL") or 15),
+            poll_timeout=int(cfg.get("WAN_POLL_TIMEOUT") or 1800),
+            expect_seconds=float(job["duration"]) if job["duration"] > 0 else 0,
+            storage=output_store, template_storage=template_store,
+            source_prefix=str(cfg.get("COS_SOURCE_PREFIX") or ""),
+            # 单价必须带兜底：引擎不兜底，传全 null 会让每条记录的费用变成 None。
+            price_per_second=self.settings.price_map(),
+            style_no=str(job.get("style_no") or ""),
+            tags=dict(job.get("tags") or {}),
+            # 快速通道用自己的在飞池，3 条小任务不会被大批量的几十条挡住。
+            inflight_semaphore=(self.small_inflight if job.get("lane") == "small"
+                                else self.inflight),
+            # 只在重启接回时非空：引擎据此跳过已出片、接回已提交的条目。
+            resume=resume or {},
+        )
+
+    # ---- 复查超时任务（P0） ----
+    # 超时只是「本机没等到」，云端很可能已经出片并按秒计费。复查 = 按原 taskId
+    # 向云端查一次，出片就补下载/补记账，绝不再提交新任务（避免二次计费）。
+    # 一个 HTTP 请求做完会被 socket 超时（30s）掐断，所以放后台线程，前端轮询 job。
+    def recheck_timeouts(self, job_id: str, *, auto: bool = False) -> dict:
+        """启动一次后台复查；返回 job 快照。重复点击/并发的第二次会直接报错。"""
+        with self.changed:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise ValueError("找不到该任务")
+            if str(job.get("status") or "") in ("queued", "running"):
+                raise ValueError("任务还在跑，跑完再复查")
+            if (job.get("recheck") or {}).get("running"):
+                raise ValueError("上一次复查还没结束，请稍等")
+            targets = [rec for rec in job.get("records") or []
+                       if str(rec.get("status") or "") == "timeout"]
+            if not targets:
+                raise ValueError("没有等待超时的条目需要复查")
+            job["recheck"] = {
+                "running": True,
+                "auto": bool(auto),
+                "total": len(targets),
+                "checked": 0,
+                "success": 0,
+                "failed": 0,
+                "still_running": 0,
+                "errors": 0,
+                "started_at": time.time(),
+                "finished_at": None,
+                "message": f"正在向云端复查 {len(targets)} 条超时任务（只查询，不重新提交）…",
+            }
+            self._save(job)
+            self.changed.notify_all()
+        thread = threading.Thread(target=self._run_recheck, args=(job_id,),
+                                  name=f"recheck-{job_id}", daemon=True)
+        thread.start()
+        return self.public(job)
+
+    def _run_recheck(self, job_id: str) -> None:
+        """后台线程：逐条复查，边查边把结果写回 job（前端轮询就能看到进度）。"""
+        job = None
+        try:
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is None:
+                    return
+                records = {str(rec.get("id")): dict(rec) for rec in job.get("records") or []}
+                targets = [rec for rec in records.values()
+                           if str(rec.get("status") or "") == "timeout"]
+                out_dir = relocate(job.get("out_dir"), self.root, must_exist=False)
+                spec = self._build_spec(job, Path(out_dir))
+            runner = BatchRunner(spec, log=lambda m: self._append_log(job_id, m))
+            self._append_log(job_id, f"复查超时任务：{len(targets)} 条，按原 taskId 向云端查询")
+
+            def on_update(rec: dict) -> None:
+                with self.changed:
+                    live = self.jobs.get(job_id)
+                    if live is None:
+                        return
+                    state = live.get("recheck") or {}
+                    status = str(rec.get("status") or "")
+                    state["checked"] = int(state.get("checked") or 0) + 1
+                    if status == "success":
+                        state["success"] = int(state.get("success") or 0) + 1
+                    elif status == "timeout":
+                        # 仍是 timeout 有四种原因：云端还在跑（正常等）、下载失败、
+                        # 没有 taskId 无法查、查询本身报错。后三种要算「出错」，用户才知道要再点一次。
+                        cloud = str(rec.get("cloud_status") or "")
+                        if (rec.get("download_failed") or cloud == "no_task_id"
+                                or cloud.startswith("error:")):
+                            state["errors"] = int(state.get("errors") or 0) + 1
+                        else:
+                            state["still_running"] = int(state.get("still_running") or 0) + 1
+                    elif rec.get("cloud_status", "").startswith("error:"):
+                        state["errors"] = int(state.get("errors") or 0) + 1
+                    else:
+                        state["failed"] = int(state.get("failed") or 0) + 1
+                    state["message"] = (f"已复查 {state['checked']}/{state['total']} 条："
+                                        f"补回 {state['success']}、云端已失败 {state['failed']}、"
+                                        f"仍在跑 {state['still_running']}、出错 {state['errors']}")
+                    live["recheck"] = state
+                    live["records"] = [rec if str(r.get("id")) == str(rec.get("id")) else r
+                                       for r in (live.get("records") or [])]
+                    self._save(live)
+                    self.changed.notify_all()
+
+            runner.recheck_timeouts(targets, on_update=on_update)
+        except Exception as exc:  # noqa: BLE001 - 复查失败不能把 job 打成 failed
+            with self.changed:
+                live = self.jobs.get(job_id)
+                if live is not None:
+                    state = live.get("recheck") or {}
+                    state["message"] = f"复查中断：{type(exc).__name__}: {exc}"
+                    state["errors"] = int(state.get("errors") or 0) + 1
+                    live["recheck"] = state
+                    self._save(live)
+                self.changed.notify_all()
+            self._append_log(job_id, f"复查超时任务失败：{exc}")
+        finally:
+            with self.changed:
+                live = self.jobs.get(job_id)
+                if live is not None:
+                    self._refresh_summary(live)
+                    state = live.get("recheck") or {}
+                    state["running"] = False
+                    state["finished_at"] = time.time()
+                    live["recheck"] = state
+                    self._save(live)
+                    self.changed.notify_all()
+                    if state.get("success"):
+                        self._append_log(
+                            job_id,
+                            f"复查完成：{state['success']} 条云端已出片，已补下载并转为成功",
+                        )
+                    self._schedule_recheck_after_auto(live, state)
+
+    def _refresh_summary(self, job: dict) -> None:
+        """复查改变了记录状态后，重算 job 的汇总与终态（partial → succeeded 等）。"""
+        records = job.get("records") or []
+        counts = status_counts(records)
+        summary = dict(counts)
+        summary.update({
+            "total": len(records),
+            "unsuccessful": max(0, len(records) - counts["success"]),
+            "billable_seconds": round(sum(float(r.get("billable_seconds") or 0)
+                                          for r in records), 2),
+            "estimated_cost": round(sum(float(r.get("estimated_cost") or 0)
+                                        for r in records), 2),
+            "out_dir": str(job.get("out_dir") or ""),
+        })
+        summary["cost"] = summary["estimated_cost"]
+        status, message, done = self._job_outcome(summary)
+        job["summary"] = summary
+        job["done"] = done
+        if str(job.get("status") or "") not in ("queued", "running"):
+            job["status"] = status
+            job["message"] = message
+
+    def _schedule_recheck_after_auto(self, job: dict, state: dict) -> None:
+        """超时后自动复查一次（P1）：job 刚跑完、还有 timeout 条目时，延迟一段时间再查。"""
+        if state.get("auto"):
+            return
+        delay = float(self.settings.config.get("WAN_TIMEOUT_RECHECK_DELAY") or 0)
+        if delay <= 0:
+            return
+        if (job.get("recheck") or {}).get("auto"):
+            return
+        if not any(str(r.get("status") or "") == "timeout" for r in job.get("records") or []):
+            return
+
+        def _later() -> None:
+            if self.stop_event.wait(delay):
+                return
+            try:
+                self.recheck_timeouts(job["id"], auto=True)
+            except Exception:  # noqa: BLE001 - 自动复查只是兜底，失败不影响用户手动点
+                pass
+
+        threading.Thread(target=_later, name=f"recheck-later-{job['id']}", daemon=True).start()
 
     @staticmethod
     def _job_outcome(summary: dict) -> tuple[str, str, int]:
@@ -670,6 +837,10 @@ class JobManager:
             job["finished_at"] = time.time()
             self._save(job)
             self.changed.notify_all()
+            # P1：有等待超时的条目就排一次延迟自动复查（只查 taskId，不重新提交）。
+            # 放在锁内取快照，线程只拿到 job 引用，不会与结束流程抢写。
+            if status in ("partial", "failed") and int(summary.get("timeout") or 0) > 0:
+                self._schedule_recheck_after_auto(job, {"auto": False})
 
     def retry_failed(self, job_id: str, owner: str, admin: bool = False) -> dict:
         with self.lock:
@@ -807,6 +978,9 @@ class JobManager:
         def blank(name: str, role: str = "user", enabled: bool = True) -> dict:
             return {"owner": name, "role": role, "enabled": enabled,
                     "jobs": 0, "items": 0, "success": 0, "failed": 0, "unfinished": 0,
+                    # timeout 单列：可能云端已出片并计费，直接算「已用」会虚高，
+                    # 算「失败」又会让账单少一块；管理员在用量页单独看这一列。
+                    "timeout": 0,
                     "billable_seconds": 0.0, "estimated_cost": 0.0, "last_at": 0.0}
 
         rows: dict[str, dict] = {}
@@ -832,6 +1006,11 @@ class JobManager:
                     row["items"] += 1
                     if status == "success":
                         row["success"] += 1
+                    elif status == "timeout":
+                        # 超时单列：既算进 failed（业务上没拿到片子），也单独计数，
+                        # 让管理员知道其中有多少条是「本机没等到、云端可能已计费」。
+                        row["failed"] += 1
+                        row["timeout"] += 1
                     elif status in failed_states:
                         row["failed"] += 1
                     elif status == "running":
@@ -852,7 +1031,8 @@ class JobManager:
 
         accounts = sorted(rows.values(),
                           key=lambda r: (-r["estimated_cost"], -r["items"], r["owner"]))
-        totals = {key: 0 for key in ("jobs", "items", "success", "failed", "unfinished")}
+        totals = {key: 0 for key in ("jobs", "items", "success", "failed", "unfinished",
+                                     "timeout")}
         for row in accounts:
             for key in totals:
                 totals[key] += int(row[key])
@@ -950,6 +1130,9 @@ class JobManager:
                 "batch_id",                 "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
                 "duration", "total", "done", "message", "log_tail", "cancel_requested",
                 "lane", "style_no", "tags")}
+            # 复查超时任务（P0）的进度：前端据此显示「已复查 3/23」并保持轮询。
+            state = job.get("recheck")
+            safe["recheck"] = dict(state) if isinstance(state, dict) else None
             safe["batch_ref"] = str(safe.get("batch_ref") or "")
             # 只下发可访问的缩略 URL 与文件名；images 里有服务器绝对路径，绝不出公网。
             slots = image_slots(job, self.root)

@@ -56,6 +56,10 @@ DEFAULT_PROMPT = (
 GROUP_SIZE = 100
 TOTAL_TEMPLATES = 500
 
+# 重启/续跑时可接回的记录状态：running = 重启前正在跑；timeout = 本机等超时，
+# 但云端 taskId 仍可能有效（24h 内可查），接回只等不重提，避免二次计费。
+REATTACHABLE_STATES = ("running", "timeout")
+
 
 class EngineError(RuntimeError):
     pass
@@ -397,15 +401,16 @@ class BatchRunner:
         total = len(spec.templates)
         # 重启接回：分三类，只有第一类要跑。
         #   ① 没有记录 / pending：从没提交过 → 正常提交
-        #   ② running 且带 task_id：重启前已提交 → 接回那条云端任务，绝不重提
-        #   ③ 其它（success/unknown/timeout/expired/failed…）：已经是定论，沿用旧记录
+        #   ② running / timeout 且带 task_id：重启前已提交（或本机等超时）→ 接回原云端
+        #      任务，绝不重提；timeout 的 taskId 在 24h 内仍然有效
+        #   ③ 其它（success/failed/invalid/expired/canceled/unknown…）：已经是定论，沿用旧记录
         pending_templates = []
         need_submit = False
         kept = 0
         for tpl in spec.templates:
             prior = (spec.resume or {}).get(str(tpl["id"])) or {}
             prev_status = str(prior.get("status") or "")
-            reattach = prev_status == "running" and bool(prior.get("task_id"))
+            reattach = prev_status in REATTACHABLE_STATES and bool(prior.get("task_id"))
             if not prior or prev_status in ("", "pending"):
                 pending_templates.append(tpl)
                 need_submit = True
@@ -546,9 +551,10 @@ class BatchRunner:
 
         # 重启接回：这条在重启前已经提交过（有 task_id），云端任务可能还在跑/已出片。
         # 绝不能重新提交——那就是同一条模板二次计费。直接接着等那条 taskId。
+        # timeout 也走这条路：等待超时≠云端失败，同一条 taskId 仍然有效（24h 内可查）。
         prior = (spec.resume or {}).get(str(tid)) or {}
         reattach = ""
-        if str(prior.get("status") or "") == "running" and prior.get("task_id"):
+        if str(prior.get("status") or "") in REATTACHABLE_STATES and prior.get("task_id"):
             reattach = str(prior["task_id"])
             rec.update({
                 "task_id": reattach,
@@ -557,7 +563,8 @@ class BatchRunner:
                 "task_expires_at": prior.get("task_expires_at") or 0,
                 "resumed": True,
             })
-            self.log(f"[{tid}] 接回重启前的云端任务 taskId={reattach}（不重新提交）")
+            self.log(f"[{tid}] 接回{'超时' if prior.get('status') == 'timeout' else '重启前'}"
+                     f"的云端任务 taskId={reattach}（不重新提交）")
 
         body, errors, warnings = {}, [], []
         if not reattach:
@@ -731,6 +738,110 @@ class BatchRunner:
             # 点了取消就尽快放手：云端那条任务收不回来，但本机不必再占着在飞名额陪跑到超时。
             should_stop=self.stop_event.is_set,
         )
+
+    def recheck_timeouts(self, records, on_update=None) -> list[dict]:
+        """按 task_id 复查「等待超时」的记录：只查询云端，绝不重新提交。
+
+        为什么需要：等待超时只说明本机没在 30 分钟内等到结果，云端那条任务
+        往往还在跑、甚至已经出片并按秒计费。直接「重试」= 重新提交 = 二次计费，
+        正确做法是拿原 taskId 问一次云端，再决定要不要补下载。
+
+        每条记录的结果：
+          - succeeded      → 下载 + 补记账（billable/estimated）+ COS 归档 → success
+          - failed/canceled→ 落对应终态；云端已判死，之后重试不会重复计费
+          - unknown        → expired（云端查不到，超过 24h 或已清理）
+          - pending/running→ 保持 timeout，只更新 checked_at / cloud_status，不占在飞额度
+          - 查询失败       → 保持 timeout，记下原因，稍后可再点一次
+
+        返回更新后的记录副本列表；on_update(rec) 每处理完一条回调一次（用于边跑边刷页面）。
+        """
+        spec = self.spec
+        out_dir = spec.out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        durations = {str((tpl or {}).get("id")): _as_seconds((tpl or {}).get("duration"))
+                     for tpl in (spec.templates or [])}
+        updated: list[dict] = []
+        for item in records or []:
+            rec = dict(item)
+            tid = rec.get("id")
+            task_id = str(rec.get("task_id") or "")
+            rec["checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            if not task_id:
+                rec["cloud_status"] = "no_task_id"
+                rec["error"] = "这条没有 taskId，无法向云端复查；只能重新提交（会二次计费）"
+                self._recheck_emit(updated, rec, on_update)
+                continue
+            try:
+                final = self._client.get_task(task_id)
+            except WanError as exc:
+                rec["cloud_status"] = f"error:{exc.category}"
+                rec["error"] = (f"复查失败（{exc.category}）：{exc}。云端任务可能仍在运行，"
+                                "稍后再点「复查超时任务」")
+                self._recheck_emit(updated, rec, on_update)
+                continue
+            rec["cloud_status"] = final.status
+            rec["request_id"] = final.request_id or rec.get("request_id", "")
+            if final.status == STATUS_SUCCEEDED and final.video_url:
+                self._recheck_success(rec, final, out_dir / f"{tid}.mp4",
+                                      durations.get(str(tid)))
+            elif final.status in (STATUS_FAILED, STATUS_CANCELED, STATUS_UNKNOWN):
+                rec["status"] = {
+                    STATUS_FAILED: "failed",
+                    STATUS_CANCELED: "canceled",
+                    STATUS_UNKNOWN: "expired",
+                }[final.status]
+                rec["error"] = (
+                    f"云端已判定：{final.status}"
+                    + (f" [{final.code}]" if final.code else "")
+                    + (f" {final.message}" if final.message else "")
+                    + "；现在可以安全重试，不会重复计费"
+                )
+            else:
+                rec["status"] = "timeout"
+                rec["error"] = (f"云端仍在运行（taskId={task_id}，状态 {final.status}）；"
+                                "已复查但还没有结果，稍后再点一次「复查超时任务」")
+            self._recheck_emit(updated, rec, on_update)
+        return updated
+
+    @staticmethod
+    def _recheck_emit(updated: list[dict], rec: dict, on_update) -> None:
+        updated.append(rec)
+        if on_update is not None:
+            try:
+                on_update(dict(rec))
+            except Exception:  # noqa: BLE001 - 回调不能打断复查
+                pass
+
+    def _recheck_success(self, rec: dict, final, out_file: Path, template_seconds) -> None:
+        """云端已出片：补记账 + 补下载 + 归档，把记录翻成 success。"""
+        usage = final.usage or {}
+        billable, estimated = estimate_cost(usage, self.spec.resolution,
+                                           self.spec.price_per_second)
+        rec.update({
+            "usage": usage,
+            "billable_seconds": billable,
+            "estimated_cost": estimated,
+            "file": str(out_file),
+            "error": None,
+        })
+        try:
+            if not (out_file.is_file() and out_file.stat().st_size > 0):
+                download_file(final.video_url, out_file)
+        except Exception as exc:  # noqa: BLE001 - 云端已计费，下载失败要如实标出来
+            # 保持 timeout：再点一次「复查超时任务」会重新查到这个 taskId 并补下载，
+            # 不会重新提交、不会二次计费。
+            rec["status"] = "timeout"
+            rec["download_failed"] = True
+            rec["error"] = (f"云端已出片并按 {billable:g} 秒计费，但下载失败："
+                            f"{type(exc).__name__}: {exc}；可再点一次「复查超时任务」重试下载")
+            return
+        rec["status"] = "success"
+        rec["download_failed"] = False
+        try:
+            rec["verify"] = self._verify(out_file, template_seconds)
+        except Exception as exc:  # noqa: BLE001 - 校验只是附加信息
+            rec["verify_error"] = f"{type(exc).__name__}: {exc}"
+        self._archive(rec, out_file)
 
     def _archive(self, rec: dict, path: Path) -> None:
         """把刚下载的成品推进对象存储。

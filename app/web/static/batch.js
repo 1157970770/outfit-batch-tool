@@ -49,6 +49,9 @@
     previewId: '', resizeRaf: 0,
     itemFilter: 'all', itemLimit: ITEM_PAGE, itemsSignature: '',
     busy: false, pollTimer: null, activeJob: null,
+    // 复查超时条目的轮询窗口（毫秒时间戳，0=不轮询）：点击复查后撑 3 分钟，
+    // 等后台线程把「云端已出片」的条目补下载并翻成已完成。
+    recheckPoll: 0,
     // 建批次时的 10 槽位本地状态；锁定后追加细节图时的错误文案（轮询重渲染不丢）
     slots: [], slotBusy: false, slotError: '',
     promptEditing: false,    // 锁定摘要里「修改提示词」的编辑态；切批次/退出时复位
@@ -286,6 +289,7 @@
     b.items = [];
     b.itemsSignature = '';
     b.activeJob = null;
+    b.recheckPoll = 0;                       // 离开批次：复查轮询窗口作废
     b.promptEditing = false;                 // 编辑态不跨批次残留
     stopPoll();
     resetCandidates();
@@ -1417,18 +1421,32 @@
     // 失败条目给一个重试入口（接口 #9），否则 failed 条目在页面上就是死路。
     const retryBox = $('batch-retry');
     retryBox.replaceChildren();
+    // 超时条目（P0）：先按原 taskId 复查一次云端，出片就补下载，**不要直接重试**——
+    // 直接重试会重新提交，而上一次云端大概率已经出片并计费了。
+    const timeoutJobs = Array.isArray(batch.timeout_jobs) ? batch.timeout_jobs : [];
+    if (timeoutJobs.length) {
+      const recheck = el('button', 'primary', '复查超时任务');
+      recheck.type = 'button';
+      recheck.disabled = b.busy;
+      recheck.title = '按原 taskId 查询云端：已出片的直接补下载，不重新提交、不二次计费';
+      recheck.addEventListener('click', () => recheckBatch(batch));
+      retryBox.append(recheck, el('span', 'muted',
+        `有 ${timeoutJobs.length} 个任务含等待超时的条目；先复查，确认云端真失败再重试。`));
+      retryBox.classList.remove('hidden');
+    }
     if (failed > 0) {
       const retryCount = Math.min(failed, 100);
       const retry = el('button', 'quiet', `重试失败的 ${retryCount} 条`);
       retry.type = 'button';
       retry.disabled = b.busy || !!activeId || closed;
-      retry.title = activeId ? '当前批次还有任务在跑' : '只重跑失败条目，不改清单';
+      retry.title = activeId ? '当前批次还有任务在跑'
+        : timeoutJobs.length ? '其中含等待超时的条目：建议先点「复查超时任务」，直接重试会二次计费'
+        : '只重跑失败条目，不改清单';
       retry.addEventListener('click', () => retryFailed(batch, retryCount));
       retryBox.append(retry, el('span', 'muted', '只重跑失败条目，已完成的不会重复提交。'));
       retryBox.classList.remove('hidden');
-    } else {
-      retryBox.classList.add('hidden');
     }
+    if (!retryBox.childNodes.length) retryBox.classList.add('hidden');
   }
 
   /* ---------- 自定条数（档位之外的可变粒度：7、13、33 都行） ----------
@@ -1483,7 +1501,11 @@
 
   async function retryFailed(batch, count) {
     if (b.busy || !batch || !batch.id) return;
-    if (!confirm(`重试失败的 ${count} 条？\n\n提交后不能撤回。`)) return;
+    const timeoutJobs = Array.isArray(batch.timeout_jobs) ? batch.timeout_jobs : [];
+    const warn = timeoutJobs.length
+      ? `\n\n注意：这批里还有等待超时的条目（${timeoutJobs.length} 个任务）。\n超时的含义是「本机没等到」，云端多数已经出片并计费了——\n直接重试会让同一条模板二次提交、二次计费。\n建议先点「复查超时任务」。`
+      : '';
+    if (!confirm(`重试失败的 ${count} 条？${warn}\n\n提交后不能撤回。`)) return;
     b.busy = true;
     renderProduce(batch);
     try {
@@ -1501,6 +1523,37 @@
       node.textContent = err.message;
       node.classList.remove('hidden');
       renderProduce(batch);
+    }
+  }
+
+  /* 复查超时条目（P0）：只查询、不重新提交。
+     一个批次可能对应多个 job（多轮生产），服务端逐个 job 起后台线程去问云端，
+     所以这里不能等结果——先把「复查中」的轮询窗口打开，出片补下载后批次条目会
+     由服务端 _heal_items 自动从「失败」变成「已完成」。 */
+  async function recheckBatch(batch) {
+    if (b.busy || !batch || !batch.id) return;
+    if (!confirm('把这一批里等待超时的条目按原 taskId 问一次云端？\n\n只查询、不重新提交：云端已出片的会直接补下载；\n云端确实失败的才转成「失败」，那时再重试不会二次计费。')) return;
+    b.busy = true;
+    renderProduce(batch);
+    try {
+      const data = await api(`/api/batches/${encodeURIComponent(batch.id)}/recheck`, {
+        method: 'POST',
+        body: '{}',
+      });
+      const started = Array.isArray(data.jobs) ? data.jobs.length : 0;
+      const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+      toast(started
+        ? `已开始复查 ${started} 个任务的超时条目${skipped ? `（${skipped} 个已在复查中，跳过）` : ''}，稍后刷新看结果。`
+        : '没有可复查的超时条目。');
+      b.busy = false;
+      // 复查是后台线程：3 分钟内保持轮询，等补下载把条目翻成已完成。
+      b.recheckPoll = Date.now() + 180000;
+      startPoll();
+      await refreshBatch(false);
+    } catch (err) {
+      b.busy = false;
+      renderProduce(batch);
+      toast(err.message);
     }
   }
 
@@ -1740,10 +1793,15 @@
       b.activeJob = null;
     }
     if (b.current) renderProduce(b.current);
+    // 复查窗口内继续轮询；批次里已经没有超时条目了就把窗口关掉，别一直空转。
+    const timeoutJobs = Array.isArray(b.current && b.current.timeout_jobs) ? b.current.timeout_jobs : [];
+    if (!timeoutJobs.length) b.recheckPoll = 0;
   }
   function maybePoll() {
-    if (txt(b.current && b.current.active_job_id)) startPoll();
-    else stopPoll();
+    if (txt(b.current && b.current.active_job_id)) { startPoll(); return; }
+    if (b.recheckPoll && Date.now() < b.recheckPoll) { startPoll(); return; }
+    b.recheckPoll = 0;
+    stopPoll();
   }
   function startPoll() {
     if (b.pollTimer) return;
@@ -1885,6 +1943,7 @@
     b.promptDraft = '';
     b.current = b.batches.find((item) => txt(item.id) === id) || { id };
     b.items = [];
+    b.recheckPoll = 0;    // 换批次：上一个批次的复查轮询窗口不带过来
     resetCandidates();
     resetItemsView();
     stopPoll();

@@ -215,19 +215,53 @@ class BatchManager:
             return self.batches.get(str(batch_id or ""))
 
     # ------------------------------------------------------------------ 对账
+    def _heal_items(self, batch: dict) -> bool:
+        """把「已判失败、但对应 job 记录后来变 success」的条目改回 done。
+
+        典型场景：等待超时被收成 failed，之后点「复查超时任务」按原 taskId 续查到
+        云端已出片，job 记录翻成 success——批次页必须跟着变成已完成，否则用户会
+        对同一条模板再点一次「重试失败」，那才是真正的二次计费。
+
+        只做 failed → done 的单向升级，绝不把 done 降回去（续查只会让结果变好）。
+        """
+        changed = False
+        for item in batch.get("items") or []:
+            if item.get("state") != "failed":
+                continue
+            job_id = str(item.get("job_id") or "")
+            if not job_id or self.jobs is None:
+                continue
+            job = self.jobs.jobs.get(job_id)
+            if not isinstance(job, dict):
+                continue
+            for rec in job.get("records") or []:
+                if (str(rec.get("id")) == str(item.get("template_id"))
+                        and str(rec.get("status")) == "success"):
+                    item["state"] = "done"
+                    item["error"] = ""
+                    changed = True
+                    break
+        if changed:
+            self._refresh(batch)
+        return changed
+
     def _reconcile(self, batch: dict) -> bool:
         """把 active_job_id 对应 job 的结果收敛回条目状态；有改动返回 True。
 
         必须在持锁状态下调用（内部只读 self.jobs.jobs，不再取 jobs.changed，
         避免与 dispatcher 互相等待；RLock 允许重入，server 侧统一先持锁）。
         """
+        healed = self._heal_items(batch)
         job_id = str(batch.get("active_job_id") or "")
         if not job_id:
             # 上一次生产建了 job 但批次没来得及标 producing（写盘失败 / 进程被杀）：
             # 先认领，别让用户再点一次生产导致同批模板被重复提交。
             job_id = self._adopt_pending_run(batch)
             if not job_id:
-                return False
+                if healed:
+                    batch["updated_at"] = time.time()
+                    self._save(batch)
+                return healed
         job = self.jobs.jobs.get(job_id) if self.jobs is not None else None
         if isinstance(job, dict) and job.get("status") not in _TERMINAL_JOB:
             return False
@@ -427,6 +461,55 @@ class BatchManager:
                           "path": str(meta.get("path") or "")})
         return slots
 
+    def _timeout_jobs(self, batch: dict) -> list[str]:
+        """这个批次名下「还有 timeout 记录」的 job id（runs 为主，items 兜底）。
+
+        调用方需持 self.mutex（只读内存，不再取 jobs.changed，避免与调度线程互相等待）。
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for run in batch.get("runs") or []:
+            job_id = str(run.get("job_id") or "")
+            if job_id and job_id not in seen:
+                seen.add(job_id)
+                out.append(job_id)
+        for item in batch.get("items") or []:
+            job_id = str(item.get("job_id") or "")
+            if job_id and job_id not in seen:
+                seen.add(job_id)
+                out.append(job_id)
+        keep: list[str] = []
+        for job_id in out:
+            job = self.jobs.jobs.get(job_id) if self.jobs is not None else None
+            if not isinstance(job, dict):
+                continue
+            if any(str(rec.get("status")) == "timeout" for rec in job.get("records") or []):
+                keep.append(job_id)
+        return keep
+
+    def recheck_timeouts(self, batch_id: str, user: dict) -> dict:
+        """对这个批次里所有含超时记录的 job 逐个发起「复查」（只查云端，不重新提交）。
+
+        为什么放在批次上：一次大批量跑完，超时条目通常散在同一个 job 的十几条记录里，
+        用户真正想点的是「把这批超时的都查一遍」，而不是逐个 job 点。
+        """
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            jobs = self._timeout_jobs(batch)
+        if not jobs:
+            raise BatchError("这个批次没有等待超时的条目。", 409)
+        started: list[str] = []
+        skipped: list[dict] = []
+        for job_id in jobs:
+            try:
+                # 注意：这里**不持 self.mutex** 调用 jobs 侧（jobs.lock 与 batches.mutex
+                # 是两把锁，交叉持有会死锁）。
+                self.jobs.recheck_timeouts(job_id, auto=True)
+                started.append(job_id)
+            except ValueError as exc:
+                skipped.append({"job_id": job_id, "reason": str(exc)})
+        return {"jobs": started, "skipped": skipped, "total_jobs": len(jobs)}
+
     def public(self, batch: dict) -> dict:
         with self.mutex:
             data = {key: batch.get(key) for key in (
@@ -441,6 +524,9 @@ class BatchManager:
             data["image_urls"] = [f"/api/uploads/{s['upload_id']}" for s in slots if s.get("upload_id")]
             data["image_names"] = [s["name"] for s in slots]
             data["runs"] = [dict(run) for run in (batch.get("runs") or [])]
+            # 还有超时记录的 job：前端据此显示「复查超时任务」按钮，
+            # 复查成功时批次条目会被 _heal_items 自动改回已完成。
+            data["timeout_jobs"] = self._timeout_jobs(batch)
             return data
 
     def _record_index(self, cache: dict[str, dict], job_id: str) -> dict[str, dict]:

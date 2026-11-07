@@ -735,6 +735,18 @@ def make_handler(app: WebApplication):
                     return self._json({"ok": True, "job": retry}, 201)
                 except ValueError as exc:
                     return self._error(exc, 409)
+            # 复查超时任务：按原 taskId 问云端（只查询、不提交），出片就补下载。
+            # 后台线程跑，立即返回 job；前端轮询 job.recheck 看进度。
+            if path.startswith("/api/jobs/") and path.endswith("/recheck"):
+                job_id = path.strip("/").split("/")[2]
+                source = self._authorized_job(job_id, user)
+                if not source:
+                    return self._error("找不到该任务。", 404)
+                try:
+                    snapshot = app.jobs.recheck_timeouts(job_id)
+                    return self._json({"ok": True, "job": snapshot}, 202)
+                except ValueError as exc:
+                    return self._error(exc, 409)
             if path == "/api/batches":
                 return self._batch_create(data, user)
             if path.startswith("/api/batches/"):
@@ -757,6 +769,8 @@ def make_handler(app: WebApplication):
                         return self._batch_prompt(parts[2], data, user)
                     if action == "retry-failed":
                         return self._batch_retry(parts[2], data, user)
+                    if action == "recheck":
+                        return self._batch_recheck(parts[2], user)
             if path == "/api/tags" or path.startswith("/api/tags/"):
                 from app.web import tag_api
                 parts = path.strip("/").split("/")
@@ -1113,6 +1127,17 @@ def make_handler(app: WebApplication):
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, **result}, 201)
+
+        def _batch_recheck(self, batch_id, user):
+            """POST /api/batches/{id}/recheck：把该批次里所有超时 job 按原 taskId 查一遍。
+
+            只查询不提交，立即返回 202；前端轮询批次详情，成功条目由 _heal_items 转 done。
+            """
+            try:
+                result = app.batches.recheck_timeouts(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result}, 202)
 
         def _batch_close(self, batch_id, user):
             try:
