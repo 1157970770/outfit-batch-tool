@@ -540,6 +540,25 @@
     close.addEventListener('click', () => { root.classList.add('hidden'); state.selectedJob = null; state.detailStatus = null; });
     side.append(badge, close); head.append(left, side); root.append(head);
     const meta = document.createElement('p'); meta.className = 'job-meta'; meta.textContent = `${job.done || 0} / ${job.total || 0} 条完成 · ${job.resolution} · ${job.duration === -1 ? '跟随场景时长' : `${job.duration} 秒`}${job.lane === 'small' ? ' · 快速通道' : ''}`; root.append(meta);
+    // 这条任务提交时用的提示词（快照）：批次锁定后改提示词只影响之后的轮次，
+    // 所以这里显示的是「当时那份」，不是批次当前的那份。默认折叠，长正文不占屏。
+    const runInfo = job.batch_run && job.batch_run.no ? ` · 第 ${job.batch_run.no}/${job.batch_run.total} 批` : '';
+    const changed = job.batch_run && job.batch_run.prompt_changed ? ' · 这批改过提示词' : '';
+    const promptBox = document.createElement('details'); promptBox.className = 'detail-prompt';
+    const promptSum = document.createElement('summary');
+    promptSum.textContent = `提示词${job.prompt_id ? ` ${job.prompt_id}` : ''}${runInfo}${changed}`;
+    const promptBody = document.createElement('pre'); promptBody.className = 'detail-prompt-body';
+    promptBody.textContent = job.prompt || '（这条任务没有记录提示词）';
+    const promptCopy = document.createElement('button'); promptCopy.className = 'quiet btn-sm'; promptCopy.type = 'button'; promptCopy.textContent = '复制提示词';
+    promptCopy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(promptBody.textContent);
+        promptCopy.textContent = '已复制';
+        setTimeout(() => { promptCopy.textContent = '复制提示词'; }, 1500);
+      } catch (err) { toast('复制失败，请手动选中文本。'); }
+    });
+    promptBox.append(promptSum, promptBody, promptCopy);
+    root.append(promptBox);
     // 1 定妆 + 9 细节：只展示可访问的缩略 URL（后端 public() 不下发服务器路径）。
     const urls = Array.isArray(job.image_urls) ? job.image_urls : [];
     if (urls.length) {

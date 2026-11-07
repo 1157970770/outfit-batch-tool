@@ -188,6 +188,14 @@ class BatchManager:
             self._reconcile(batch)
 
     # ------------------------------------------------------------------ 内部工具
+    def _usage_style(self, batch: dict) -> str:
+        """款号-模板账本的键：优先 6 栏位里的「上衣」，老批次回退 style_no。
+
+        与 `_start_run` 记账时同一口径 —— 记账和查询必须用同一把键，否则「已用」永远查不到。
+        """
+        tags = batch.get("tags") if isinstance(batch.get("tags"), dict) else {}
+        return str(tags.get("top") or "").strip() or clean_style_no(batch.get("style_no"))
+
     def _catalog(self):
         catalog = self.catalog_of() if callable(self.catalog_of) else self.catalog_of
         if catalog is None or not getattr(catalog, "items", None):
@@ -745,6 +753,10 @@ class BatchManager:
         sort = str(data.get("sort") or "").strip().lower()
         if sort not in ("", "rating"):
             raise BatchError("sort 仅支持空（默认）或 rating（评分高到低）。")
+        # 「隐藏已用」：本款号在之前批次里生产过的模板直接不进候选（款号-模板账本，
+        # 与候选行的「已用」徽标、锁定时的防重确认同源）。放在评分/排序之前筛，
+        # used_skipped 报的是「标签命中里有多少条被这个开关筛掉了」。
+        hide_used = data.get("hide_used") is True
         with self.mutex:
             batch = self._authorized(batch_id, user)
             resolution = str(batch.get("resolution") or "720P")
@@ -754,6 +766,13 @@ class BatchManager:
             matched = catalog.filter_items(tag_filters)
         except TemplateError as exc:
             raise BatchError(str(exc)) from None
+        used_skipped = 0
+        if hide_used:
+            used_ids = set(self.usage.used(self._usage_style(batch)))
+            if used_ids:
+                before = len(matched)
+                matched = [item for item in matched if str(item.get("id")) not in used_ids]
+                used_skipped = before - len(matched)
         if rating_min > 0:
             matched = [item for item in matched
                        if int(item.get("rating") or 0) >= rating_min]
@@ -775,6 +794,8 @@ class BatchManager:
             "total": len(rows),
             "filtered_total": len(matched),
             "ready_count": ready_count,
+            "hide_used": hide_used,
+            "used_skipped": used_skipped,
             "cost_estimate": self._money_view(user, self.estimate(matched[:limit], resolution, out_seconds)),
         }
 
@@ -916,7 +937,7 @@ class BatchManager:
                 "请勿重复生产，刷新后查看，或联系管理员核对。", 503) from None
         # 款号-模板记账（提交时记，失败重试也覆盖为最近一次）：纯审计，失败不能影响已建好的任务。
         try:
-            top = str((batch.get("tags") or {}).get("top") or "").strip() or clean_style_no(batch.get("style_no"))
+            top = self._usage_style(batch)
             self.usage.record(top, [str(item.get("template_id")) for item, _ in taken],
                               batch_no=str(batch.get("batch_no") or ""), batch_id=str(batch["id"]))
         except Exception:  # noqa: BLE001 - 记账本是附加信息，不能拖垮生产
@@ -1274,6 +1295,42 @@ class BatchManager:
             rows.sort(key=lambda row: -(row["last_at"] or 0))
             return rows
 
+    def _run_prompt(self, job_id: str) -> str:
+        """该轮任务提交时快照下来的提示词；job 已被删就返回空（不猜、不拿批次当前值冒充）。"""
+        if not job_id or self.jobs is None:
+            return ""
+        job = self.jobs.jobs.get(str(job_id))
+        return str((job or {}).get("prompt") or "")
+
+    def run_views(self, batch: dict) -> list[dict]:
+        """批次每一轮的生产视图：序号、条数、时间、这一轮实际用的提示词、是否改过。
+
+        `runs` 里只有 job_id 与计数，没有提示词快照（老数据更没有）；提示词从该轮 job 的
+        `prompt` 还原 —— 那是提交那一刻的快照，锁定后改提示词只影响之后的轮次。
+        `prompt_changed` = 这一轮的提示词与上一轮不同，前端据此标「提示词已改」。
+        """
+        views: list[dict] = []
+        previous = None
+        for run in batch.get("runs") or []:
+            if not isinstance(run, dict):
+                continue
+            job_id = str(run.get("job_id") or "")
+            prompt = self._run_prompt(job_id)
+            views.append({
+                "no": len(views) + 1,
+                "job_id": job_id,
+                "count": _as_int(run.get("count"), 0) or 0,
+                "started_at": float(run.get("started_at") or 0) or 0,
+                "finished_at": float(run.get("finished_at") or 0) or 0,
+                "success": _as_int(run.get("success"), 0) or 0,
+                "failed": _as_int(run.get("failed"), 0) or 0,
+                "prompt": prompt,
+                "prompt_changed": bool(prompt) and previous is not None and prompt != previous,
+            })
+            if prompt:
+                previous = prompt
+        return views
+
     def history_items(self, key: str, user: dict, offset: int = 0, limit: int = 200,
                       owner: str = "", all_users=None, lane: str = "") -> dict:
         """分组明细。all_users 显式传 False 时（管理员「只看我的任务」）连明细也只列自己，
@@ -1289,6 +1346,7 @@ class BatchManager:
         if lane not in ("small", "big"):
             lane = ""
         with self.mutex:
+            batch = None
             if key.startswith(DAY_KEY + ":"):
                 # 按日期分组：忽略批次归属，取这一天的全部可见 job。
                 target_day = key[len(DAY_KEY) + 1:]
@@ -1340,6 +1398,22 @@ class BatchManager:
                 jobs = mine
             if lane:
                 jobs = [job for job in jobs if _history_lane(job) == lane]
+            # 「第几批 20 条」：runs 里每轮一条，提示词从该轮 job 的 prompt 还原
+            # （runs 本身不存快照，老批次也能还原；job 被删的那轮只剩条数与时间）。
+            # 重试/零头会新建一轮，同一条模板可能出现在多轮里，所以按模板收集全部轮次。
+            runs = self.run_views(batch) if isinstance(batch, dict) else []
+            run_no_by_job = {str(view["job_id"]): view["no"] for view in runs if view.get("job_id")}
+            run_changed = {view["no"]: bool(view.get("prompt_changed")) for view in runs}
+            run_nos_by_template: dict[str, list[int]] = {}
+            for view in runs:
+                source = ((self.jobs.jobs.get(str(view.get("job_id") or "")) if self.jobs else None) or {})
+                ids = [str(tpl.get("id")) for tpl in (source.get("templates") or [])
+                       if isinstance(tpl, dict)]
+                if not ids:
+                    ids = [str(rec.get("id")) for rec in (source.get("records") or [])
+                           if isinstance(rec, dict)]
+                for template_id in ids:
+                    run_nos_by_template.setdefault(template_id, []).append(view["no"])
             rows = []
             for job in sorted(jobs, key=lambda item: item.get("created_at") or 0):
                 job_owner = job.get("owner")
@@ -1380,6 +1454,15 @@ class BatchManager:
                     rows.append({
                         "job_id": str(job.get("id")),
                         "template_id": template_id,
+                        # 这一条属于第几批：run_no 是它最近一次生产所在轮次，
+                        # run_nos 列出它出现过的全部轮次（重试会让同一条落在多轮）。
+                        "run_no": run_no_by_job.get(str(job.get("id")), 0),
+                        "run_nos": sorted(set(run_nos_by_template.get(template_id) or (
+                            [run_no_by_job[str(job.get("id"))]]
+                            if str(job.get("id")) in run_no_by_job else []))),
+                        "run_total": len(runs),
+                        "run_prompt_changed": run_changed.get(
+                            run_no_by_job.get(str(job.get("id")), 0), False),
                         "image_url": image_url,
                         "template_name": template_name,
                         # 管理员看全部用户时，明细行要能分辨是谁、什么时候、属于哪批。
@@ -1399,4 +1482,5 @@ class BatchManager:
             total = len(rows)
             return {"key": key, "batch_no": batch_no,
                     "items": rows[offset:offset + limit],
+                    "runs": runs,
                     "total": total, "offset": offset, "limit": limit}

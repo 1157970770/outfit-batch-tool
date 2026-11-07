@@ -445,17 +445,21 @@ def main() -> int:
         print("  ✓ 第一批 20 条全部 done，active_job_id 由对账清空")
 
         # 锁定后改的提示词要真的被后续生产用上：第二批的 job 应带新文案
+        # 这里再改一版（与第一批不同），历史页要能标出「第二批换过提示词」。
+        second_prompt = new_prompt + " 第二批追加：袖口收紧，其余不变。"
         code, _, edited2 = call(alice, base, f"/api/batches/{batch_id}/prompt", "POST",
-                                {"prompt": new_prompt})
+                                {"prompt": second_prompt})
         assert code == 200, (code, edited2)
         code, _, segundo = call(alice, base, f"/api/batches/{batch_id}/produce", "POST", {"count": 50})
         assert code == 201, (code, segundo)
         produced = body(segundo)
         assert produced["taken"] == 30, produced["taken"]     # 剩余不足 50 取全部
         # job 的 public 字段不含 prompt（防止列表泄漏长文案），直接看内部记录
-        assert app.jobs.jobs[produced["job"]["id"]]["prompt"] == new_prompt, \
+        assert app.jobs.jobs[produced["job"]["id"]]["prompt"] == second_prompt, \
             "第二批生产必须使用改过之后的提示词"
         job_ids.append(produced["job"]["id"])
+
+        # 分批轮次的断言放在第二批跑完之后（未完成的 job 只会在明细里留空记录）
 
         # ---------------- 款号-模板防重账本：提交时记账 + 查询接口
         used = app.batches.usage.used("AW26-001")
@@ -470,12 +474,62 @@ def main() -> int:
         code, _, blank = call(bob, base, "/api/style-usage?top=")
         assert code == 200 and body(blank)["used"] == {}, blank
         print("  ✓ 款号-模板账本：生产提交即记账，/api/style-usage 可查、未登录拒绝")
+
+        # ---------------- 候选「隐藏已用」：把本款号生产过的模板筛掉（第 2 步筛选模板用）
+        code, _, all_cands = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                                  {"tag_filters": {}, "limit": 1000})
+        assert code == 200, (code, all_cands)
+        all_payload = body(all_cands)
+        assert all_payload["hide_used"] is False and all_payload["used_skipped"] == 0, all_payload
+        assert all_payload["filtered_total"] == READY_COUNT + 1, all_payload["filtered_total"]
+        code, _, hid = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                            {"tag_filters": {}, "limit": 1000, "hide_used": True})
+        assert code == 200, (code, hid)
+        hid_payload = body(hid)
+        hid_ids = [item["id"] for item in hid_payload["items"]]
+        assert hid_payload["hide_used"] is True, hid_payload
+        assert hid_payload["used_skipped"] == READY_COUNT, hid_payload["used_skipped"]
+        assert not set(hid_ids) & set(ready_ids), hid_ids
+        assert hid_ids == ["051"], hid_ids                     # 只剩未上云的那条，ready_count=0
+        assert hid_payload["filtered_total"] == 1, hid_payload["filtered_total"]
+        assert hid_payload["ready_count"] == 0, hid_payload["ready_count"]
+        # hide_used 只能是布尔 true：字符串 "true" 不算，避免前端传错类型静默生效
+        code, _, loose = call(alice, base, f"/api/batches/{batch_id}/candidates", "POST",
+                              {"tag_filters": {}, "limit": 1000, "hide_used": "true"})
+        assert code == 200 and body(loose)["hide_used"] is False, loose
+        print("  ✓ 候选「隐藏已用」：hide_used=true 筛掉本款号生产过的 50 条，其余筛选不受影响")
         run2_job = wait_job(alice, base, job_ids[1])
         assert run2_job["status"] == "succeeded", run2_job
         batch = wait_batch(alice, base, batch_id,
                            lambda b: b["active_job_id"] == "" and b["producing"] == 0,
                            label="第二批对账")
         assert batch["done"] == READY_COUNT and batch["pending"] == 0, batch
+
+        # 分批轮次：历史明细要能看出每条属于第几批，以及哪一批换了提示词
+        code, _, hist_raw = call(alice, base, f"/api/history/groups/{batch_id}")
+        assert code == 200, (code, hist_raw)
+        hist = body(hist_raw)
+        runs = hist["runs"]
+        assert [run["no"] for run in runs] == [1, 2], runs
+        assert runs[0]["count"] == 20 and runs[1]["count"] == 30, runs
+        assert runs[1]["prompt"] == second_prompt, runs[1]
+        assert runs[0]["prompt"] and runs[0]["prompt"] != runs[1]["prompt"], runs
+        assert runs[0]["prompt_changed"] is False and runs[1]["prompt_changed"] is True, runs
+        assert all(row["run_total"] == 2 for row in hist["items"]), hist["items"][:2]
+        first_rows = [row for row in hist["items"] if row["run_no"] == 1]
+        second_rows = [row for row in hist["items"] if row["run_no"] == 2]
+        assert len(first_rows) == 20 and len(second_rows) == 30, (len(first_rows), len(second_rows))
+        assert all(row["run_nos"] == [1] for row in first_rows), first_rows[:2]
+        assert all(row["run_nos"] == [2] for row in second_rows), second_rows[:2]
+        # 任务详情带「这条任务用的提示词」与「第几批」；列表接口仍然不带 prompt
+        code, _, detail_raw = call(alice, base, f"/api/jobs/{job_ids[0]}")
+        assert code == 200, (code, detail_raw)
+        detail = body(detail_raw)["job"]
+        assert detail["prompt"] == runs[0]["prompt"], detail
+        assert detail["batch_run"]["no"] == 1 and detail["batch_run"]["total"] == 2, detail
+        assert "prompt" not in body(call(alice, base, "/api/jobs")[2])["jobs"][0], \
+            "列表每 3.5 秒轮询，不能带最多 4000 字的提示词正文"
+        print("  ✓ 分批轮次：第 1/2 批可分辨、第二批标「提示词已改」、任务详情带快照提示词")
         code, _, detail = call(alice, base, f"/api/batches/{batch_id}")
         items = body(detail)["items"]
         template_ids = [item["template_id"] for item in items]

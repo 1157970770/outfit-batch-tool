@@ -1598,6 +1598,19 @@ def make_handler(app: WebApplication):
                 return self._error("找不到该任务。", 404)
             if user.get("role") != "admin" and job.get("owner") != user.get("username"):
                 return self._error("无权查看该任务。", 403)
+            # 详情里要能看「这条任务用的提示词」与「属于第几批」：列表接口故意不带 prompt
+            # （前端每 3.5 秒轮询列表，最多 4000 字的正文会把每次响应撑大），只在这里补。
+            raw = (app.jobs.jobs.get(str(job_id)) or {}) if getattr(app.jobs, "jobs", None) else {}
+            job["prompt"] = str(raw.get("prompt") or "")
+            ref = str(job.get("batch_ref") or "")
+            batch = (app.batches.batches.get(ref) if ref and getattr(app, "batches", None) else None)
+            if isinstance(batch, dict):
+                runs = app.batches.run_views(batch)
+                for view in runs:
+                    if str(view.get("job_id") or "") == str(job_id):
+                        job["batch_run"] = {"no": view["no"], "total": len(runs),
+                                            "prompt_changed": bool(view.get("prompt_changed"))}
+                        break
             return self._json({"ok": True, "job": job})
 
         def _authorized_job(self, job_id, user):

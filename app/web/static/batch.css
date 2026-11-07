@@ -336,6 +336,24 @@
 .history-more{margin-top:10px}
 .history-group-foot{font-size:12px;margin:10px 0 0}
 
+/* ---------- 分批轮次：一个批次按 N 条一批生产了几次 ----------
+   行内小标签回答「这条视频是哪一批生产的」；批次展开顶部的轮次条回答
+   「每批多少条、提示词改没改」。提示词默认折叠，避免 5 段长正文把明细挤到屏幕外。 */
+.history-run-tag{display:inline-block;margin-top:4px;padding:0 6px;border:1px solid var(--line);
+  border-radius:999px;font-size:10.5px;line-height:17px;color:var(--muted);background:var(--bg);white-space:nowrap}
+.history-run-badge{display:inline-block;margin-top:3px;padding:0 6px;border-radius:999px;font-size:10.5px;
+  line-height:17px;color:#8a5a00;background:#fff4d6;border:1px solid #f0d28a}
+.history-runs{margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.history-runs-title{display:block;font-size:12px;margin-bottom:6px}
+.history-run{padding:6px 0;border-top:1px dashed var(--line)}
+.history-run:first-of-type{border-top:0}
+.history-run-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.history-run-head b{font-size:12.5px}
+.history-run-head small{font-size:11.5px;color:var(--muted)}
+.history-run-prompt{margin:6px 0 0;padding:8px 10px;max-height:220px;overflow:auto;font-size:11.5px;
+  line-height:1.6;white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid var(--line);border-radius:6px}
+.history-run .quiet{margin-top:6px}
+
 /* ---------- 宽屏工作区：加宽 + 压缩页头，保证候选一屏可见 ----------
    2026-11 改版去掉了页面顶部的营销横幅，页头只剩标题，这一页因此多出约 130px 给候选区。 */
 :root{--batch-workspace-w:1680px}

@@ -42,6 +42,9 @@
     candidates: [], selected: new Set(), candTotal: 0, candReady: 0,
     // 评分筛选 / 排序：candRatingMin=0 不过滤；candSort='' 默认顺序、'rating' 评分高→低
     candRatingMin: 0, candSort: '',
+    // 隐藏已用：本款号在之前批次里生产过的模板不进候选（服务端按款号-模板账本筛）。
+    // usedSkipped 是这次被筛掉的条数，只用于提示，不参与筛选判断。
+    hideUsed: false, usedSkipped: 0,
     candTagFilter: new Set(), onlySelected: false, candPage: 1, candPageItems: [], candPageBackup: 0,
     // 每页条数由 candCapacity() 实测写入（列数 × 行数，保底 CAND_PAGE_MIN），页面尺寸变了就重算
     candPageSize: CAND_PAGE_MIN, candObserver: null,
@@ -596,7 +599,7 @@
     b.candPage = 1;
     b.candPageItems = [];
     b.candPageBackup = 0;
-    b.candTotal = 0; b.candReady = 0;
+    b.candTotal = 0; b.candReady = 0; b.usedSkipped = 0;
     if ($('batch-only-selected')) $('batch-only-selected').checked = false;
     clearPreview();
     renderCandChips();
@@ -630,6 +633,7 @@
           limit: CAND_FETCH_LIMIT,
           rating_min: b.candRatingMin,
           sort: b.candSort,
+          hide_used: !!b.hideUsed,
         }),
       });
       const items = Array.isArray(data.items) ? data.items : [];
@@ -643,6 +647,8 @@
       // filtered_total 是「筛选命中总数」（可能大于本次返回条数），total 只是这一批的条数。
       b.candTotal = num(data.filtered_total, num(data.total, b.candidates.length));
       b.candReady = num(data.ready_count, b.candidates.filter((item) => item.ready).length);
+      // 服务端按款号-模板账本筛掉的条数：只用于说清「为什么候选变少了」
+      b.usedSkipped = num(data.used_skipped);
       // 默认不选中任何项：分页后「已选 480」与第一页可见的 50 张极易混淆，
       // 用户若误以为 480 是本页数量，锁定后连点几次「生产 100」会意外产生数千元费用。
       // 想全做就点一次「全选全部 N 条」，多一步换来不会误操作。
@@ -653,8 +659,12 @@
       b.candPage = 1;              // 换了筛选条件就回到第 1 页
       b.candPageBackup = 0;
       const matched = b.candTotal || b.candidates.length;
-      $('batch-tag-summary').textContent = `匹配 ${matched} 个场景 · 可生产 ${b.candReady} 个`;
-      if (b.candidates.length < matched) {
+      // 「隐藏已用」筛掉多少条要说出来，否则用户只会觉得候选突然变少了
+      const skipped = b.hideUsed && b.usedSkipped ? ` · 已隐藏 ${b.usedSkipped} 条本款号用过的` : '';
+      $('batch-tag-summary').textContent = `匹配 ${matched} 个场景 · 可生产 ${b.candReady} 个${skipped}`;
+      if (!b.candidates.length && b.hideUsed && b.usedSkipped) {
+        showCandNote(`本款号的模板已经用完了：筛掉 ${b.usedSkipped} 条用过的之后没有剩余候选；关掉「隐藏已用」可以看全部。`);
+      } else if (b.candidates.length < matched) {
         showCandNote(`服务端只返回了前 ${b.candidates.length} 条候选（共 ${matched} 条），分页只覆盖返回的这批，请再用标签收窄范围。`);
       } else if (!b.candReady) {
         showCandNote('候选都还没上传到云端，现在只能预览，不能锁定生产。');
@@ -663,7 +673,11 @@
       }
       renderCandChips();
       renderCandidates();
-      if (!b.candidates.length) toast('当前筛选没有匹配的场景，换一组标签试试。');
+      if (!b.candidates.length) {
+        toast(b.hideUsed && b.usedSkipped
+          ? `本款号能用的模板已经用完了（筛掉 ${b.usedSkipped} 条用过的）；关掉「隐藏已用」可以看全部。`
+          : '当前筛选没有匹配的场景，换一组标签试试。');
+      }
     } catch (err) {
       b.candidates = [];
       b.selected = new Set();
@@ -2207,6 +2221,8 @@
         items: Array.isArray(data.items) ? data.items : [],
         total: num(data.total, (data.items || []).length),
         batchNo: txt(data.batch_no),
+        // 轮次：一个批次按 N 条一批生产了几次（账户/日期/未分组组没有，后端给空数组）。
+        runs: Array.isArray(data.runs) ? data.runs : [],
       });
       if (body) renderGroupBody(key, body);
     } catch (err) {
@@ -2224,11 +2240,52 @@
       if (body) renderGroupBody(key, body);
     } catch (err) { toast(err.message); }
   }
+  /* 轮次条：一个批次按 N 条一批生产了几次，每轮用的提示词是否改过都在这里看。
+     提示词默认折叠 —— 同一批次 5 轮、每段 2000 字，全展开会把明细推到屏幕外。 */
+  function runStrip(runs) {
+    const strip = el('div', 'history-runs');
+    strip.append(el('b', 'history-runs-title', `本批次共 ${runs.length} 批生产`));
+    for (const run of runs) {
+      const line = el('div', 'history-run');
+      const head = el('div', 'history-run-head');
+      head.append(el('b', null, `第 ${num(run.no)} 批`));
+      const meta = [`${num(run.count)} 条`];
+      if (num(run.success)) meta.push(`成功 ${num(run.success)}`);
+      if (num(run.failed)) meta.push(`失败 ${num(run.failed)}`);
+      if (num(run.started_at)) meta.push(fmtTime(run.started_at));
+      head.append(el('small', null, meta.join(' · ')));
+      if (run.prompt_changed) {
+        const badge = el('span', 'history-run-badge', '提示词已改');
+        badge.title = '这一批用的提示词与上一批不同：同批次里的视频可能不是同一段提示词生成的';
+        head.append(badge);
+      }
+      line.append(head);
+      if (txt(run.prompt)) {
+        const toggle = el('button', 'quiet btn-sm', '看该批提示词');
+        toggle.type = 'button';
+        const full = el('pre', 'history-run-prompt hidden');
+        full.textContent = txt(run.prompt);
+        toggle.addEventListener('click', () => {
+          const closed = full.classList.toggle('hidden');
+          toggle.textContent = closed ? '看该批提示词' : '收起提示词';
+        });
+        line.append(toggle, full);
+      } else {
+        line.append(el('small', 'muted', '这轮任务已不存在，提示词无法还原'));
+      }
+      strip.append(line);
+    }
+    return strip;
+  }
   function renderGroupBody(key, body) {
     const detail = b.groupDetails.get(key);
     body.replaceChildren();
     if (!detail) { body.append(el('p', 'muted', '正在加载明细…')); return; }
     if (!detail.items.length) { body.append(el('div', 'empty', '这一组没有明细。')); return; }
+    // 只生产过一轮的批次不必多一条轮次条：那只是把「第 1/1 批」重复一遍。
+    if (detail.runs.length > 1 || detail.runs.some(run => run.prompt_changed)) {
+      body.append(runStrip(detail.runs));
+    }
     const list = el('div', 'record-list');
     const fragment = document.createDocumentFragment();
     for (const item of detail.items) fragment.append(historyRow(item, key, detail.batchNo));
@@ -2267,6 +2324,16 @@
     const row = el('div', `history-record${adminAll ? ' is-admin' : ''}`);
     const nameCell = el('div', 'history-record-name');
     nameCell.append(el('b', null, txt(item.template_name) || txt(item.template_id) || '未命名场景'), el('small', null, txt(item.template_id)));
+    // 「第几批 20 条」：按批次分组时后端给出 run_nos / run_total；重试过的条目会列出全部轮次。
+    const runNos = Array.isArray(item.run_nos) ? item.run_nos.filter(no => num(no)) : [];
+    if (runNos.length && num(item.run_total)) {
+      const tag = el('span', 'history-run-tag',
+        runNos.length === 1
+          ? `第 ${runNos[0]}/${num(item.run_total)} 批`
+          : `第 ${runNos.join('、')} 批 · 共 ${num(item.run_total)} 批`);
+      tag.title = '这一条是在第几批（每批 N 条）生产出来的';
+      nameCell.append(tag);
+    }
     // 12 位任务 ID 不常驻占宽：管理员要看归属与时间，ID 收进悬停提示。
     nameCell.title = `任务 ${txt(item.job_id)}${txt(item.batch_no) ? ` · ${txt(item.batch_no)}` : ''}`;
     const statusCell = el('div', 'history-record-state');
@@ -2280,6 +2347,12 @@
     if (num(item.seconds)) parts.push(`用时 ${num(item.seconds)} 秒`);
     if (txt(item.archive_warning)) parts.push(txt(item.archive_warning));
     if (parts.length) infoCell.append(el('small', null, parts.join(' · ')));
+    // 这一条所在那一批换了提示词：同一批次里前后的视频可能不是同一段提示词生成的。
+    if (item.run_prompt_changed) {
+      const badge = el('span', 'history-run-badge', '提示词已改');
+      badge.title = '这一批用的提示词与上一批不同，可展开批次查看每批的提示词';
+      infoCell.append(badge);
+    }
     // 与批次条目同口径：done 的质量提示，状态徽标仍是 success/done
     const warn = txt(item.verify_warn);
     if (warn) infoCell.append(el('small', 'history-verify-warn', `质量提示：${warn}`));
@@ -2531,6 +2604,12 @@
     });
     $('batch-rating-sort').addEventListener('change', (event) => {
       b.candSort = event.target.value === 'rating' ? 'rating' : '';
+      fetchCandidates().catch(() => {});
+    });
+    // 隐藏已用：服务端按款号-模板账本筛掉本款号生产过的模板，和评分/排序一样重拉。
+    // fetchCandidates 本来就会清空已选，所以不会留下「看不见却仍被锁定」的已用条目。
+    $('batch-hide-used').addEventListener('change', (event) => {
+      b.hideUsed = !!event.target.checked;
       fetchCandidates().catch(() => {});
     });
     $('batch-page-prev').addEventListener('click', () => goCandPage(b.candPage - 1));
