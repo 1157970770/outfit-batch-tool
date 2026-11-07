@@ -46,6 +46,8 @@ DEFAULT_PRODUCE_COUNT = 50
 RETRY_MIN = 1
 RETRY_MAX = 100
 UNGROUPED_KEY = "__ungrouped__"
+# 按账户分组的虚拟 key 前缀（管理员看全部用户时，一个账户的任务要收进同一张卡）。
+OWNER_KEY = "__owner__"
 # 按日期分组的虚拟 key 前缀（试跑没有 batch_ref，光按批次/账户拆不出可用的分类）。
 DAY_KEY = "__day__"
 # job.image_path 里的上传图：web-data/uploads/<xx>/<32位id>.<ext>（Windows 反斜杠同样匹配）。
@@ -70,6 +72,18 @@ _RECORD_UNTOUCHED = {"pending", "skipped"}
 def _lane_of(job: dict) -> str:
     """job 的通道。老数据没有 lane 字段，按大批量处理（与 jobs.lane_of 同口径）。"""
     return "small" if str(job.get("lane") or "") == "small" else "big"
+
+
+def _history_lane(job: dict) -> str:
+    """历史页 / 整批下载的通道口径：按来源，不按调度通道。
+
+    批次生产的零头、失败重试常常只有 1–3 条，jobs.create() 会把它们判成 lane=small，
+    但它们属于某个真实批次：历史里必须跟批次一起出现在「全部 / 大批量」，整批下载也要
+    收得到。只有没有 batch_ref 的才是真正的小批量试跑。
+    """
+    if str(job.get("batch_ref") or ""):
+        return "big"
+    return _lane_of(job)
 
 
 def _day_key(ts) -> str:
@@ -1068,10 +1082,12 @@ class BatchManager:
 
     # ------------------------------------------------------------------ #10 整批打包
     def _batch_jobs(self, batch: dict) -> list[dict]:
-        """按时间顺序取这个批次名下的大批量 job：runs 为主，items / batch_ref 兜底。
+        """按时间顺序取这个批次名下的全部 job：runs 为主，items / batch_ref 兜底。
 
         一个批次会分多轮生产（produce / retry_failed 各建一个 job），items 里只留
         最后一轮的 job_id；只扫 items 会漏掉前面几轮已经出片的视频。
+        不再按 lane 过滤：批次零头/重试只有 1–3 条时会被判成 lane=small，
+        但它们同样是这个批次的产物（见 _history_lane）。
         """
         jobs = self.jobs.jobs if self.jobs else {}
         ordered: list[str] = []
@@ -1088,25 +1104,20 @@ class BatchManager:
             linked = [job for job in jobs.values()
                       if str(job.get("batch_ref") or "") == str(batch.get("id"))]
             linked.sort(key=lambda job: job.get("created_at") or 0)
-            return [job for job in linked if _lane_of(job) == "big"]
-        return [jobs[jid] for jid in ordered
-                if jid in jobs and _lane_of(jobs[jid]) == "big"]
+            return linked
+        return [jobs[jid] for jid in ordered if jid in jobs]
 
     def batch_videos(self, batch_id: str, user: dict) -> dict:
         """按批次收集全部已出片视频：{"id","batch_no","files":[(zip 名, 本地路径)]}。
 
-        资格：必须是真实的大批量批次。小批量试跑不建批次；万一历史数据里有试跑
-        job 被挂到 batch_ref 上，也只在大批量 job 存在时才允许整批下载。
+        资格：批次存在且属于本人（管理员不限）。小批量试跑不建批次，永远没有 batch_ref；
+        批次自己的零头/重试即使被判成 lane=small，也照常收进整批包。
         口径：遍历每一轮 run 的成功记录，按场景 id 去重、保留最新一次成功的视频，
         与「单条下载」同源（job 输出目录里的 <场景id>.mp4）。
         """
         with self.mutex:
             batch = self._authorized(batch_id, user)
             self._reconcile(batch)
-            linked = [job for job in (self.jobs.jobs.values() if self.jobs else ())
-                      if str(job.get("batch_ref") or "") == str(batch.get("id"))]
-            if linked and not any(_lane_of(job) == "big" for job in linked):
-                raise BatchError("试跑记录不支持按批次打包下载。", 403)
             found: dict[str, Path] = {}
             for job in self._batch_jobs(batch):
                 jid = str(job.get("id") or "")
@@ -1155,16 +1166,18 @@ class BatchManager:
     # ------------------------------------------------------------------ #11 历史分组
     def history_groups(self, user: dict, all_users: bool = False, owner: str = "",
                        group_by: str = "batch", lane: str = "") -> list[dict]:
-        """按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务 + 批次已删除）进未分组。
+        """按来源聚合历史任务：批次、账户、日期三种视角。
 
-        归属只认「批次文件还在不在」：job.batch_ref 不回写（历史数据只读），批次一旦被删除，
-        它名下的 job 会自动落回未分组，不会留下一个点不开的空分组。
+        group_by="batch"（默认）：按 batch_ref 聚合 job；分不到现存批次的（试跑 + 老任务
+        + 批次已删除）进「未分组」。归属只认批次文件还在不在：job.batch_ref 不回写
+        （历史数据只读），批次一旦被删除，它名下的 job 会自动落回未分组。
+        group_by="owner"（仅管理员看全部用户时生效）：一个账户的全部任务收进
+        `__owner__:<owner>` 一张卡；以前只把未分组按账户拆，同一个账户会被拆成
+        「批次卡 + 未分组卡」两张，卡片标题又只有批次号，正是「任务和账号对不上」的来源。
+        group_by="day"：忽略批次，全部按提交日期拆成 `__day__:<YYYY-MM-DD>`。
+        lane="small" / "big"：只统计该来源的 job（批次零头/重试算 big，见 _history_lane），
+        卡片数字、明细与整批下载三处同口径。
         owner 仅对管理员生效：只看某个账户的历史。
-        group_by="owner"（仅管理员看全部用户时生效）：把未分组再按账户拆成
-        `__ungrouped__:<owner>` 虚拟组，避免多个账户的试跑挤成一张大列表。
-        group_by="day"：忽略批次，全部按提交日期拆成 `__day__:<YYYY-MM-DD>`。试跑记录
-        没有 batch_ref，普通账号只有自己一个账户，只有按日期才能把平铺拆成可读的分类。
-        lane="small" / "big"：只统计该通道的 job，卡片数字与明细才会对得上。
         虚拟 key 只存在于接口层，job / batch 的落盘结构一律不动。
         """
         filter_owner = str(owner or "") if all_users else ""
@@ -1180,26 +1193,26 @@ class BatchManager:
                     continue
                 if filter_owner and job.get("owner") != filter_owner:
                     continue
-                if lane and _lane_of(job) != lane:
+                if lane and _history_lane(job) != lane:
                     continue
                 ref = str(job.get("batch_ref") or "")
                 if by_day:
                     key = f"{DAY_KEY}:{_day_key(job.get('created_at'))}"
+                elif split_owner:
+                    key = f"{OWNER_KEY}:{str(job.get('owner') or 'unknown')}"
                 elif ref and ref in self.batches:
                     key = ref
-                elif split_owner:
-                    key = f"{UNGROUPED_KEY}:{str(job.get('owner') or 'unknown')}"
                 else:
                     key = UNGROUPED_KEY
                 slot = groups.setdefault(key, {
                     "key": key, "job_count": 0, "total": 0,
                     "success": 0, "failed": 0, "unfinished": 0,
                     "first_at": None, "last_at": None, "owners": set(), "sig": [],
-                    # 按通道计数：历史页要能只显示大批量，也要能把「未分组」里的试跑挑出来。
+                    # 按来源计数：历史页要能只显示大批量，也要能把「未分组」里的试跑挑出来。
                     "small_jobs": 0, "big_jobs": 0,
                 })
                 slot["job_count"] += 1
-                if _lane_of(job) == "small":
+                if _history_lane(job) == "small":
                     slot["small_jobs"] += 1
                 else:
                     slot["big_jobs"] += 1
@@ -1231,7 +1244,7 @@ class BatchManager:
             rows = []
             for key, slot in groups.items():
                 is_day_group = key.startswith(DAY_KEY + ":")
-                is_owner_group = key.startswith(UNGROUPED_KEY + ":")
+                is_owner_group = key.startswith(OWNER_KEY + ":")
                 is_ungrouped = key == UNGROUPED_KEY or is_owner_group or is_day_group
                 batch = None if is_ungrouped else self.batches.get(key)
                 batch_no = str((batch or {}).get("batch_no") or "")
@@ -1242,7 +1255,9 @@ class BatchManager:
                     "key": key,
                     "day": key[len(DAY_KEY) + 1:] if is_day_group else "",
                     # 按日期的组没有批次号，留空让明细行不显示「批次 xxx」。
-                    "batch_no": "" if is_day_group else ("未分组" if is_ungrouped else batch_no),
+                    # 按账户的组混着批次任务，批次号逐行解析（history_items），卡片不写死。
+                    "batch_no": ("" if is_day_group or is_owner_group
+                                 else "未分组" if is_ungrouped else batch_no),
                     "group_kind": ("day" if is_day_group
                                    else "owner" if is_owner_group else "batch"),
                     "is_ungrouped": is_ungrouped,
@@ -1280,8 +1295,21 @@ class BatchManager:
                 batch_no = ""
                 jobs = [job for job in (self.jobs.jobs.values() if self.jobs else ())
                         if _day_key(job.get("created_at")) == target_day]
+            elif key.startswith(OWNER_KEY + ":"):
+                # 管理员按账户分出来的组：该账户的全部任务（批次任务 + 试跑），
+                # 批次号不写死在卡片上，逐行按 job.batch_ref 解析。
+                if user.get("role") != "admin":
+                    raise BatchError("无权查看该分组。", 403)
+                target_owner = key[len(OWNER_KEY) + 1:]
+                batch_no = ""
+                if owner and owner != target_owner:
+                    jobs = []          # 筛选与虚拟组冲突时返回空，不能放宽到别的账户
+                else:
+                    jobs = [job for job in (self.jobs.jobs.values() if self.jobs else ())
+                            if str(job.get("owner") or "") == target_owner]
             elif key.startswith(UNGROUPED_KEY + ":"):
-                # 管理员按账户拆出来的虚拟组：只取该账户、且不属于任何现存批次的任务。
+                # 旧版按账户拆「未分组」的 key（页面未刷新时还会请求一次）：
+                # 只取该账户、且不属于任何现存批次的任务。新分组不再产出这个 key。
                 if user.get("role") != "admin":
                     raise BatchError("无权查看该分组。", 403)
                 target_owner = key[len(UNGROUPED_KEY) + 1:]
@@ -1311,7 +1339,7 @@ class BatchManager:
                     mine = [job for job in mine if job.get("owner") == user.get("username")]
                 jobs = mine
             if lane:
-                jobs = [job for job in jobs if _lane_of(job) == lane]
+                jobs = [job for job in jobs if _history_lane(job) == lane]
             rows = []
             for job in sorted(jobs, key=lambda item: item.get("created_at") or 0):
                 job_owner = job.get("owner")
@@ -1319,6 +1347,13 @@ class BatchManager:
                     continue
                 if owner and job_owner != owner:
                     continue
+                # 按账户的组里混着批次任务与试跑：批次号逐行解析，指向已删除批次的留空，
+                # 不能让整张账户卡都写成「未分组」。
+                row_batch_no = batch_no
+                if key.startswith(OWNER_KEY + ":"):
+                    ref = str(job.get("batch_ref") or "")
+                    linked = self.batches.get(ref) if ref else None
+                    row_batch_no = str((linked or {}).get("batch_no") or "")
                 names = {str(tpl.get("id")): str(tpl.get("name") or "")
                          for tpl in job.get("templates") or [] if isinstance(tpl, dict)}
                 # 这条记录对应的定妆图 = job 自己的素材图。批次有批次级定妆图，但试跑/未分组
@@ -1350,7 +1385,7 @@ class BatchManager:
                         # 管理员看全部用户时，明细行要能分辨是谁、什么时候、属于哪批。
                         "owner": str(job_owner or ""),
                         "created_at": job.get("created_at") or 0,
-                        "batch_no": batch_no,
+                        "batch_no": row_batch_no,
                         "job_status": str(job.get("status") or ""),
                         "status": status,
                         "seconds": rec.get("seconds"),

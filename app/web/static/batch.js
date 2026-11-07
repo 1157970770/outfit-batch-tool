@@ -2152,7 +2152,9 @@
     const title = isDayGroup
       ? dayGroupTitle(group)
       : isOwnerGroup
-        ? `${txt(group.owner) || '未知账户'} · 未分组试跑`
+        // 账户卡收的是该账户的全部任务：批次任务 + 试跑，标题不再说「未分组」。
+        ? `${txt(group.owner) || '未知账户'} · ${historyScope === 'small'
+          ? '小批量试跑' : historyScope === 'big' ? '大批量任务' : '全部任务'}`
         : (isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次'));
     titleWrap.append(el('b', null, title));
     // 数字统一按「记录条数」口径，与账户用量页一致；任务数单独标，不再混写。

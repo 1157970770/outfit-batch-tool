@@ -564,22 +564,24 @@ def main() -> int:
         assert code == 200 and body(small_only)["total"] == 1, small_only
         stamps = [r["last_at"] for r in rows]
         assert stamps == sorted(stamps, reverse=True), "分组按最近更新倒序，未分组不再钉在最后"
-        # 管理员按账户拆未分组：虚拟 key 只存在于接口层，明细走同一个 key。
+        # 管理员按账户分组：账户卡收该账户的全部任务（批次多轮 + 试跑），批次号在行上。
         code, _, admin_groups = call(admin, base, "/api/history/groups?scope=all&group_by=owner")
         assert code == 200, (code, admin_groups)
         admin_rows = body(admin_groups)["groups"]
         assert "empty_batches" in body(admin_groups), admin_groups
-        owner_row = next((r for r in admin_rows if r["key"] == "__ungrouped__:alice"), None)
+        owner_row = next((r for r in admin_rows if r["key"] == "__owner__:alice"), None)
         assert owner_row and owner_row["group_kind"] == "owner" and owner_row["owner"] == "alice", admin_rows
-        assert owner_row["total"] == 1, owner_row
-        code, _, owner_items = call(admin, base, "/api/history/groups/__ungrouped__:alice?offset=0&limit=50")
-        assert code == 200 and body(owner_items)["total"] == 1, owner_items
-        code, _, denied = call(alice, base, "/api/history/groups/__ungrouped__:alice")
+        assert owner_row["total"] == READY_COUNT + 1, owner_row
+        code, _, owner_items = call(admin, base, "/api/history/groups/__owner__:alice?offset=0&limit=200")
+        assert code == 200 and body(owner_items)["total"] == READY_COUNT + 1, owner_items
+        owner_batch_nos = {item["batch_no"] for item in body(owner_items)["items"]}
+        assert owner_batch_nos == {"AW26-001", ""}, owner_batch_nos
+        code, _, denied = call(alice, base, "/api/history/groups/__owner__:alice")
         assert code == 403, (code, denied)
         # 按批次分组仍是原来的单一大组
         code, _, plain = call(admin, base, "/api/history/groups?scope=all")
         assert code == 200 and any(r["key"] == "__ungrouped__" for r in body(plain)["groups"]), plain
-        print("  ✓ 管理员按账户拆未分组、空批次计数、虚拟组权限与明细")
+        print("  ✓ 管理员按账户分组、空批次计数、虚拟组权限与明细")
         code, _, hist = call(alice, base, f"/api/history/groups/{batch_id}?offset=0&limit=200")
         assert code == 200, (code, hist)
         hist_body = body(hist)

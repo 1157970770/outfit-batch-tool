@@ -1220,6 +1220,8 @@ def make_handler(app: WebApplication):
             groups = app.batches.history_groups(user, all_users, owner, group_by, lane)
             # 空批次（还没有任何生产记录）不生成一个点不开的分组，只给个计数：
             # 否则「大批量生产」里 4 个批次、历史里只看到 1 个，会以为数据丢了。
+            # 只按「有没有 job 的 batch_ref 指向它」算，与分组方式/lane 无关：
+            # 按账户或日期分组时根本没有批次卡片，不能把有生产的批次也谎报成空。
             with app.batches.mutex:
                 visible = app.batches.batches
                 if not all_users:
@@ -1227,7 +1229,8 @@ def make_handler(app: WebApplication):
                                if v.get("owner") == user.get("username")}
                 elif owner:
                     visible = {k: v for k, v in visible.items() if v.get("owner") == owner}
-                used = {row["key"] for row in groups if not row["is_ungrouped"]}
+                used = {str(job.get("batch_ref") or "")
+                        for job in (app.jobs.jobs.values() if app.jobs else ())}
                 empty_batches = sum(1 for key in visible if key not in used)
             return self._json({"ok": True, "groups": groups,
                                "empty_batches": empty_batches})

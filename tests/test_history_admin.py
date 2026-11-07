@@ -157,42 +157,52 @@ def main() -> int:
         assert only_bob_detail["total"] == 1, only_bob_detail
         print("  ✓ 账户筛选：分组卡片与明细同口径")
 
-        # ---------- 6. 按账户拆未分组：虚拟 key 只存在于接口层
+        # ---------- 6. 按账户分组：一个账户的全部任务收进同一张卡
         split = batches.history_groups(admin, True, "", "owner")
         keys = {row["key"] for row in split}
         assert "__ungrouped__" not in keys, split
-        assert keys == {"__ungrouped__:alice", "__ungrouped__:bob"}, split
-        alice_group = next(row for row in split if row["key"] == "__ungrouped__:alice")
-        bob_group = next(row for row in split if row["key"] == "__ungrouped__:bob")
+        assert keys == {"__owner__:alice", "__owner__:bob"}, split
+        alice_group = next(row for row in split if row["key"] == "__owner__:alice")
+        bob_group = next(row for row in split if row["key"] == "__owner__:bob")
         assert alice_group["total"] == 9 and alice_group["owner"] == "alice", alice_group
         assert bob_group["total"] == 1 and bob_group["owner"] == "bob", bob_group
         assert all(row["group_kind"] == "owner" and row["is_ungrouped"] for row in split), split
-        bob_detail = batches.history_items("__ungrouped__:bob", admin, 0, 50, "")
+        bob_detail = batches.history_items("__owner__:bob", admin, 0, 50, "")
         assert bob_detail["total"] == 1 and bob_detail["items"][0]["owner"] == "bob", bob_detail
-        assert batches.history_items("__ungrouped__:bob", admin, 0, 50, "alice")["total"] == 0, \
+        assert batches.history_items("__owner__:bob", admin, 0, 50, "alice")["total"] == 0, \
             "账户筛选与虚拟组冲突时不能放宽到别的账户"
         try:
-            batches.history_items("__ungrouped__:bob", alice, 0, 50, "")
+            batches.history_items("__owner__:bob", alice, 0, 50, "")
         except BatchError as exc:
             assert exc.status == 403, exc
         else:
-            raise AssertionError("普通用户不该能打开按账户拆出来的虚拟组")
+            raise AssertionError("普通用户不该能打开按账户分出来的虚拟组")
         assert len(batches.history_groups(admin, True, "", "batch")) == 1, "按批次仍是一个大组"
-        print("  ✓ 按账户拆组：虚拟 key / 明细 / 越权 / 筛选冲突")
+        # 页面没刷新时还会请求旧 key：兼容保留，但只含未分组任务。
+        legacy = batches.history_items("__ungrouped__:bob", admin, 0, 50, "")
+        assert legacy["total"] == 1, legacy
+        print("  ✓ 按账户分组：虚拟 key / 明细 / 越权 / 筛选冲突")
 
-        # ---------- 7. 统一按最近更新倒序：新试跑排在老批次前面
+        # ---------- 7. 统一按最近更新倒序；批次任务并进账户卡后行上仍标批次号
         batches.batches["batchOLD"] = {"id": "batchOLD", "batch_no": "OLD-001",
                                         "owner": "alice", "state": "locked"}
         old_job = new_job("hist00000003", "alice", [{"id": "011", "status": "success"}],
                           created_at=now - 9000, batch_ref="batchOLD")
         write_job(settings, old_job)
         manager.jobs[old_job["id"]] = old_job
-        ordered = batches.history_groups(admin, True, "", "owner")
+        ordered = batches.history_groups(admin, True, "", "batch")
         assert ordered[-1]["key"] == "batchOLD", ordered
-        assert ordered[0]["key"].startswith("__ungrouped__:"), ordered
-        print("  ✓ 排序：最新的未分组试跑排在老批次前面")
+        assert ordered[0]["key"] == "__ungrouped__", ordered
+        merged = batches.history_groups(admin, True, "", "owner")
+        alice_all = next(row for row in merged if row["key"] == "__owner__:alice")
+        assert alice_all["job_count"] == 2 and alice_all["total"] == 10, alice_all
+        owner_items = batches.history_items("__owner__:alice", admin, 0, 50, "")
+        by_job = {item["job_id"]: item["batch_no"] for item in owner_items["items"]}
+        assert by_job["hist00000003"] == "OLD-001", by_job
+        assert by_job["hist00000001"] == "", by_job
+        print("  ✓ 排序与归属：批次任务并进账户卡，行上仍标出批次号")
 
-        # ---------- 8. 通道过滤：三个范围栏共用分组接口，卡片与明细必须同口径
+        # ---------- 8. 来源口径：三个范围栏共用分组接口，卡片与明细必须同口径
         # 加一条大批量（挂在现存批次下）+ 一条前天的试跑，覆盖 small / big / 跨日期。
         big_job = new_job("histBIG00001", "bob",
                           [{"id": "101", "status": "success"},
@@ -207,22 +217,22 @@ def main() -> int:
 
         small_groups = batches.history_groups(admin, True, "", "batch", "small")
         big_groups = batches.history_groups(admin, True, "", "batch", "big")
-        assert sum(row["total"] for row in small_groups) == 12, small_groups
-        assert sum(row["job_count"] for row in small_groups) == 4, small_groups
-        assert sum(row["total"] for row in big_groups) == 2, big_groups
-        assert sum(row["job_count"] for row in big_groups) == 1, big_groups
-        # 同一个 batchOLD 分组 key，明细必须跟着 lane 走，不能混进另一通道。
-        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "small")["total"] == 1
-        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "big")["total"] == 2
+        assert sum(row["total"] for row in small_groups) == 11, small_groups
+        assert sum(row["job_count"] for row in small_groups) == 3, small_groups
+        assert sum(row["total"] for row in big_groups) == 3, big_groups
+        assert sum(row["job_count"] for row in big_groups) == 2, big_groups
+        # 挂在批次下的 job 即使 lane=small（零头/重试），也必须只算大批量。
+        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "small")["total"] == 0
+        assert batches.history_items("batchOLD", admin, 0, 50, "", None, "big")["total"] == 3
         assert batches.history_items("batchOLD", admin, 0, 50, "", None, "")["total"] == 3
-        print("  ✓ 通道过滤：小批量 / 大批量栏的分组与明细都只算各自通道")
+        print("  ✓ 来源口径：批次零头/重试即使 lane=small 也只出现在大批量")
 
         # ---------- 9. 按日期分组：普通账号也能把平铺的试跑拆成可读分类
         day_groups = batches.history_groups(admin, True, "", "day", "small")
         assert day_groups and all(row["group_kind"] == "day" and row["is_ungrouped"]
                                   and row["batch_no"] == "" for row in day_groups), day_groups
         assert _day_key(now - 36 * 3600) in {row["day"] for row in day_groups}, day_groups
-        assert sum(row["total"] for row in day_groups) == 12, day_groups
+        assert sum(row["total"] for row in day_groups) == 11, day_groups
         for row in day_groups:
             detail = batches.history_items(row["key"], admin, 0, 50, "", None, "small")
             assert detail["total"] == row["total"], (row, detail["total"])
@@ -234,8 +244,8 @@ def main() -> int:
         # ---------- 10. 小批量栏的分组方式切换：按账户 / 按批次 / 按日期都可用
         owner_small = batches.history_groups(admin, True, "", "owner", "small")
         keys = {row["key"] for row in owner_small}
-        assert {"__ungrouped__:alice", "__ungrouped__:bob"} <= keys, keys
-        assert sum(row["total"] for row in owner_small) == 12, owner_small
+        assert {"__owner__:alice", "__owner__:bob"} <= keys, keys
+        assert sum(row["total"] for row in owner_small) == 11, owner_small
         assert all(row["group_kind"] != "day" for row in owner_small)
         print("  ✓ 分组方式切换：小批量栏三种维度都能拆，且都只含试跑")
     finally:

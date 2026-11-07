@@ -133,7 +133,7 @@ def main() -> int:
         write_job(settings, manager, "job2", "alice",
                   [{"id": "002", "status": "success"}, {"id": "003", "status": "success"}],
                   out_root=out_root, batch_ref="B1", created_at=time.time() - 100)
-        # 万一有试跑 job 被挂到同一个 batch_ref，也不能进整批包。
+        # 批次最后一轮只剩 1 条：调度上会被判成 small，但它仍是这个批次的产物。
         write_job(settings, manager, "jobSmall", "alice",
                   [{"id": "004", "status": "success"}],
                   out_root=out_root, batch_ref="B1", lane="small")
@@ -150,43 +150,45 @@ def main() -> int:
 
         info = batches.batch_videos("B1", alice)
         names = [name for name, _ in info["files"]]
-        assert names == ["001.mp4", "002.mp4", "003.mp4"], names
+        assert names == ["001.mp4", "002.mp4", "003.mp4", "004.mp4"], names
         assert info["batch_no"] == "AW26-001" and info["id"] == "B1", info
         by_name = dict(info["files"])
         assert by_name["001.mp4"].parent.name == "job1", "第一轮成功的视频不能漏"
         assert by_name["002.mp4"].parent.name == "job2", "同场景要保留最新一次成功"
+        assert by_name["004.mp4"].parent.name == "jobSmall", "批次零头（lane=small）也要进包"
         assert not any("/" in name or ".." in name for name in names), names
-        print("  ✓ 完整收集：多轮成功视频都进包，试跑与路径穿越记录被排除")
+        print("  ✓ 完整收集：多轮成功视频与批次零头都进包，路径穿越记录被排除")
 
         # probe 只读不写盘：前端先拿 count，再触发真正的下载。
         tmp_dir = Path(settings.data_dir) / "tmp"
         before = sorted(p.name for p in tmp_dir.glob("*.zip")) if tmp_dir.is_dir() else []
         again = batches.batch_videos("B1", admin)
-        assert len(again["files"]) == 3, again
+        assert len(again["files"]) == 4, again
         after = sorted(p.name for p in tmp_dir.glob("*.zip")) if tmp_dir.is_dir() else []
         assert before == after, "probe 不能生成 zip 文件"
         print("  ✓ probe：重复查询返回同样数量且不落盘，管理员可读")
 
-        # 真正打包：zip 内三个文件、内容与各自 job 对应。
+        # 真正打包：zip 内四个文件、内容与各自 job 对应。
         zip_path = batches.zip_path("B1", alice, info["files"])
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 assert sorted(zf.namelist()) == names, zf.namelist()
                 assert zf.read("001.mp4") == b"fake-mp4:job1:001"
                 assert zf.read("002.mp4") == b"fake-mp4:job2:002"
+                assert zf.read("004.mp4") == b"fake-mp4:jobSmall:004"
         finally:
             zip_path.unlink(missing_ok=True)
         print("  ✓ 打包：zip 内文件名与内容逐条对得上")
 
-        # 只挂试跑 job 的「批次」：明确拒绝，不产出空包。
+        # 只挂一条零头 run 的批次：同样能整批下载，不能再报「试跑不支持」。
         write_job(settings, manager, "jobOnlySmall", "alice",
                   [{"id": "005", "status": "success"}],
                   out_root=out_root, batch_ref="B2", lane="small")
         make_batch(batches, "B2", "alice", runs=[{"job_id": "jobOnlySmall"}],
                    items=[{"template_id": "005", "state": "done", "job_id": "jobOnlySmall"}])
-        expect_error(lambda: batches.batch_videos("B2", alice), 403, "纯试跑批次")
-        expect_error(lambda: batches.batch_videos("B2", admin), 403, "管理员也不能整批下载试跑")
-        print("  ✓ 资格：只挂试跑 job 的批次 403，管理员同样拒绝")
+        assert [n for n, _ in batches.batch_videos("B2", alice)["files"]] == ["005.mp4"]
+        assert [n for n, _ in batches.batch_videos("B2", admin)["files"]] == ["005.mp4"]
+        print("  ✓ 资格：只剩零头的批次照常能整批下载")
 
         # 草稿/空批次：没有视频，不生成空 zip。
         make_batch(batches, "B3", "alice", state="draft")
@@ -224,7 +226,7 @@ def main() -> int:
 
         code, probe_headers, raw = call(alice_op, base, "/api/batches/B1/files.zip?probe=1")
         probe = json.loads(raw.decode("utf-8"))
-        assert code == 200 and probe["count"] == 3, (code, probe)
+        assert code == 200 and probe["count"] == 4, (code, probe)
         assert probe["download_url"] == "/api/batches/B1/files.zip", probe
         assert probe["batch_no"] == "AW26-001", probe
         assert "json" in probe_headers.get("Content-Type", ""), probe_headers
@@ -234,12 +236,13 @@ def main() -> int:
         assert "zip" in zip_headers.get("Content-Type", ""), zip_headers
         assert ".zip" in zip_headers.get("Content-Disposition", ""), zip_headers
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            assert sorted(zf.namelist()) == ["001.mp4", "002.mp4", "003.mp4"], zf.namelist()
+            assert sorted(zf.namelist()) == ["001.mp4", "002.mp4", "003.mp4", "004.mp4"], zf.namelist()
 
         assert call(bob_op, base, "/api/batches/B1/files.zip?probe=1")[0] == 403, "跨账户"
-        assert call(alice_op, base, "/api/batches/B2/files.zip?probe=1")[0] == 403, "纯试跑批次"
+        code, _, only = call(alice_op, base, "/api/batches/B2/files.zip?probe=1")
+        assert code == 200 and json.loads(only.decode("utf-8"))["count"] == 1, (code, only)
         assert call(alice_op, base, "/api/batches/B3/files.zip")[0] == 404, "空批次"
-        print("  ✓ HTTP：probe 返回数量 / zip 可下载 / 跨账户 403 / 纯试跑 403 / 空批次 404")
+        print("  ✓ HTTP：probe 返回数量 / zip 可下载 / 跨账户 403 / 零头批次可打包 / 空批次 404")
     finally:
         if server:
             server.shutdown()
