@@ -81,7 +81,10 @@ server/feishu.json
 _state/
 
 # 例外：包初始化文件不是临时脚本（上面的 _*.py 会误伤 __init__.py）
+# 注意：新增子包时必须在这里补一行，否则 __init__.py 不进仓库，
+# 克隆/发布出去的目录会变成命名空间包，`from app.xxx import ...` 直接 ImportError。
 !app/web/__init__.py
+!app/imggen/__init__.py
 
 # 临时网络探测脚本（排查 npm 源用，与产品无关）
 probe-registry.mjs
