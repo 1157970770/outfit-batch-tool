@@ -27,10 +27,12 @@ from PIL import Image  # noqa: E402
 from test_batches import (body, build_manifest, build_rows, build_settings,  # noqa: E402
                           call, start_server, write_workbook)
 from app.imggen import ImageGenError, ImageGenManager  # noqa: E402
+from app.imggen import gemini  # noqa: E402
 from app.imggen.processing import api_size_for_output, finalize_output_image  # noqa: E402
 from app.web.server import WebApplication  # noqa: E402
 
 MOCK_BASE = "http://127.0.0.1:1"        # 占位地址：本套件不会真的发请求
+NB_MODEL = "gemini-nano-banana-2.1"     # Gemini 原生协议，尺寸口径与 Images 完全不同
 
 
 def png_bytes(width: int = 320, height: int = 240) -> bytes:
@@ -106,8 +108,20 @@ def main() -> int:
         calls.append(("generate", prompt, size))
         return png_bytes(1024, 1024)
 
+    def fake_gemini_generate(prompt, size, api_key, **kwargs):
+        calls.append(("gemini-generate", prompt, size, kwargs.get("model"),
+                      kwargs.get("base_url"), kwargs.get("timeout")))
+        return png_bytes(640, 800)
+
+    def fake_gemini_edit(prompt, size, paths, api_key, **kwargs):
+        calls.append(("gemini-edit", prompt, size, [Path(p).name for p in paths],
+                      kwargs.get("model")))
+        return png_bytes(640, 800)
+
     app.imagegen._edit = fake_edit
     app.imagegen._generate = fake_generate
+    app.imagegen._gemini_generate = fake_gemini_generate
+    app.imagegen._gemini_edit = fake_gemini_edit
 
     server, base = start_server(app)
     data_dir = Path(settings.data_dir)
@@ -121,12 +135,17 @@ def main() -> int:
         assert code == 200
         options = body(raw)["service"]["imagegen"]
         assert options["configured"] is True, options
-        assert len(options["models"]) == 5, options["models"]
+        assert len(options["models"]) == 6, options["models"]
         assert options["max_count"] == 3 and options["max_references"] == 4, options
         assert options["default_model"] == "gpt-image-2-vip"
         assert options["prompt_limit"] == 4000
         model_25 = next(item for item in options["models"] if item["id"] == "gpt-image-2.5-flare-vip")
         assert len(model_25["qualities"]) == 6, model_25
+        nano = next(item for item in options["models"] if item["id"] == NB_MODEL)
+        assert nano["provider"] == "gemini", nano
+        assert len(nano["sizes"]) == 19 and nano["qualities"] == [
+            {"value": "auto", "label": "自动｜由模型决定"}], nano
+        assert "2048x2048" not in [item["value"] for item in nano["sizes"]], nano
         print("  ✓ bootstrap 下发型号/尺寸/质量与上限")
 
         # 2. 提交带参考图的任务：2 张、4:5
@@ -232,7 +251,55 @@ def main() -> int:
         assert code == 404, code
         print("  ✓ 删除记录同时删本地文件")
 
-        # 9. 未配置时：manager 直接 503，options 里带原因
+        # 9. Nano Banana 2.1：Gemini 原生协议，尺寸是「比例@档位」，模型直出比例、不本地裁切
+        code, _, raw = call(alice, base, "/api/imagegen/tasks", "POST", {
+            "prompt": "生成一张图片：白色棉质短袖衬衫，正面站立", "model": NB_MODEL,
+            "size": "4:5@2K", "count": 1,
+        })
+        assert code == 201, (code, raw)
+        nb_task = body(raw)["task"]
+        assert nb_task["api_size"] == "2K（4:5）", nb_task
+        assert nb_task["size_label"] == "竖版 4:5｜2K", nb_task
+        assert nb_task["quality"] == "auto", nb_task       # 没传 quality：退到该型号唯一档
+        nb_done = wait_done(alice, base, nb_task["id"])
+        assert nb_done["status"] == "已完成", nb_done
+        first = nb_done["images"][0]
+        # 比例由模型保证，本地不该再裁：宽高应等于桩返回的 640x800
+        assert (first["width"], first["height"]) == (640, 800), first
+        nb_calls = [item for item in calls if item[0] == "gemini-generate"]
+        assert nb_calls and nb_calls[-1][2] == "4:5@2K", nb_calls
+        assert nb_calls[-1][3] == NB_MODEL and nb_calls[-1][4] == MOCK_BASE, nb_calls
+        assert nb_calls[-1][5] == 60, nb_calls              # timeout_seconds 原样传下去
+
+        # 带参考图 → gemini-edit，参考图顺序就是模型眼里的「图1、图2…」
+        ref_upload = upload_png(alice, base, name="nb-ref.png")
+        code, _, raw = call(alice, base, "/api/imagegen/tasks", "POST", {
+            "prompt": "换成这件衬衫", "model": NB_MODEL, "size": "1:1@4K",
+            "count": 1, "upload_ids": [ref_upload],
+        })
+        assert code == 201, (code, raw)
+        nb_edit_task = body(raw)["task"]
+        assert nb_edit_task["api_size"] == "4K（1:1）", nb_edit_task
+        nb_edit_done = wait_done(alice, base, nb_edit_task["id"])
+        assert nb_edit_done["status"] == "已完成", nb_edit_done
+        nb_edits = [item for item in calls if item[0] == "gemini-edit"]
+        assert nb_edits and nb_edits[-1][2] == "1:1@4K", nb_edits
+        assert nb_edits[-1][3] == ["ref1.png"], nb_edits
+
+        # 两套尺寸口径不能串台：像素规格只属于 Images 协议，比例档位只属于 Gemini
+        mismatched = [
+            {"prompt": "x", "model": NB_MODEL, "size": "2048x2048"},
+            {"prompt": "x", "model": NB_MODEL, "quality": "high"},
+            {"prompt": "x", "model": "gpt-image-2-vip", "size": "4:5@2K"},
+        ]
+        for payload in mismatched:
+            code, _, raw = call(alice, base, "/api/imagegen/tasks", "POST", payload)
+            assert code == 400, (payload, code, raw)
+        for task_id_ in (nb_task["id"], nb_edit_task["id"]):
+            call(alice, base, f"/api/imagegen/tasks/{task_id_}", "DELETE")
+        print("  ✓ Nano Banana 走 Gemini 原生协议：比例@档位、不裁切、口径不串台")
+
+        # 10. 未配置时：manager 直接 503，options 里带原因
         empty = ImageGenManager(Shim(settings.data_dir, {}), root=tmp / "imagegen-empty")
         assert empty.configured is False
         assert "api_key" in empty.unconfigured_reason(), empty.unconfigured_reason()
@@ -245,7 +312,7 @@ def main() -> int:
             raise AssertionError("未配置时应当拒绝创建任务")
         print("  ✓ 未配置 → 503 + 可读原因")
 
-        # 10. 重启恢复：磁盘上「生成中」的旧任务不能永远显示进行中
+        # 11. 重启恢复：磁盘上「生成中」的旧任务不能永远显示进行中
         recover_root = tmp / "imagegen-recover"
         (recover_root / "tasks").mkdir(parents=True)
         (recover_root / "files").mkdir()
@@ -262,12 +329,37 @@ def main() -> int:
         assert "服务重启" in records[0]["error"], records[0]
         print("  ✓ 重启后残留的进行中任务标记为失败")
 
-        # 11. 纯函数：2.5 系列 4:5 直出，其他 VIP 走 2048x2048 再裁
+        # 12. 纯函数：2.5 系列 4:5 直出，其他 VIP 走 2048x2048 再裁
         assert api_size_for_output("4:5", "gpt-image-2.5-flare-vip") == "2048x2560"
         assert api_size_for_output("4:5", "gpt-image-2-vip") == "2048x2048"
         final_bytes, (width, height) = finalize_output_image(png_bytes(2048, 2048), "4:5")
         assert abs(width / height - 0.8) < 0.002 and final_bytes[:8] == b"\x89PNG\r\n\x1a\n"
         print("  ✓ 4:5 尺寸映射与裁切")
+
+        # 13. Gemini 原生协议的纯函数：端点推导 / 尺寸拆分 / 跳过思考中间图
+        assert gemini.native_endpoint(MOCK_BASE, NB_MODEL) == (
+            f"{MOCK_BASE}/v1beta/models/{NB_MODEL}:generateContent"), \
+            gemini.native_endpoint(MOCK_BASE, NB_MODEL)
+        assert gemini.split_size("4:5@2K") == ("4:5", "2K")
+        assert gemini.split_size("auto") == ("", "")
+        final_png = png_bytes(64, 80)
+        thought = png_bytes(32, 32)
+        response = {"candidates": [{"content": {"parts": [
+            {"thought": True, "inlineData": {
+                "mimeType": "image/png", "data": base64.b64encode(thought).decode()}},
+            {"inlineData": {"mimeType": "image/png",
+                            "data": base64.b64encode(final_png).decode()}},
+        ]}}]}
+        assert gemini._extract_image(response) == final_png     # 只取最后一张非思考图
+        refused = {"candidates": [{"finishReason": "SAFETY", "content": {"parts": [
+            {"text": "I can't help with that."}]}}]}
+        try:
+            gemini._extract_image(refused)
+        except Exception as exc:                                # noqa: BLE001
+            assert "SAFETY" in str(exc) and "计费" in str(exc), exc
+        else:
+            raise AssertionError("没有图片时必须报错（且提示可能已计费）")
+        print("  ✓ Gemini 端点/尺寸/思考图跳过/拦截报错")
     finally:
         server.shutdown()
         server.server_close()

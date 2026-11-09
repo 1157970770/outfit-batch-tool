@@ -89,6 +89,15 @@
 
   // ------------------------------------------------------------ 选项
 
+  // 单价随型号变化（GPT Image $0.03 / Nano Banana $0.045），提示语跟着下拉走。
+  function hintText() {
+    const options = state.options || {};
+    const spec = (options.models || []).find((item) => item.id === $('ig-model').value);
+    const price = (spec && spec.price) || options.price || '0.03';
+    const maxCount = state.maxCount || 4;
+    return `单张 $${price}；一次最多 ${maxCount} 张。提交后在后台排队，可以离开这个页面。`;
+  }
+
   function applyOptions(options) {
     state.options = options || null;
     if (!options) {
@@ -111,9 +120,9 @@
 
     const configured = !!options.configured;
     $('ig-submit').disabled = !configured;
-    const price = options.price || '0.03';
+    state.maxCount = maxCount;
     $('ig-hint').textContent = configured
-      ? `单张 $${price}；一次最多 ${maxCount} 张。提交后在后台排队，可以离开这个页面。`
+      ? hintText()
       : (options.reason || '生图未配置：检查 server/imagegen.json。');
     if (!configured) showError(options.reason || '');
   }
@@ -142,6 +151,8 @@
     const fallbackQuality = qualityValues.includes(options.default_quality) ? options.default_quality : qualityValues[0];
     quality.value = qualityValues.includes(prevQuality) ? prevQuality : (fallbackQuality || 'auto');
     quality.disabled = qualityValues.length <= 1;
+
+    if (options.configured) $('ig-hint').textContent = hintText();
   }
 
   async function ensureOptions() {

@@ -56,12 +56,18 @@ python run_web.py
 
 | 文件 | 职责 | 关键入口 |
 | --- | --- | --- |
-| `app/imggen/manager.py` | 任务落盘、`queue.Queue` + N 个守护线程、逐张调用与侧车写入 | `ImageGenManager` |
-| `app/imggen/models.py` | 5 个 VIP 型号、质量档位、请求参数校验 | `IMAGE_MODEL_SPECS`、`image_request_parameters` |
-| `app/imggen/processing.py` | 17 档输出规格、4:5 裁切与缩放 | `finalize_output_image`、`api_size_for_output` |
+| `app/imggen/manager.py` | 任务落盘、`queue.Queue` + N 个守护线程、按 provider 分派、逐张调用与侧车写入 | `ImageGenManager` |
+| `app/imggen/models.py` | 6 个型号（5 个 GPT Image VIP + Nano Banana 2.1）、两套尺寸口径、质量与参数校验 | `IMAGE_MODEL_SPECS`、`image_request_parameters` |
+| `app/imggen/processing.py` | 17 档像素规格、4:5 裁切与缩放（**只服务 Images 协议**） | `finalize_output_image`、`api_size_for_output` |
 | `app/imggen/api.py` | stdlib urllib 客户端：`images/generations`、`images/edits` | `generate_image`、`edit_image` |
-| `app/imggen/decoder.py` | `b64_json` 或 url 下载（≤64MB） | `extract_image_bytes` |
+| `app/imggen/gemini.py` | stdlib urllib 客户端：Gemini 原生 `{model}:generateContent`（Nano Banana，比例 + 1K/2K/4K，跳过 `thought` 中间图） | `generate_image`、`edit_image`、`native_endpoint` |
+| `app/imggen/decoder.py` | `b64_json` 或 url 下载（≤64MB，仅 Images 协议） | `extract_image_bytes` |
 | `app/imggen/errors.py` | HTTP 码 → 中文、密钥脱敏 | `explain_error` |
+
+两种协议的分界在 `models.ImageModelSpec.provider`：`images`（GPT Image VIP）与 `gemini`
+（Nano Banana）。任务的尺寸值因此有两种形态——像素（`2048x2048`、`4:5`）与「比例@档位」
+（`4:5@2K`）——互不通用，`manager._size_options/_size_label/_api_size` 按 provider 分派；
+Gemini 的比例由模型直接给出，**不再走本地裁切**。
 
 ## 3. 一次请求怎么走
 
@@ -339,10 +345,16 @@ web-data/
 改完**必须重启**。
 
 `server/imagegen.json`（生图 tab 独立配置，缺文件时按默认值且 `configured=false`）：
-`enabled`、`base_url`（默认 `https://api2.laozhang.ai/v1/`）、`api_key`（**明文老张 Key**）、
-`model`（默认 `gpt-image-2-vip`）、`default_quality`、`timeout_seconds`（30–900）、
-`max_count`（≤8）、`max_references`（≤10）、`max_inflight`（≤8，工作线程数）、`price_per_image`（仅展示口径）。
+`enabled`、`base_url`（默认 `https://api2.laozhang.ai/v1/`）、`gemini_base_url`（Nano Banana 的
+主机，留空即复用 `base_url`，由 `gemini.native_endpoint` 自动把 `/v1` 换成 `/v1beta`）、
+`api_key`（**明文老张 Key**）、`model`（默认 `gpt-image-2-vip`）、`default_quality`、
+`timeout_seconds`（30–900，默认 360）、`max_count`（≤8）、`max_references`（≤10）、
+`max_inflight`（≤8，工作线程数）、`price_per_image`（仅展示口径）。
 路径可用环境变量 `OUTFIT_IMAGEGEN_CONFIG` 覆盖；`api_key` 为空时 tab 仍可见，但提交按钮禁用并提示缺什么。
+
+Nano Banana 两个坑写在这里免得再踩：① `imageSize` 必须大写 K（`2K`/`4K`），小写有的型号直接报错；
+② **HTTP 200 但没有图片也会计费一次**（Google 审核拦截不返回错误码），所以 `gemini.py` 不自动重试，
+只把 `finishReason`/模型原话回显给用户，让他先改提示词。
 
 ## 10. 扩展点与已知债
 

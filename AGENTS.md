@@ -73,7 +73,7 @@ New-Item -ItemType Junction -Path 'D:\批量视频任务设计区\web-data-dev\u
 
 局域网网页版批量视频生产器：1 张定妆图 + 最多 9 张细节图 + N 个视频模板 → N 条 7 秒换装视频，
 调用阿里云百炼 `wan3.0-video`，成品落本地并可选归档腾讯云 COS。
-另有一个「生图」tab：提示词 + 参考图直接出图（老张 API 的 GPT Image VIP，与视频链路完全独立）。
+另有一个「生图」tab：提示词 + 参考图直接出图（老张 API 的 GPT Image VIP 与 Nano Banana 2.1，与视频链路完全独立）。
 
 | 组成 | 入口 | 说明 |
 | --- | --- | --- |
@@ -130,13 +130,18 @@ app/storage.py         COS / 本地存储适配
 app/web/static/imagegen.js
    │  POST /api/uploads（参考图，复用 uploads 目录）→ POST /api/imagegen/tasks
    ▼
-app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守护线程
-   ├─ models.py         5 个 VIP 型号、质量档位、请求参数校验（$0.03/张，禁止按量计费）
-   ├─ processing.py     17 档输出规格、4:5 裁切（2.5 系列 2048×2560 直出）
+app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守护线程（按 provider 分派）
+   ├─ models.py         6 个型号（5 个 GPT Image VIP + Nano Banana 2.1）、两套尺寸口径、参数校验
+   ├─ processing.py     17 档像素规格、4:5 裁切（只服务 Images 协议；Gemini 直出比例不裁）
    ├─ api.py            stdlib urllib：images/generations、images/edits（字段 image[]）
+   ├─ gemini.py         stdlib urllib：{model}:generateContent（Nano Banana，1K/2K/4K）
    ├─ decoder.py        b64_json 或 url 下载（≤64MB）
    └─ errors.py         HTTP 码 → 中文、密钥脱敏
 ```
+
+> 两套协议别混：`provider=images` 的尺寸是像素（`2048x2048`），`provider=gemini` 的是
+> 「比例@档位」（`4:5@2K`），互不通用；Gemini 的图在 `candidates[].parts[].inlineData`，
+> 且 HTTP 200 没图也会计费，所以不自动重试。
 
 > 配置一律来自本地 `server/config.json` + `server/web.json`，改完重启生效；
 > 没有云端配置下发，也没有授权校验（仓库里不再包含这些模块）。
@@ -173,7 +178,7 @@ app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守�
 | --- | --- | --- |
 | `server/web.json` | 账号、会话密钥、并发上限、快速通道参数 | ❌ 含密码哈希 |
 | `server/config.json` | **明文 API Key**、模型、COS、单价、限流参数 | ❌ 绝不提交 |
-| `server/imagegen.json` | 生图 tab 的**明文老张 Key**、base_url、默认型号、张数/参考图上限 | ❌ 绝不提交 |
+| `server/imagegen.json` | 生图 tab 的**明文老张 Key**、base_url / gemini_base_url、默认型号、张数/参考图上限 | ❌ 绝不提交 |
 | `server/*.example.json` | 上述三者的模板 | ✅ |
 | `web-data/jobs/<id>.json` | 任务状态与逐条记录 | ❌ |
 | `web-data/batches/<id>.json` | 批次与条目 | ❌ |
@@ -219,7 +224,7 @@ python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格
 python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / 取图下载 / 权限 / 重启恢复
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口、批次与生图端到端（28 套，含 `test_path_relocate`），全部离线运行。
+`tests/run_all.py` 覆盖引擎、存储、网页接口、批次与生图端到端（29 套，含 `test_path_relocate`），全部离线运行。
 
 ## 7. 别动 / 小心
 

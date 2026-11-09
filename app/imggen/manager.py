@@ -24,10 +24,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from . import gemini
 from .api import edit_image, generate_image
 from .errors import explain_error
-from .models import IMAGE_MODEL_IDS, image_model_label, image_quality_options, \
-    image_request_parameters, supports_image_parameters
+from .models import GEMINI_SIZE_BY_VALUE, GEMINI_SIZE_SPECS, IMAGE_MODEL_IDS, \
+    image_model_label, image_model_provider, image_model_spec, image_quality_options, \
+    image_request_parameters, is_gemini_model, supports_image_parameters
 from .processing import api_size_for_output, finalize_output_image, output_spec_label, \
     output_specs_for_model
 
@@ -46,9 +48,10 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "base_url": "https://api2.laozhang.ai/v1/",
     "api_key": "",
+    "gemini_base_url": "",
     "model": "gpt-image-2-vip",
     "default_quality": "high",
-    "timeout_seconds": 300,
+    "timeout_seconds": 360,
     "max_count": 4,
     "max_references": REFERENCE_CAP,
     "max_inflight": 3,
@@ -89,12 +92,20 @@ class ImageGenManager:
         # 测试可替换：签名与 api.generate_image / api.edit_image 一致
         self._generate: Callable[..., bytes] = generate_image
         self._edit: Callable[..., bytes] = edit_image
+        # Gemini 原生协议（Nano Banana）单独一套，测试同样可替换
+        self._gemini_generate: Callable[..., bytes] = gemini.generate_image
+        self._gemini_edit: Callable[..., bytes] = gemini.edit_image
         self._load_existing()
 
     # ------------------------------------------------------------ 配置
     @property
     def base_url(self) -> str:
         return str(self.config.get("base_url") or "").strip()
+
+    @property
+    def gemini_base_url(self) -> str:
+        """Gemini 原生入口的主机；默认复用 base_url，由 gemini.native_endpoint 去掉 /v1。"""
+        return str(self.config.get("gemini_base_url") or "").strip() or self.base_url
 
     @property
     def api_key(self) -> str:
@@ -141,11 +152,14 @@ class ImageGenManager:
         """一次性把「模型 → 可用尺寸/质量」交给前端，避免两边各写一份规则。"""
         models = []
         for model_id in IMAGE_MODEL_IDS:
+            spec = image_model_spec(model_id)
             models.append({
                 "id": model_id,
                 "label": image_model_label(model_id),
-                "sizes": [{"value": spec.value, "label": spec.label}
-                          for spec in output_specs_for_model(model_id)],
+                "provider": image_model_provider(model_id),
+                "price": spec.price_usd if spec is not None else "",
+                "sizes": [{"value": value, "label": label}
+                          for value, label in _size_options(model_id)],
                 "qualities": [{"value": value, "label": label}
                               for value, label in _quality_pairs(model_id)],
             })
@@ -185,13 +199,20 @@ class ImageGenManager:
         if model not in IMAGE_MODEL_IDS:
             raise ImageGenError("不支持的图片模型。")
 
-        allowed_sizes = {spec.value for spec in output_specs_for_model(model)}
+        allowed_sizes = {value for value, _ in _size_options(model)}
         size = str(payload.get("size") or "auto").strip() or "auto"
         if size not in allowed_sizes:
             raise ImageGenError("所选模型不支持这个输出尺寸。")
 
-        quality = str(payload.get("quality") or "").strip() or str(
-            self.config.get("default_quality") or "high")
+        # 质量：没传就用配置默认；默认值对该型号不适用时退到它的第一档
+        # （Nano Banana 没有 quality 概念，只有 auto）。显式传了非法值仍然报错。
+        allowed_qualities = image_quality_options(model)
+        requested_quality = str(payload.get("quality") or "").strip()
+        quality = requested_quality or str(self.config.get("default_quality") or "").strip()
+        if quality not in allowed_qualities:
+            if requested_quality:
+                raise ImageGenError("所选模型不支持此图片质量。")
+            quality = allowed_qualities[0]
         try:
             image_request_parameters(model, size, quality)
         except ValueError as exc:
@@ -218,10 +239,10 @@ class ImageGenManager:
             "model": model,
             "model_label": image_model_label(model),
             "size": size,
-            "size_label": output_spec_label(size),
+            "size_label": _size_label(model, size),
             "quality": quality,
             "count": count,
-            "api_size": api_size_for_output(size, model) if supports_image_parameters(model) else "auto",
+            "api_size": _api_size(model, size),
             "status": STATUS_QUEUED,
             "progress": 0,
             "error": "",
@@ -403,7 +424,9 @@ class ImageGenManager:
                 record["progress"] = index - 1
                 self._persist(record)
             try:
-                if reference_paths:
+                if is_gemini_model(record["model"]):
+                    data = self._call_gemini(record, prompt, reference_paths)
+                elif reference_paths:
                     data = self._edit(
                         prompt, record["api_size"], reference_paths, self.api_key,
                         base_url=self.base_url, model=record["model"],
@@ -467,6 +490,19 @@ class ImageGenManager:
             record["elapsed_ms"] = int((record["finished_at"] - started) * 1000)
             self._persist(record)
 
+    def _call_gemini(self, record: dict, prompt: str, reference_paths: list[Path]) -> bytes:
+        """Nano Banana：尺寸传「比例@档位」原值，不走 api_size 那套像素换算。"""
+        common = {
+            "base_url": self.gemini_base_url,
+            "model": record["model"],
+            "quality": record.get("quality") or "auto",
+            "timeout": self.timeout,
+        }
+        if reference_paths:
+            return self._gemini_edit(prompt, record["size"], reference_paths,
+                                     self.api_key, **common)
+        return self._gemini_generate(prompt, record["size"], self.api_key, **common)
+
     def _fail(self, record: dict, index: int, exc: BaseException) -> None:
         message = explain_error(exc)
         with self._lock:
@@ -508,3 +544,29 @@ class ImageGenManager:
 def _quality_pairs(model: str) -> list[tuple[str, str]]:
     from .models import QUALITY_LABELS
     return [(value, QUALITY_LABELS.get(value, value)) for value in image_quality_options(model)]
+
+
+def _size_options(model: str) -> list[tuple[str, str]]:
+    """尺寸下拉：Images 协议给像素规格，Gemini 给「比例@档位」。"""
+    if is_gemini_model(model):
+        return [(spec.value, spec.label) for spec in GEMINI_SIZE_SPECS]
+    return [(spec.value, spec.label) for spec in output_specs_for_model(model)]
+
+
+def _size_label(model: str, value: str) -> str:
+    if is_gemini_model(model):
+        spec = GEMINI_SIZE_BY_VALUE.get(value)
+        return spec.label if spec is not None else value
+    return output_spec_label(value)
+
+
+def _api_size(model: str, value: str) -> str:
+    """记进任务里的「实际请求尺寸」：Gemini 记 `2K（4:5）`，Images 记像素。"""
+    if is_gemini_model(model):
+        spec = GEMINI_SIZE_BY_VALUE.get(value)
+        if spec is None or not spec.image_size:
+            return "auto"
+        return f"{spec.image_size}（{spec.aspect_ratio}）"
+    if not supports_image_parameters(model):
+        return "auto"
+    return api_size_for_output(value, model)
