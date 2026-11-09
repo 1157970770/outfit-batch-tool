@@ -10,7 +10,7 @@
 
 目录布局（都随 data_dir 迁移，记录里只存相对路径）：
   web-data/imagegen/tasks/<task_id>.json
-  web-data/imagegen/files/<task_id>/1.png + 1.meta.json
+  web-data/imagegen/files/<task_id>/1.png（或 1.jpg，按实际字节判断）+ 1.meta.json
   web-data/imagegen/files/<task_id>/ref1.png
 """
 from __future__ import annotations
@@ -448,7 +448,8 @@ class ImageGenManager:
                 self._fail(record, index, exc)
                 return
 
-            filename = f"{index}.png"
+            extension = _sniff_extension(final_bytes)
+            filename = f"{index}{extension}"
             target = task_dir / filename
             try:
                 target.write_bytes(final_bytes)
@@ -475,7 +476,7 @@ class ImageGenManager:
                 record["images"].append({
                     "index": index,
                     "file": filename,
-                    "name": f"{record['id'][:8]}-{index}.png",
+                    "name": f"{record['id'][:8]}-{index}{extension}",
                     "width": width,
                     "height": height,
                     "size_mb": round(len(final_bytes) / (1024 * 1024), 2),
@@ -539,6 +540,23 @@ class ImageGenManager:
                 record["error"] = record.get("error") or "服务重启，任务中断，请重新提交。"
                 record["finished_at"] = record.get("finished_at") or time.time()
             self._tasks[record["id"]] = record
+
+
+def _sniff_extension(data: bytes) -> str:
+    """按文件魔数决定扩展名。
+
+    Gemini（Nano Banana）原生接口回来的常是 `image/jpeg`，GPT Image 是 PNG；
+    之前一律写成 `.png` 会让静态服务按 image/png 发 JPEG，下载后的后缀也是错的。
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:3] == b"GIF":
+        return ".gif"
+    return ".png"
 
 
 def _quality_pairs(model: str) -> list[tuple[str, str]]:

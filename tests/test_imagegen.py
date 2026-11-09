@@ -360,6 +360,15 @@ def main() -> int:
         else:
             raise AssertionError("没有图片时必须报错（且提示可能已计费）")
         print("  ✓ Gemini 端点/尺寸/思考图跳过/拦截报错")
+
+        # 14. 成品后缀按真实字节判断（Gemini 回来的是 JPEG，不能硬写 .png）
+        from app.imggen.manager import _sniff_extension
+
+        assert _sniff_extension(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8) == ".png"
+        assert _sniff_extension(b"\xff\xd8\xff\xe0" + b"\x00" * 8) == ".jpg"
+        assert _sniff_extension(b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 4) == ".webp"
+        assert _sniff_extension(b"????") == ".png"              # 认不出就按 png 兜底
+        print("  ✓ 成品后缀按魔数判断")
     finally:
         server.shutdown()
         server.server_close()
