@@ -199,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
                 probe_path.unlink(missing_ok=True)
             if not (Path(__file__).resolve().parent / "static" / "index.html").exists():
                 raise RuntimeError("网页静态文件缺失")
+            # 真正导入一次服务模块：发布出去的目录若缺 __init__.py（.gitignore 的 _*.py 会
+            # 误伤），这里立刻 ImportError，而不是等重启后进程起不来才发现。
+            from app.web.server import serve  # noqa: F401
             print(f"网页自检通过 v{WEB_VERSION}")
             return 0
         if args.init:
