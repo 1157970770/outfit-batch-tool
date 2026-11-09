@@ -73,11 +73,13 @@ New-Item -ItemType Junction -Path 'D:\批量视频任务设计区\web-data-dev\u
 
 局域网网页版批量视频生产器：1 张定妆图 + 最多 9 张细节图 + N 个视频模板 → N 条 7 秒换装视频，
 调用阿里云百炼 `wan3.0-video`，成品落本地并可选归档腾讯云 COS。
+另有一个「生图」tab：提示词 + 参考图直接出图（老张 API 的 GPT Image VIP，与视频链路完全独立）。
 
 | 组成 | 入口 | 说明 |
 | --- | --- | --- |
 | 网页端 | `run_web.py` → `app/web/` | 标准库 `ThreadingHTTPServer` + 原生 JS |
 | 引擎 | `app/core.py` / `app/wan_api.py` | 纯 Python，网页与 CLI 共用 |
+| 生图 | `app/imggen/` | 独立队列 + urllib 客户端，不占视频的在飞名额 |
 
 ## 2. 三分钟跑起来
 
@@ -122,6 +124,20 @@ app/wan_api.py         WanClient：DashScope(默认)/RunningHub 适配，双令�
 app/storage.py         COS / 本地存储适配
 ```
 
+生图 tab 走另一条完全独立的链路（不进 `jobs`、不占视频的在飞名额）：
+
+```
+app/web/static/imagegen.js
+   │  POST /api/uploads（参考图，复用 uploads 目录）→ POST /api/imagegen/tasks
+   ▼
+app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守护线程
+   ├─ models.py         5 个 VIP 型号、质量档位、请求参数校验（$0.03/张，禁止按量计费）
+   ├─ processing.py     17 档输出规格、4:5 裁切（2.5 系列 2048×2560 直出）
+   ├─ api.py            stdlib urllib：images/generations、images/edits（字段 image[]）
+   ├─ decoder.py        b64_json 或 url 下载（≤64MB）
+   └─ errors.py         HTTP 码 → 中文、密钥脱敏
+```
+
 > 配置一律来自本地 `server/config.json` + `server/web.json`，改完重启生效；
 > 没有云端配置下发，也没有授权校验（仓库里不再包含这些模块）。
 
@@ -157,7 +173,8 @@ app/storage.py         COS / 本地存储适配
 | --- | --- | --- |
 | `server/web.json` | 账号、会话密钥、并发上限、快速通道参数 | ❌ 含密码哈希 |
 | `server/config.json` | **明文 API Key**、模型、COS、单价、限流参数 | ❌ 绝不提交 |
-| `server/*.example.json` | 上述两者的模板 | ✅ |
+| `server/imagegen.json` | 生图 tab 的**明文老张 Key**、base_url、默认型号、张数/参考图上限 | ❌ 绝不提交 |
+| `server/*.example.json` | 上述三者的模板 | ✅ |
 | `web-data/jobs/<id>.json` | 任务状态与逐条记录 | ❌ |
 | `web-data/batches/<id>.json` | 批次与条目 | ❌ |
 | `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与本地打标工具共用；`.bak` 是上一版 | ❌ |
@@ -165,6 +182,7 @@ app/storage.py         COS / 本地存储适配
 | `web-data/tag_versions/` | 真源版本快照（gzip，整库含每条标签与弃用态）；自动留 50 版 + 手动 50 版，回滚前另存备份 | ❌ |
 | `web-data/{uploads,output,logs}/` | 定妆图与细节图、成片、任务日志 | ❌ |
 | `web-data/ps/<upload_id>_s<强度>.png` + `.json` | PS 助手去紫结果（PNG + 统计侧车）；路径由原图 id 与强度派生，无登记表，可随时整目录删 | ❌ |
+| `web-data/imagegen/tasks/<id>.json` + `files/<id>/` | 生图任务记录、成品 `<n>.png` + `<n>.meta.json` 侧车、参考图副本 `ref<n>.<ext>`（创建任务时拷贝，uploads 删了也能复现） | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 
 **多图（v0.17.0）**：两页都支持 10 个槽位（槽位 1 定妆图必填，2–10 细节图可选），数组顺序即模型 `imageUrls` 顺序与 prompt 的「图N」。job / batch 以 `images[]` 为唯一真源，`image_path/image_name/image_url` 保留为**主图别名**（老数据零迁移）。`/api/jobs`、`/api/batches` 收 `upload_ids[]`（兼容旧 `upload_id`）；锁定后细节图走 `POST /api/batches/<id>/images` 的 `op=add/remove`，主图不可换。删除细节图后序号自动左移；**不改 prompt**，指代由用户自己写「图2…图10」。COS 关闭时 `app/media.py:base64_budget_error` 会按总量 40MB 兜底拒绝。uploads 目录目前**没有 GC**，10 倍图量会持续堆积，后续可加「按 job/batch 引用计数 + 7 天」的清理。
@@ -198,9 +216,10 @@ python tests/run_all.py          # 全部离线套件（不花钱、不联网）
 python tests/test_web.py         # 网页端端到端：登录/上传/任务/用量/权限
 python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分组 + 额度断言
 python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格 / probe / HTTP zip
+python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / 取图下载 / 权限 / 重启恢复
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端（23 套，含 `test_path_relocate`），全部离线运行。
+`tests/run_all.py` 覆盖引擎、存储、网页接口、批次与生图端到端（28 套，含 `test_path_relocate`），全部离线运行。
 
 ## 7. 别动 / 小心
 
@@ -218,7 +237,8 @@ python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格
 
 ## 8. 已知债（别当成 bug 修）
 
-- `server.py` 1696 行、`wan_api.py` 1120 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
+- `server.py` 2000+ 行、`wan_api.py` 1120 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
+- 生图任务是**单进程内存队列**（`queue.Queue` + 守护线程），没有跨进程锁；同一 `data_dir` 起两个实例会互相抢任务文件，别这么干。重启不做断点续传，进行中的任务直接落成「生成失败」。
 - 测试是独立脚本，没有 pytest 夹具；`tests/run_all.py` 只是顺序执行器。
 - `wan.price_per_second` 三档均为 `null`，金额用公开价目表兜底，与真实账单有偏差。
 - 本仓库只维护网页端与引擎；不要再引入 GUI 界面或桌面打包相关代码。

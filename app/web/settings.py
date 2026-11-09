@@ -52,6 +52,10 @@ class WebSettings:
     # 开发实例标记（web.json 里 dev_mode: true，只有设计区/开发副本会开）：
     # 页面据此显示「开发版」徽标，生产不显示。
     dev_mode: bool = False
+    # 生图 tab 配置（server/imagegen.json，可选文件；缺省时该 tab 显示「未配置」）
+    imagegen: dict = field(default_factory=dict)
+    imagegen_file: Path | None = None
+    imagegen_error: str = ""
 
     @property
     def users(self) -> dict:
@@ -174,6 +178,19 @@ def _read_json(path: Path) -> dict:
     return data
 
 
+def _read_optional_json(path: Path) -> tuple[dict, str]:
+    """可选配置文件：不存在不算错（生图 tab 就是「未配置」），坏文件只记录错误。"""
+    if not path.is_file():
+        return {}, ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"{path.name} 读取失败：{exc}"
+    if not isinstance(data, dict):
+        return {}, f"{path.name} 顶层应为 JSON 对象"
+    return data, ""
+
+
 def resolve_tag_store_path(web: dict, base: Path, data_dir: Path, *,
                            use_default: bool = True) -> Path | None:
     """标签真源路径：OUTFIT_TAG_STORE → web.json → data_root/template_tags.json。
@@ -209,6 +226,9 @@ def load_settings(*, base_dir: str | Path | None = None,
     api_path = Path(api_file) if api_file else Path(os.getenv("OUTFIT_CONFIG") or base / "server" / "config.json")
     web = _read_json(web_path)
     remote = _read_json(api_path)
+    # 生图 tab 单独一份配置：不把老张的 Key 混进含 DashScope/COS 密钥的 config.json
+    imagegen_path = Path(os.getenv("OUTFIT_IMAGEGEN_CONFIG") or base / "server" / "imagegen.json")
+    imagegen_cfg, imagegen_error = _read_optional_json(imagegen_path)
     if not web.get("session_secret") or not isinstance(web.get("users"), dict) or not web["users"]:
         raise RuntimeError("网页账号尚未初始化。请在主机运行：python3 run_web.py --init")
     data_dir = Path(web.get("data_root") or "web-data")
@@ -310,4 +330,7 @@ def load_settings(*, base_dir: str | Path | None = None,
                        manifest_overlay_path=overlay_path,
                        manifest_warning=(f"云端模板索引不可用（{manifest_error}）" if manifest_error else ""),
                        manifest_pulled_at=0.0,
-                       dev_mode=appconfig.truthy(web.get("dev_mode")))
+                       dev_mode=appconfig.truthy(web.get("dev_mode")),
+                       imagegen=imagegen_cfg,
+                       imagegen_file=imagegen_path,
+                       imagegen_error=imagegen_error)

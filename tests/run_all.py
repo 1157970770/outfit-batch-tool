@@ -49,6 +49,7 @@ REQUIRED = [
     "test_web_tag_api",
     "test_web_multi_images",
     "test_web_ps",
+    "test_imagegen",
     "test_batches",
     "test_history_admin",
     "test_batch_zip",

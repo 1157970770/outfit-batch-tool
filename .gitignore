@@ -32,6 +32,8 @@ desktop.ini
 # 含密钥的本地配置（真身放在 %APPDATA%\RHOutfitTool\config.json）
 config.json
 cos.json
+# 生图 tab 的老张 API Key（模板是 server/imagegen.example.json）
+server/imagegen.json
 
 # 程序运行配置（含 RH_API_KEY，绝不提交）
 配置.ini
@@ -83,3 +85,10 @@ _state/
 
 # 临时网络探测脚本（排查 npm 源用，与产品无关）
 probe-registry.mjs
+
+# 素材检索（2026-11-09 从 D:\定妆自动化区\04_检索 迁入本区；旧路径保留目录联接指回这里）
+# data/ 是 14MB 索引与生成物，logs/ 与 当前网址.txt 是运行时产物，单文件版 HTML 3.9MB 也不入库
+素材检索/data/
+素材检索/lan/logs/
+素材检索/lan/当前网址.txt
+素材检索/素材检索.html

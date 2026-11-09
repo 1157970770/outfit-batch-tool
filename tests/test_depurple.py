@@ -116,14 +116,9 @@ def check_strength_and_size() -> None:
             continue
         raise AssertionError(f"强度 {bad!r} 应被拒绝")
 
-    depurple.check_size(4000, 3000)          # 正好 12MP：放行
-    try:
-        depurple.check_size(4000, 3001)      # 12.004MP：拒绝
-    except depurple.DepurpleTooLarge as exc:
-        assert exc.status == 413
-    else:
-        raise AssertionError("超像素应抛 DepurpleTooLarge")
-    print("  ✓ 强度/像素上限校验")
+    assert not hasattr(depurple, "check_size") and not hasattr(depurple, "DepurpleTooLarge"), \
+        "像素上限已按需求去掉：不该再留 check_size / DepurpleTooLarge，也不该有 413 分支"
+    print("  ✓ 强度校验（像素上限已移除）")
 
 
 def check_process_file() -> None:

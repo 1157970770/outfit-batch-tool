@@ -58,6 +58,7 @@ python run_web.py
 | 历史任务 | 按批次号/账户分组查看，重试失败项、下载成片与 CSV 报告 |
 | 标签（所有人） | 给视频打标签 / 批量改标签、**上传新视频**（≤50MB，直传 COS 并立即可用）、**弃用与恢复**（软删除）、标签库与**自定义大类**的新建/改名/合并/删除、整库版本历史与回滚；数据落 `web-data/template_tags.json`，网页与本地打标工具共用 |
 | 管理（仅 admin） | 服务状态、账号列表、重新加载场景、**账户用量**（条数/成功失败/计费秒/预估金额，点账户看逐条明细并导出 CSV） |
+| 生图 | 提示词 + 最多 10 张参考图直接出图：选 VIP 型号 / 17 档尺寸（含 4:5 竖版）/ 质量 / 1–8 张，记录卡实时显示进度，成品可单张预览或下载；走 `server/imagegen.json` 里的老张 Key，与视频链路完全独立 |
 
 权限按 `owner` 隔离：普通账号只看自己的任务与批次，管理员可按账户筛选。
 **快速通道**：≤3 条的批次走独立队列与独立在飞池，不与本人的大批量排队。
@@ -78,6 +79,9 @@ python run_web.py
                                                     │
                                                     ▼
                                           app/wan_api.py  双令牌桶 + 在飞信号量
+
+生图 tab 是另一条独立链路（不进 jobs、不占在飞名额）：
+app/web/static/imagegen.js ──▶ app/imggen/manager.py（落盘 + 队列 + 守护线程）──▶ 老张 API（GPT Image VIP）
 ```
 
 完整分层、线程模型、请求生命周期、数据字段与接口表见 **[docs/architecture.md](docs/architecture.md)**。
@@ -106,7 +110,8 @@ python run_web.py
 | `app/wan_api.py` | 协议适配（DashScope 默认 / RunningHub），限流与在飞 |
 | `app/config.py` | 配置映射：`server/config.json` → 内部 `WAN_*` |
 | `app/storage.py` / `app/media.py` | COS/本地存储、图片与视频预检 |
-| `server/` | 部署配置（`web.json` 账号、`config.json` Key/模型/COS） |
+| `app/imggen/` | 生图 tab：`manager.py` 队列与落盘、`models.py` 型号与校验、`processing.py` 尺寸与裁切、`api.py` urllib 客户端、`decoder.py`、`errors.py` |
+| `server/` | 部署配置（`web.json` 账号、`config.json` Key/模型/COS、`imagegen.json` 生图 Key） |
 | `web-data/` | 运行数据：任务、批次、上传、成片、日志（不入库） |
 | `tests/` | 离线测试；`run_all.py` 一键跑全部 |
 | `docs/` | 文档，索引见 [docs/README.md](docs/README.md) |
@@ -118,10 +123,11 @@ python run_web.py
 python tests/run_all.py            # 全部离线套件
 python tests/test_web.py           # 网页端端到端
 python tests/test_batches.py       # 批次全流程 + 额度断言
+python tests/test_imagegen.py      # 生图 tab：选项/校验/取图/权限/重启恢复
 python demo.py --count 5           # 一键演练整条链路（假百炼）
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口与批次端到端，全部离线、不花钱。
+`tests/run_all.py` 覆盖引擎、存储、网页接口、批次与生图端到端，全部离线、不花钱。
 
 ## 六、引擎与命令行
 

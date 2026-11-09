@@ -9,13 +9,15 @@
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css?v=20261105l">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
-  <link rel="stylesheet" href="/static/ps.css?v=20261109a">
+  <link rel="stylesheet" href="/static/ps.css?v=20261109b">
+  <link rel="stylesheet" href="/static/imagegen.css?v=20261109a">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
   <script defer src="/static/app.js?v=20261107b"></script>
   <script defer src="/static/batch.js?v=20261107a"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
-  <script defer src="/static/ps.js?v=20261109a"></script>
+  <script defer src="/static/ps.js?v=20261109d"></script>
+  <script defer src="/static/imagegen.js?v=20261109a"></script>
 </head>
 <body>
   <!-- 首屏占位：session 判定回来前先显示它，避免登录卡片一闪而过 -->
@@ -56,6 +58,7 @@
         <button id="tag-tab" class="tab" data-view="tag-view">视频库</button>
         <button id="material-tab" class="tab" data-view="material-view">素材检索</button>
         <button id="ps-tab" class="tab" data-view="ps-view">PS助手</button>
+      <button id="imagegen-tab" class="tab" data-view="imagegen-view">生图</button>
         <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
 
@@ -535,9 +538,9 @@
         <article class="card ps-card">
           <div class="ps-controls">
             <label id="ps-drop" class="drop-zone ps-drop" for="ps-file">
-              <input id="ps-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp" hidden>
+              <input id="ps-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp" aria-label="选择一张图片">
               <strong id="ps-drop-title">点击或拖入一张图片</strong>
-              <span class="muted ps-drop-note">JPG / PNG / WebP / BMP，单张 ≤20MB、≤1200 万像素</span>
+              <span class="muted ps-drop-note">JPG / PNG / WebP / BMP，单张 ≤20MB；不限制像素，大图会慢一些</span>
             </label>
             <div class="ps-settings">
               <label class="ps-strength">强度 <output id="ps-strength-out">100</output>
@@ -566,6 +569,61 @@
             </figure>
           </div>
         </article>
+      </section>
+
+      <section id="imagegen-view" class="view">
+        <div class="section-head">
+          <div>
+            <h1>生图</h1>
+            <p class="muted">提示词 + 参考图直接出图（老张 API · GPT Image VIP，单张 $0.03）。成品存在本机 web-data/imagegen/，重启不丢。</p>
+          </div>
+          <div class="top-actions">
+            <button id="ig-refresh" class="quiet" type="button">刷新</button>
+          </div>
+        </div>
+
+        <div class="ig-layout">
+          <article class="card ig-composer">
+            <label class="ig-field">
+              <span class="ig-label">提示词</span>
+              <textarea id="ig-prompt" rows="5" maxlength="4000" placeholder="例如：白色棉质短袖衬衫，正面站立，自然光，纯色背景"></textarea>
+              <span id="ig-prompt-count" class="muted ig-count">0 / 4000</span>
+            </label>
+
+            <div class="ig-field">
+              <span class="ig-label">参考图 <span class="muted">（可不传；顺序即「图1、图2…」，可拖拽调整）</span></span>
+              <label class="drop-zone ig-drop" for="ig-file">
+                <input id="ig-file" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.bmp" aria-label="选择参考图">
+                <strong>点击或拖入参考图</strong>
+                <span class="muted ig-drop-note">JPG / PNG / WebP / BMP，单张 ≤20MB，最多 10 张</span>
+              </label>
+              <div id="ig-refs" class="ig-refs"></div>
+            </div>
+
+            <div class="ig-grid">
+              <label class="ig-field"><span class="ig-label">模型</span><select id="ig-model"></select></label>
+              <label class="ig-field"><span class="ig-label">尺寸</span><select id="ig-size"></select></label>
+              <label class="ig-field"><span class="ig-label">质量</span><select id="ig-quality"></select></label>
+              <label class="ig-field"><span class="ig-label">张数</span><select id="ig-count"></select></label>
+            </div>
+
+            <div class="ig-actions">
+              <button id="ig-submit" class="primary" type="button">生成</button>
+              <button id="ig-clear" class="quiet" type="button">清空</button>
+              <span id="ig-hint" class="muted ig-hint"></span>
+            </div>
+            <p id="ig-error" class="error hidden"></p>
+          </article>
+
+          <section class="ig-history" aria-label="生成记录">
+            <div class="ig-history-head">
+              <h2>生成记录</h2>
+              <span id="ig-status" class="muted"></span>
+            </div>
+            <div id="ig-tasks" class="ig-tasks"></div>
+            <p id="ig-empty" class="empty">还没有生成记录。填好提示词点「生成」，图片会出现在这里。</p>
+          </section>
+        </div>
       </section>
 
       <section id="material-view" class="view">

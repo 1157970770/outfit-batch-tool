@@ -13,6 +13,12 @@
 .ps-drop:hover, .ps-drop.dragging { border-color: var(--blue); background: #f5f8ff; }
 .ps-drop.busy { cursor: progress; opacity: .75; }
 .ps-drop-note { font-size: 12px; }
+/* 全站约定：透明 input 铺满整个虚线框，点框=点原生文件框（见 style.css .drop-zone input）。
+   这里再写一遍是为了不依赖 .drop-zone 的写法，换皮时也不会把选图点掉。 */
+.ps-drop input[type="file"] {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  z-index: 2; opacity: 0; cursor: pointer;
+}
 
 .ps-settings { display: flex; flex-direction: column; gap: 10px; }
 .ps-strength { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 600; }
@@ -27,6 +33,9 @@
 .ps-error { margin: 0; }
 
 .ps-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+/* display:grid 会盖掉浏览器对 [hidden] 的默认 display:none，必须显式还原，
+   否则没选图也会露出两个空棋盘格。 */
+.ps-compare[hidden] { display: none !important; }
 @media (max-width: 760px) { .ps-compare { grid-template-columns: 1fr; } }
 .ps-pane { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ps-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }

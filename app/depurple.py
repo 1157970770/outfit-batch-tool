@@ -15,8 +15,10 @@
   6) 应用后 1/3 抽样量一次残留，残留 |A| 或 |B| > 1.0 就把锚点推一次（自校准）；
   7) PNG 无损输出，原子写（临时文件 + os.replace）。
 
-已知限制：整图一次性 numpy 运算，像素数上限 `MAX_PS_PIXELS`（12MP 峰值内存约 600MB）。
-超大图先缩图；要支持原尺寸需改成分块 + 代理锚点，见 docs/ps-assistant.md。
+已知限制：整图一次性 numpy 运算（不分块），峰值内存大约是「像素数 × 100 字节」——
+2400 万像素约 2.4GB、1 亿像素约 10GB。不设像素上限，超出现在机器的可用内存时
+会抛 MemoryError，由接口回一条「内存不足，请先缩图」；要支持任意大图需改成分块 + 代理锚点，
+见 docs/ps-assistant.md。
 """
 from __future__ import annotations
 
@@ -36,7 +38,6 @@ except Exception:  # pragma: no cover - 只在缺依赖的机器上走到
     HAS_NUMPY = False
 
 
-MAX_PS_PIXELS = 12_000_000
 DEFAULT_STRENGTH = 100
 MAX_STRENGTH = 100
 
@@ -56,10 +57,6 @@ class DepurpleError(RuntimeError):
 
 class DepurpleUnavailable(DepurpleError):
     status = 503
-
-
-class DepurpleTooLarge(DepurpleError):
-    status = 413
 
 
 class DepurpleBadImage(DepurpleError):
@@ -92,15 +89,6 @@ def parse_strength(value) -> int:
     return strength
 
 
-def check_size(width: int, height: int) -> None:
-    pixels = int(width) * int(height)
-    if pixels > MAX_PS_PIXELS:
-        raise DepurpleTooLarge(
-            f"图片过大（{width}×{height} ≈ {pixels / 1_000_000:.1f} 百万像素），"
-            f"请先缩到 {MAX_PS_PIXELS // 1_000_000} 百万像素以内再处理。"
-        )
-
-
 # ---------------------------------------------------------------- Lab 换算
 def rgb_to_lab(rgb):
     """uint8/float 的 (H,W,3) sRGB → L, A, B（float32）。"""
@@ -117,7 +105,7 @@ def lab_to_rgb(L, A, B):
     """L, A, B → float RGB（0–255，未取整）。
 
     插件里逆矩阵用 float64 算；这里统一 float32（3×3 常量求逆的误差 < 0.01 个灰阶），
-    换来的是一半的内存峰值——12MP 时 `lin` 从 288MB 降到 144MB。
+    换来的是一半的内存峰值。大图（24MP 以上）先看机器的可用内存，见 docs/ps-assistant.md。
     """
     fy = (L + 16) / 116
     fx = fy + A / 500
@@ -146,7 +134,6 @@ def depurple_array(img: Image.Image, strength: int = DEFAULT_STRENGTH) -> dict:
     strength = parse_strength(strength)
     src = img if img.mode == "RGB" else img.convert("RGB")
     width, height = src.size
-    check_size(width, height)
 
     a = np.asarray(src, dtype=np.float32)
     L, A, B = rgb_to_lab(a)
@@ -154,6 +141,14 @@ def depurple_array(img: Image.Image, strength: int = DEFAULT_STRENGTH) -> dict:
     Lg = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
     sat = a.max(2) - a.min(2)
     neutral = sat < _NEUTRAL_SAT
+    del a, sat  # 只留 Lab 与 Lg：不设像素上限后，先把 12 字节/像素的原图放掉再往下算
+
+    def cast_of(Ax, Bx):
+        cx = np.sqrt(Ax * Ax + Bx * Bx)
+        mx = np.clip(1.0 - cx / 60.0, 0.0, 1.0) > 0.5
+        return float(np.mean(np.abs(Bx - Ax)[mx])) if np.any(mx) else 0.0
+
+    cast_before = cast_of(A, B)
 
     hist, edges = np.histogram(Lg[neutral], bins=32, range=(0, 256))
     centers = (edges[:-1] + edges[1:]) / 2
@@ -213,15 +208,19 @@ def depurple_array(img: Image.Image, strength: int = DEFAULT_STRENGTH) -> dict:
         mx = np.clip(1.0 - cx / 60.0, 0.0, 1.0) > 0.5
         return float(np.mean(np.abs(Bx - Ax)[mx])) if np.any(mx) else 0.0
 
+    cast_after = cast_of(A_out, B_out)
+    del A_out, B_out  # 生成 uint8 结果前先放掉两张 float 图，省一次大数组拷贝的峰值
+
     image = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
+    del out
     return {
         "image": image,
         "width": width,
         "height": height,
         "strength": strength,
         "anchors": {"dark": [round(v, 2) for v in dark], "bg": [round(v, 2) for v in bg]},
-        "cast_before": round(cast_of(A, B), 2),
-        "cast_after": round(cast_of(A_out, B_out), 2),
+        "cast_before": round(cast_before, 2),
+        "cast_after": round(cast_after, 2),
     }
 
 

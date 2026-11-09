@@ -52,6 +52,17 @@ python run_web.py
 | `app/config.py` | `server/config.json` → 内部扁平 `WAN_*` / `COS_*` |
 | `app/storage.py`、`app/media.py` | COS/本地存储、图片与视频预检 |
 
+生图线（与视频链路完全独立，不进 `jobs`、不占在飞名额）：
+
+| 文件 | 职责 | 关键入口 |
+| --- | --- | --- |
+| `app/imggen/manager.py` | 任务落盘、`queue.Queue` + N 个守护线程、逐张调用与侧车写入 | `ImageGenManager` |
+| `app/imggen/models.py` | 5 个 VIP 型号、质量档位、请求参数校验 | `IMAGE_MODEL_SPECS`、`image_request_parameters` |
+| `app/imggen/processing.py` | 17 档输出规格、4:5 裁切与缩放 | `finalize_output_image`、`api_size_for_output` |
+| `app/imggen/api.py` | stdlib urllib 客户端：`images/generations`、`images/edits` | `generate_image`、`edit_image` |
+| `app/imggen/decoder.py` | `b64_json` 或 url 下载（≤64MB） | `extract_image_bytes` |
+| `app/imggen/errors.py` | HTTP 码 → 中文、密钥脱敏 | `explain_error` |
+
 ## 3. 一次请求怎么走
 
 ### 3.1 鉴权
@@ -199,10 +210,15 @@ web-data/
 ├── output/<batch_id>/      成片 mp4 + 归档清单
 ├── logs/<job_id>.log       逐条提交日志
 ├── style_template_usage.json  款号-模板防重账本（v0.11.0，见 5.3）
+├── ps/<upload_id>_s<强度>.png   PS 助手去紫结果（无登记表，可整目录删）
+├── imagegen/
+│   ├── tasks/<id>.json     生图任务（见 5.5）
+│   └── files/<id>/         <n>.png + <n>.meta.json + ref<n>.<ext>
 └── 访问地址.txt            启动时写入的本机/局域网地址
 ```
 
-`server/` 下：`web.json`（账号、会话密钥、并发上限）、`config.json`（**明文 Key**、模型、COS、单价、限流）。
+`server/` 下：`web.json`（账号、会话密钥、并发上限）、`config.json`（**明文 Key**、模型、COS、单价、限流）、
+`imagegen.json`（生图 tab 的**明文老张 Key**、base_url、默认型号、张数与参考图上限）。
 
 ### 5.3 `web-data/style_template_usage.json`（款号-模板防重账本）
 
@@ -237,6 +253,21 @@ web-data/
 - 前端（`app/web/static/batch.js`）：标签 chip 三态循环 不选 → 包含（✓）→ 排除（✕ 划线）→ 不选；
   改动后自动重新拉候选，候选被排空时优先提示是排除条件筛掉的。
 
+### 5.5 `web-data/imagegen/tasks/<id>.json`（生图任务）
+
+一次提交 = 一条任务记录，`count` 张图串行生成在同一条记录里：
+
+- 记录字段：`id`（32 位 hex）、`owner`、`created_at/updated_at/started_at/finished_at`、`elapsed_ms`、
+  `prompt`、`model`、`model_label`、`size`、`size_label`、`quality`、`count`、`api_size`、
+  `status`（`排队中`/`生成中`/`已完成`/`部分完成`/`生成失败`）、`progress`、`error`、
+  `references[]`（`{upload_id,name,path,url}`）、`images[]`（`{index,file,meta_file,width,height,url,download_url}`）。
+- 文件只存**相对文件名**，读时按 `web-data/imagegen/files/<id>/` 拼回；参考图在创建任务时复制成
+  `ref<n>.<ext>`，所以后续删掉 `uploads` 里的原件也不影响复现。
+- 每张成品旁写 `<n>.meta.json` 侧车：`prompt/model/size/api_size/quality/output_size/reference_images/created_at/operator`。
+- 重启恢复：进程启动时把仍处于 `排队中`/`生成中` 的任务改成 `部分完成`（已有图）或 `生成失败`，
+  `error` 写「服务重启，任务中断，请重新提交。」——不做断点续传。
+- 删除任务会连 `files/<id>/` 一起删；`生成中` 的任务拒绝删除（409）。
+
 ## 7. HTTP 接口
 
 | 方法 | 路径 | 权限 | 作用 |
@@ -254,6 +285,12 @@ web-data/
 | GET | `/api/batches/<id>/files.zip[?probe=1]` | 登录（限本人） | 整批打包下载，**仅大批量且非试跑的批次**；按 runs 收集每一轮成功视频、按场景去重保留最新。`?probe=1` 只回 `{count,batch_no,download_url}` 不落盘，供前端先确认再触发原生下载 |
 | GET | `/api/history/groups[/<key>]` | 登录 | 历史分组 / 组内条目；`group_by=batch\|owner\|day`，`lane=small\|big` 按通道过滤；明细带 `scope` 保证与列表同口径 |
 | GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |
+| GET | `/api/imagegen/tasks` | 登录（限本人；admin `?scope=all`） | 生图任务列表，`limit` 默认 40 |
+| POST | `/api/imagegen/tasks` | 登录 | 建生图任务（`prompt/model/size/quality/count/upload_ids[]`） |
+| GET | `/api/imagegen/tasks/<id>` | 登录（限本人） | 任务详情（含 `images[]`、`references[]` 的 url） |
+| GET | `/api/imagegen/tasks/<id>/images/<n>` | 登录（限本人） | 成品图，`?download=1` 转附件下载 |
+| GET | `/api/imagegen/tasks/<id>/references/<n>` | 登录（限本人） | 参考图副本回看 |
+| DELETE | `/api/imagegen/tasks/<id>` | 登录（限本人） | 删任务与本地文件；生成中返回 409 |
 | GET | `/api/admin/status` | admin | 服务状态、队列、额度、账号 |
 | GET | `/api/admin/usage` | admin | 按账户汇总 |
 | GET | `/api/admin/accounts/<name>/work[.csv]` | admin | 账户逐条明细 / 导出 |
@@ -264,14 +301,17 @@ web-data/
 
 ## 8. 前端结构
 
-无框架、无构建步骤，四个文件：
+无框架、无构建步骤，前端全是原生 JS 加一份 `style.css`（按 tab 各自一份增量 CSS）：
 
 | 文件 | 职责 |
 | --- | --- |
-| `index.html` | 六个 view：`create-view`（试跑）、`batch-view`（大批量）、`history-view`、`admin-view`、`tag-view`（视频库）、`material-view`（素材检索，iframe 内嵌 `http://192.168.10.179:8700`） |
+| `index.html` | 八个 view：`create-view`（试跑）、`batch-view`（大批量）、`history-view`、`admin-view`、`tag-view`（视频库）、`material-view`（素材检索，iframe 内嵌 `http://192.168.10.179:8700`）、`ps-view`（PS 助手去紫）、`imagegen-view`（生图） |
 | `app.js` | 全局 `state`、`api()`、`toast()`，试跑/任务/历史/管理/素材检索五个模块；末尾 `window.OutfitApp` 暴露 `{ api, toast, state, switchView, openJob, refreshFlatJobs, statusText }` |
-| `batch.js` | IIFE，从 `window.OutfitApp` 取依赖；批次列表、新建、候选、生产、条目、历史分组 |
-| `tag.js` | IIFE，视频库：打标、批量改标签、弃用/恢复、标签库管理 |
+| `batch.js` + `batch.css` | IIFE，从 `window.OutfitApp` 取依赖；批次列表、新建、候选、生产、条目、历史分组 |
+| `tag.js` + `tag.css` / `tag-filter.css` | IIFE，视频库：打标、批量改标签、弃用/恢复、标签库管理 |
+| `ps.js` + `ps.css` | IIFE，`window.PsUI`；去紫单图处理、XHR 上传带进度 |
+| `imagegen.js` + `imagegen.css` | IIFE，`window.ImageGenUI`；生图表单、参考图拖拽换序、记录卡与 2.5 秒轮询（仅当本 tab 可见且仍有进行中任务） |
+| `image-slots.js` | 多图槽位控件（试跑/大批量共用） |
 
 - 任务列表每 **3.5 秒** 轮询一次（页面隐藏时跳过）；批次页单独 3 秒左右轮询详情；
 - 管理页只在 admin 登录时显示，`账户用量` 与逐条明细的金额渲染都在 `app.js` 的 `renderUsage` / `renderAccount`；
@@ -297,6 +337,12 @@ web-data/
 `server/web.json` 里的并发项（`max_active_jobs`、`max_active_per_user`、`small_lane_*`、
 `max_job_items`、`max_batch_items`、`max_batch_run_items`）由 `WebSettings` 读取并裁剪上限，
 改完**必须重启**。
+
+`server/imagegen.json`（生图 tab 独立配置，缺文件时按默认值且 `configured=false`）：
+`enabled`、`base_url`（默认 `https://api2.laozhang.ai/v1/`）、`api_key`（**明文老张 Key**）、
+`model`（默认 `gpt-image-2-vip`）、`default_quality`、`timeout_seconds`（30–900）、
+`max_count`（≤8）、`max_references`（≤10）、`max_inflight`（≤8，工作线程数）、`price_per_image`（仅展示口径）。
+路径可用环境变量 `OUTFIT_IMAGEGEN_CONFIG` 覆盖；`api_key` 为空时 tab 仍可见，但提交按钮禁用并提示缺什么。
 
 ## 10. 扩展点与已知债
 

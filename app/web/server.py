@@ -27,6 +27,7 @@ from http.cookies import SimpleCookie
 
 from app import config as appconfig
 from app import depurple
+from app.imggen import ImageGenError, ImageGenManager
 from app.media import MediaError, validate_image
 from app.prompts import PromptLibrary
 from app.runtime import build_storages
@@ -46,8 +47,9 @@ USERNAME_RE = re.compile(r"^[\w.-]{2,32}$", re.UNICODE)
 LOGIN_IP_LIMIT = 30
 # 同时在跑的登录校验数：未知账号每次要走 310,000 轮 PBKDF2（约 0.1s CPU）。
 _LOGIN_SLOTS = threading.BoundedSemaphore(4)
-# PS 助手去紫：4MP 约 2–3 秒、12MP 峰值内存约 600MB。numpy 重运算期间基本占着 GIL，
-# 串行比并发更安全（并发只会把内存翻几倍），等待的请求在线程里排队即可。
+# PS 助手去紫：4MP 约 2–3 秒；峰值内存约「像素数 × 100 字节」（24MP ≈ 2.4GB）。不设像素上限，
+# 内存不够时返回 500 并提示缩图。numpy 重运算期间基本占着 GIL，串行比并发更安全
+# （并发只会把内存翻几倍），等待的请求在线程里排队即可。
 _PS_LOCK = threading.Lock()
 # 单进程的连接上限：每个连接一条线程，超出直接拒绝，避免几十条半开连接把线程吃光。
 MAX_CONNECTIONS = 64
@@ -173,6 +175,9 @@ class WebApplication:
         self._web_lock = threading.RLock()
         # 批次管理器复用 JobManager.lock；catalog 用回调取，热重载后无需重建。
         self.batches = BatchManager(settings, self.jobs, lambda: self.catalog, self.resolve_upload)
+        # 生图 tab（老张 API）：任务落 web-data/imagegen/，与视频任务队列完全独立，
+        # 互不抢在飞名额；配置来自 server/imagegen.json（缺失时该 tab 显示「未配置」）。
+        self.imagegen = ImageGenManager(settings)
 
     def resolve_upload(self, upload_id: str, owner: str) -> dict | None:
         """按 upload_id 取上传元数据；归属不符或文件已丢失返回 None。"""
@@ -510,7 +515,8 @@ def make_handler(app: WebApplication):
                                                 "untagged_skipped": int((app.catalog.tag_workbook_info or {}).get("untagged_skipped", 0)),
                                                 "unlisted_files": (app.catalog.tag_workbook_info or {}).get("unlisted_files"),
                                                 "manifest_warning": (app.catalog.tag_workbook_info or {}).get("manifest_warning", ""),
-                                               "notice": cfg.get("NOTICE") or ""},
+                                               "notice": cfg.get("NOTICE") or "",
+                                               "imagegen": app.imagegen.options()},
                                    "prompts": [{"id": k, "title": v["title"], "body": v["body"]} for k, v in app.prompts.items()]})
             if path == "/api/templates":
                 if not self._user():
@@ -562,6 +568,21 @@ def make_handler(app: WebApplication):
                     return
                 query = urllib.parse.parse_qs(parsed.query)
                 return self._ps_result(path.strip("/").split("/")[3], query, user)
+            if path == "/api/imagegen/tasks":
+                user = self._user()
+                if not user:
+                    return
+                return self._imagegen_list(urllib.parse.parse_qs(parsed.query), user)
+            if path.startswith("/api/imagegen/tasks/"):
+                user = self._user()
+                if not user:
+                    return
+                parts = path.strip("/").split("/")
+                if len(parts) == 6 and parts[4] in ("images", "references"):
+                    return self._imagegen_file(parts[3], parts[5], urllib.parse.parse_qs(parsed.query),
+                                               user, reference=parts[4] == "references")
+                if len(parts) == 4:
+                    return self._imagegen_detail(parts[3], user)
             if path == "/api/style-usage":
                 user = self._user()
                 if not user:
@@ -748,6 +769,8 @@ def make_handler(app: WebApplication):
                 return self._upload(data, user)
             if path == "/api/ps/depurple":
                 return self._ps_depurple(data, user)
+            if path == "/api/imagegen/tasks":
+                return self._imagegen_create(data, user)
             if path == "/api/jobs":
                 return self._create_job(data, user)
             if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -878,6 +901,10 @@ def make_handler(app: WebApplication):
                     if user.get("role") != "admin":
                         return self._error("此操作需要管理员权限。", 403)
                     return self._admin_delete_user(urllib.parse.unquote(parts[3]), user)
+            if path.startswith("/api/imagegen/tasks/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    return self._imagegen_delete(parts[3], user)
             return self._error("页面或接口不存在。", 404)
 
         def _login(self, data):
@@ -984,9 +1011,14 @@ def make_handler(app: WebApplication):
                 return self._error(f"图片为空或超过 {max_bytes // (1024 * 1024)}MB。", 413)
             upload_id = uuid.uuid4().hex
             folder = app.uploads_dir / upload_id[:2]
-            folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"{upload_id}{ext}"
-            path.write_bytes(raw)
+            # 写盘失败（磁盘满、目录没权限、uploads 是个断掉的联接）以前会抛出去把连接掐掉，
+            # 浏览器只能看到「网络中断」；这里回一条能看懂的原因。
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            except OSError as exc:
+                return self._error(f"图片存不进 uploads 目录：{exc}（检查磁盘空间与目录权限后重试）", 500)
             try:
                 info = validate_image(path)
                 actual_ext = _read_image_format(path)
@@ -1156,9 +1188,15 @@ def make_handler(app: WebApplication):
                         except depurple.DepurpleError as exc:
                             self.log_message("%s -> %s: %s", self.path, exc.status, exc)
                             return self._error(str(exc), exc.status)
-                        except (OSError, ValueError, MemoryError) as exc:
+                        except MemoryError:
+                            self.log_message("%s -> 500: MemoryError", self.path)
+                            return self._error(
+                                "内存不足：这张图太大，服务端算不下去。请先把长边缩到 3000 像素左右再试。",
+                                500,
+                            )
+                        except (OSError, ValueError) as exc:
                             self.log_message("%s -> 500: %s", self.path, exc)
-                            return self._error(f"处理失败：{exc}（图片过大时请先缩图）", 500)
+                            return self._error(f"处理失败：{exc}", 500)
             response = {
                 "ok": True,
                 "upload_id": upload_id,
@@ -1196,6 +1234,60 @@ def make_handler(app: WebApplication):
             name = _ps_out_name(str(meta.get("name") or ""), strength)
             return self._send_file(path, "image/png", name,
                                    inline=not download, attachment=download)
+
+        # ---------------------------------------------------------- 生图（老张 API）
+        def _imagegen_list(self, query, user):
+            try:
+                limit = int(str(query.get("limit", ["40"])[0] or ""))
+            except (TypeError, ValueError):
+                limit = 40
+            return self._json({
+                "ok": True,
+                "items": app.imagegen.list_tasks(user, limit=limit),
+                "configured": app.imagegen.configured,
+                "reason": app.imagegen.unconfigured_reason(),
+            })
+
+        def _imagegen_detail(self, task_id, user):
+            try:
+                task = app.imagegen.get_record(task_id, user)
+            except ImageGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True, "task": task})
+
+        def _imagegen_create(self, data, user):
+            # 参考图复用 /api/uploads 的 upload_id：先让前端逐张上传拿到 id，再建任务。
+            # 顺序即模型看到的「图1、图2…」，所以这里不做任何重排。
+            slots, error = self._resolve_image_slots(data, user, allow_empty=True)
+            if slots is None:
+                return error
+            try:
+                task = app.imagegen.create_task(user, data, slots)
+            except ImageGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True, "task": task}, 201)
+
+        def _imagegen_file(self, task_id, raw_index, query, user, *, reference=False):
+            if not re.fullmatch(r"[a-f0-9]{32}", str(task_id or "")):
+                return self._error("找不到这张图片。", 404)
+            try:
+                index = int(str(raw_index or ""))
+            except (TypeError, ValueError):
+                return self._error("找不到这张图片。", 404)
+            try:
+                path, name = app.imagegen.image_file(task_id, index, user, reference=reference)
+            except ImageGenError as exc:
+                return self._error(str(exc), exc.status)
+            download = str(query.get("download", ["0"])[0]).lower() in ("1", "true", "yes")
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            return self._send_file(path, mime, name, inline=not download, attachment=download)
+
+        def _imagegen_delete(self, task_id, user):
+            try:
+                app.imagegen.delete_task(task_id, user)
+            except ImageGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True})
 
         # ---------------------------------------------------------- 批次
         def _batch_create(self, data, user):

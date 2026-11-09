@@ -1,0 +1,13 @@
+{
+  "_说明": "生图 tab（老张 / laozhang.ai）的配置。真身 server/imagegen.json 含明文 Key，不入库；本文件是模板。改完重启服务生效。",
+  "enabled": true,
+  "base_url": "https://api2.laozhang.ai/v1/",
+  "api_key": "",
+  "model": "gpt-image-2-vip",
+  "default_quality": "high",
+  "timeout_seconds": 300,
+  "max_count": 4,
+  "max_references": 10,
+  "max_inflight": 3,
+  "price_per_image": "0.03"
+}

@@ -58,7 +58,7 @@ End If
 logFile = base & "\" & dataRoot & "\logs\launcher.log"
 EnsureDir fso.GetParentFolderName(logFile)
 q = Chr(34)
-cmd = "cmd /c " & q & python & q & " -u " & q & runWeb & q & " > " & q & logFile & q & " 2>&1"
+cmd = "cmd /s /c " & q & q & python & q & " -u " & q & runWeb & q & " > " & q & logFile & q & " 2>&1" & q
 
 shell.CurrentDirectory = base
 shell.Run cmd, 0, False
