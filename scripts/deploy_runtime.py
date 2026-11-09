@@ -2,6 +2,14 @@
 # -*- coding: utf-8 -*-
 """发布助手：把设计区已提交的代码发布到运行区（生产）。
 
+用法（**必须用生产解释器跑，别用 `uv run python`**）：
+
+    & "$env:USERPROFILE\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\python\\python.exe" scripts\\deploy_runtime.py
+
+为什么不能用 uv 的解释器：实测在 uv 下载的那套 python 下，`git -C <运行区> fetch/pull`
+会报 `error: cannot open '.git/FETCH_HEAD': Permission denied`（同一句命令在 pwsh 或
+DSH 生产解释器下都正常）。这不是仓库坏了，换解释器即可。
+
 对应 docs/dev-runtime-split.md 的「日常发布」：
 
   1. 检查运行区 git status 干净（运行区永不改码，脏了就是异常）
@@ -18,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +55,30 @@ def check_active_jobs(runtime: Path) -> list[str]:
         if status in ACTIVE_STATES:
             active.append(f"{path.stem} = {status}")
     return active
+
+
+def find_python() -> tuple[str, bool]:
+    """自检要用的解释器：优先「启动器实际调用的那个」Python。
+
+    ``启动网页服务.vbs`` 固定用 ``%USERPROFILE%\\\\.dsh\\\\dsh-runtimes\\\\dsh-primary-runtime\\\\
+    dependencies\\\\python\\\\python.exe``，Pillow 等依赖装在它身上。若用跑本脚本的解释器
+    （例如 ``uv run --no-project python``，或系统 python）自检，会直接
+    ``ModuleNotFoundError: No module named 'PIL'``，看起来像发布失败，其实是解释器不对。
+
+    返回 ``(路径, 是否为生产解释器)``；找不到就退回当前解释器并让调用方提示风险。
+    """
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    candidate = (home / ".dsh" / "dsh-runtimes" / "dsh-primary-runtime"
+                 / "dependencies" / "python" / "python.exe")
+    if candidate.is_file():
+        try:
+            probe = subprocess.run([str(candidate), "-c", "import PIL"],
+                                   capture_output=True, text=True)
+            if probe.returncode == 0:
+                return str(candidate), True
+        except OSError:
+            pass
+    return sys.executable, False
 
 
 def main() -> int:
@@ -108,8 +141,14 @@ def main() -> int:
     else:
         print(f"[OK] 已发布：{after}")
 
-    # 5. 运行区离线自检（用跑本脚本的同一个解释器）
-    selftest = subprocess.run([sys.executable, "-B", str(runtime / "run_web.py"),
+    # 5. 运行区离线自检（用**生产实际在用**的解释器）
+    python_exe, is_prod_python = find_python()
+    if is_prod_python:
+        print(f"[自检解释器] {python_exe}")
+    else:
+        print(f"[提醒] 没找到启动器用的生产解释器，退回当前解释器自检：{python_exe}")
+        print("       若报 ModuleNotFoundError: PIL，请改用启动器那个 python 重跑本脚本。")
+    selftest = subprocess.run([python_exe, "-B", str(runtime / "run_web.py"),
                                "--selftest"])
     if selftest.returncode != 0:
         print("[失败] 运行区自检未通过——先别重启服务，回到设计区排查。")
