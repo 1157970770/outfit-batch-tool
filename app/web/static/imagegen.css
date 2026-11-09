@@ -24,14 +24,21 @@
 .ig-composer textarea,
 .ig-composer select {
   width: 100%;
-  padding: 8px 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   background: var(--paper);
   color: var(--ink);
-  line-height: 1.6;
 }
-.ig-composer textarea { resize: vertical; min-height: 96px; }
+.ig-composer textarea { padding: 8px 10px; line-height: 1.6; resize: vertical; min-height: 96px; }
+/* style.css 里全局 select 是 height:32px + padding:0 10px；这里别再加大内边距，
+   否则内容盒只剩十几像素，中文会被下边缘切掉。高度直接给足。 */
+.ig-composer select {
+  height: 38px;
+  padding: 0 10px;
+  line-height: 20px;
+  font-size: 13px;
+  cursor: pointer;
+}
 .ig-composer textarea:focus,
 .ig-composer select:focus { border-color: var(--blue); }
 
