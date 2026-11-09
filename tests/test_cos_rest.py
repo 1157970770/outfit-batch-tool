@@ -55,6 +55,34 @@ def main() -> int:
     check(auth["q-header-list"] == "host", "q-header-list=host")
     check(len(auth["q-signature"]) == 40, "HMAC-SHA1 签名 40 位")
     check(client._path("a b.jpg") == "/a%20b.jpg", "Key 路径编码")
+    check(
+        client._sign_path("input/tpl/10月13日-22--5523597d.mp4")
+        == "/input/tpl/10月13日-22--5523597d.mp4",
+        "签名路径用解码后的原样路径（中文不编码）",
+    )
+
+    print("中文 Key 的签名口径（2026-11-09 线上 403 回归）：")
+    import hashlib
+    import hmac
+    import time as _time
+
+    cn_key = "input/tpl/哈尔滨-7-a2d9c218.mp4"
+    auth_cn = client._auth("put", cn_key, 600)
+
+    def manual(path_in_string: str) -> str:
+        sign_time = auth_cn["q-sign-time"]
+        http_string = f"put\n{path_in_string}\n\nhost={client.host}\n"
+        string_to_sign = "sha1\n" + sign_time + "\n" + hashlib.sha1(
+            http_string.encode()).hexdigest() + "\n"
+        sign_key = hmac.new(b"secret", sign_time.encode(), hashlib.sha1).hexdigest().encode()
+        return hmac.new(sign_key, string_to_sign.encode(), hashlib.sha1).hexdigest()
+
+    check(auth_cn["q-signature"] == manual("/" + cn_key), "中文 Key 按原始路径签名")
+    check(
+        auth_cn["q-signature"] != manual(client._path(cn_key)),
+        "不再用百分号编码路径签名（否则复现 SignatureDoesNotMatch）",
+    )
+    check(client._path(cn_key).startswith("/input/tpl/%E5%93%88"), "请求行 URL 仍然编码")
     url = client.sign_url("prod/output/a.mp4", 60)
     check(url.startswith("https://demo-1250000000.cos.ap-guangzhou.myqcloud.com/"), "签名 URL 域名")
 
