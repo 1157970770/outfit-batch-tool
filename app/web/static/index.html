@@ -11,13 +11,15 @@
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <link rel="stylesheet" href="/static/ps.css?v=20261109b">
   <link rel="stylesheet" href="/static/imagegen.css?v=20261109c">
+  <link rel="stylesheet" href="/static/canvas/canvas.css?v=20261109t">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
-  <script defer src="/static/app.js?v=20261107b"></script>
+  <script defer src="/static/app.js?v=20261109c"></script>
   <script defer src="/static/batch.js?v=20261107a"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
   <script defer src="/static/ps.js?v=20261109d"></script>
   <script defer src="/static/imagegen.js?v=20261109e"></script>
+  <script defer src="/static/canvas/canvas.js?v=20261109t"></script>
 </head>
 <body>
   <!-- 首屏占位：session 判定回来前先显示它，避免登录卡片一闪而过 -->
@@ -59,6 +61,7 @@
         <button id="material-tab" class="tab" data-view="material-view">素材检索</button>
         <button id="ps-tab" class="tab" data-view="ps-view">PS助手</button>
       <button id="imagegen-tab" class="tab" data-view="imagegen-view">生图</button>
+      <button id="canvas-tab" class="tab" data-view="canvas-view">画布</button>
         <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
 
@@ -624,6 +627,10 @@
             <p id="ig-empty" class="empty">还没有生成记录。填好提示词点「生成」，图片会出现在这里。</p>
           </section>
         </div>
+      </section>
+
+      <section id="canvas-view" class="view">
+        <div id="canvas-root"></div>
       </section>
 
       <section id="material-view" class="view">

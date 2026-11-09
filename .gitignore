@@ -89,6 +89,10 @@ _state/
 # 临时网络探测脚本（排查 npm 源用，与产品无关）
 probe-registry.mjs
 
+# 画布前端源码的依赖与构建临时目录（构建产物 app/web/static/canvas/ 要入库）
+canvas/node_modules/
+canvas/.tmp/
+
 # 素材检索（2026-11-09 从 D:\定妆自动化区\04_检索 迁入本区；旧路径保留目录联接指回这里）
 # data/ 是 14MB 索引与生成物，logs/ 与 当前网址.txt 是运行时产物，单文件版 HTML 3.9MB 也不入库
 素材检索/data/
