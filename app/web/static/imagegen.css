@@ -6,7 +6,7 @@
 
 .ig-layout {
   display: grid;
-  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(400px, 520px) minmax(0, 1fr);
   gap: 14px;
   align-items: start;
 }
@@ -43,8 +43,12 @@
 .ig-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 10px 12px;
 }
+
+/* 型号与尺寸的选项文字最长（「GPT Image 2.5 Sunburst VIP｜$0.03/张」、
+   「自动｜由模型决定」），各占一整行才不会被下拉框截断。 */
+.ig-field.is-wide { grid-column: 1 / -1; }
 
 .ig-actions {
   display: flex;

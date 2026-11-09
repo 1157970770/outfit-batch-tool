@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="/static/batch.css?v=20261105l">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <link rel="stylesheet" href="/static/ps.css?v=20261109b">
-  <link rel="stylesheet" href="/static/imagegen.css?v=20261109a">
+  <link rel="stylesheet" href="/static/imagegen.css?v=20261109b">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
   <script defer src="/static/app.js?v=20261107b"></script>
@@ -601,10 +601,10 @@
             </div>
 
             <div class="ig-grid">
-              <label class="ig-field"><span class="ig-label">模型</span><select id="ig-model"></select></label>
-              <label class="ig-field"><span class="ig-label">尺寸</span><select id="ig-size"></select></label>
-              <label class="ig-field"><span class="ig-label">质量</span><select id="ig-quality"></select></label>
-              <label class="ig-field"><span class="ig-label">张数</span><select id="ig-count"></select></label>
+              <label class="ig-field is-wide"><span class="ig-label">模型</span><select id="ig-model" title="选择生图模型"></select></label>
+              <label class="ig-field is-wide"><span class="ig-label">尺寸</span><select id="ig-size" title="选择输出尺寸"></select></label>
+              <label class="ig-field"><span class="ig-label">质量</span><select id="ig-quality" title="选择图片质量"></select></label>
+              <label class="ig-field"><span class="ig-label">张数</span><select id="ig-count" title="一次生成几张"></select></label>
             </div>
 
             <div class="ig-actions">
