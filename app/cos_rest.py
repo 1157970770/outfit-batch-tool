@@ -47,7 +47,20 @@ class CosRestClient:
         self.host = f"{bucket}.cos.{region}.myqcloud.com"
 
     def _path(self, key: str) -> str:
+        """请求行里的 URL 路径：必须百分号编码（中文 / 空格都编）。"""
         return "/" + urllib.parse.quote(key.lstrip("/"), safe="/-_.~")
+
+    def _sign_path(self, key: str) -> str:
+        """参与签名的 UriPathname：必须是**解码后**的原样路径，不要 %XX。
+
+        2026-11-09 实测定论：COS 服务端先把请求行里的 %XX 解码，再用解码结果
+        校验签名（403 响应里的 <FormatString> 就是中文原样：
+        `put\n/input/tpl/哈尔滨-7.mp4\n\nhost=...`）。所以带中文的对象 Key
+        若按百分号编码参与签名，会稳定 SignatureDoesNotMatch；按原始路径签名
+        同一次上传立刻成功。历史证据：桶里 input/tpl 上千个对象没有一个中文名，
+        网页上传中文名模板全挂在这条上。
+        """
+        return "/" + key.lstrip("/")
 
     def _auth(self, method: str, key: str, expires: int = 3600,
               params: dict | None = None) -> dict:
@@ -60,7 +73,7 @@ class CosRestClient:
             f"{name}={urllib.parse.quote(str((params or {})[name]), safe='')}" for name in names
         )
         http_string = (
-            f"{method.lower()}\n{self._path(key)}\n{param_str}\n"
+            f"{method.lower()}\n{self._sign_path(key)}\n{param_str}\n"
             f"host={urllib.parse.quote(self.host, safe='')}\n"
         )
         string_to_sign = (
