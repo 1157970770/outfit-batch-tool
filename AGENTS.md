@@ -164,6 +164,7 @@ app/storage.py         COS / 本地存储适配
 | `web-data/manifest_overlay.json` | 网页上传的视频索引（云端 manifest 里没有它们）；启动时与 manifest 合并 | ❌ |
 | `web-data/tag_versions/` | 真源版本快照（gzip，整库含每条标签与弃用态）；自动留 50 版 + 手动 50 版，回滚前另存备份 | ❌ |
 | `web-data/{uploads,output,logs}/` | 定妆图与细节图、成片、任务日志 | ❌ |
+| `web-data/ps/<upload_id>_s<强度>.png` + `.json` | PS 助手去紫结果（PNG + 统计侧车）；路径由原图 id 与强度派生，无登记表，可随时整目录删 | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 
 **多图（v0.17.0）**：两页都支持 10 个槽位（槽位 1 定妆图必填，2–10 细节图可选），数组顺序即模型 `imageUrls` 顺序与 prompt 的「图N」。job / batch 以 `images[]` 为唯一真源，`image_path/image_name/image_url` 保留为**主图别名**（老数据零迁移）。`/api/jobs`、`/api/batches` 收 `upload_ids[]`（兼容旧 `upload_id`）；锁定后细节图走 `POST /api/batches/<id>/images` 的 `op=add/remove`，主图不可换。删除细节图后序号自动左移；**不改 prompt**，指代由用户自己写「图2…图10」。COS 关闭时 `app/media.py:base64_budget_error` 会按总量 40MB 兜底拒绝。uploads 目录目前**没有 GC**，10 倍图量会持续堆积，后续可加「按 job/batch 引用计数 + 7 天」的清理。
@@ -232,5 +233,6 @@ python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格
 | [docs/web-lan.md](docs/web-lan.md) | 局域网部署与访问 |
 | [docs/dev-runtime-split.md](docs/dev-runtime-split.md) | 运行区/设计区分区：布局、发布与回滚 |
 | [docs/ui-rollback.md](docs/ui-rollback.md) | 界面改版的基线与回滚步骤 |
+| [docs/ps-assistant.md](docs/ps-assistant.md) | PS 助手 tab（去紫）：算法口径、接口、像素上限与排障 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
 | [README.md](README.md) | 对外说明与快速开始 |

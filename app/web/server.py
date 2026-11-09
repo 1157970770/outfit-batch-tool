@@ -26,6 +26,7 @@ from pathlib import Path
 from http.cookies import SimpleCookie
 
 from app import config as appconfig
+from app import depurple
 from app.media import MediaError, validate_image
 from app.prompts import PromptLibrary
 from app.runtime import build_storages
@@ -45,6 +46,9 @@ USERNAME_RE = re.compile(r"^[\w.-]{2,32}$", re.UNICODE)
 LOGIN_IP_LIMIT = 30
 # 同时在跑的登录校验数：未知账号每次要走 310,000 轮 PBKDF2（约 0.1s CPU）。
 _LOGIN_SLOTS = threading.BoundedSemaphore(4)
+# PS 助手去紫：4MP 约 2–3 秒、12MP 峰值内存约 600MB。numpy 重运算期间基本占着 GIL，
+# 串行比并发更安全（并发只会把内存翻几倍），等待的请求在线程里排队即可。
+_PS_LOCK = threading.Lock()
 # 单进程的连接上限：每个连接一条线程，超出直接拒绝，避免几十条半开连接把线程吃光。
 MAX_CONNECTIONS = 64
 
@@ -59,6 +63,20 @@ def _remove_quiet(path: Path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+def _ps_path(data_dir: Path, upload_id: str, strength: int) -> Path:
+    """去紫结果落盘位置：每个 (upload_id, strength) 一份 PNG，旁边是同名 .json 侧车。
+
+    路径完全由「原图 id + 强度」派生，不需要结果登记表；侧车让重复点同一强度秒回。
+    """
+    return data_dir / "ps" / f"{upload_id}_s{strength}.png"
+
+
+def _ps_out_name(original: str, strength: int) -> str:
+    """下载文件名：原图名（去扩展名）+ 去紫 + 强度。"""
+    stem = Path(str(original or "image")).stem or "image"
+    return f"{stem}_去紫_s{strength}.png"
 
 
 def temp_zip_path(data_dir: Path, tag: str) -> Path:
@@ -538,6 +556,12 @@ def make_handler(app: WebApplication):
                 if not user:
                     return
                 return self._upload_file(path.strip("/").split("/")[2], user)
+            if path.startswith("/api/ps/result/"):
+                user = self._user()
+                if not user:
+                    return
+                query = urllib.parse.parse_qs(parsed.query)
+                return self._ps_result(path.strip("/").split("/")[3], query, user)
             if path == "/api/style-usage":
                 user = self._user()
                 if not user:
@@ -722,6 +746,8 @@ def make_handler(app: WebApplication):
                 return self._error(exc, 400)
             if path == "/api/uploads":
                 return self._upload(data, user)
+            if path == "/api/ps/depurple":
+                return self._ps_depurple(data, user)
             if path == "/api/jobs":
                 return self._create_job(data, user)
             if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -1073,6 +1099,103 @@ def make_handler(app: WebApplication):
                 return self._error("图片已失效，请重新上传。", 404)
             mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             return self._send_file(path, mime, str(meta.get("name") or path.name))
+
+        # ---------------------------------------------------------- PS 助手（去紫）
+        def _ps_upload_meta(self, upload_id):
+            """读 uploads/meta（不校验权限，调用方自己判 owner）。"""
+            try:
+                return json.loads((app.upload_meta / f"{upload_id}.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+
+        def _ps_admin_upload(self, upload_id):
+            """admin 兜底：读任意 owner 的 meta，并确认原图还在（普通用户走 resolve_upload）。"""
+            meta = self._ps_upload_meta(upload_id)
+            if not meta:
+                return None
+            path = relocate(meta.get("path"), app.settings.data_dir)
+            if not path.is_file():
+                return None
+            meta = dict(meta)
+            meta["path"] = str(path)
+            return meta
+
+        def _ps_depurple(self, data, user):
+            """去紫：原图 + 强度 → 落盘 PNG，返回前后色偏统计。同参数重复调用直接命中侧车。"""
+            upload_id = str(data.get("upload_id") or "").strip()
+            if not re.fullmatch(r"[a-f0-9]{32}", upload_id):
+                return self._error("请先上传一张图片。", 400)
+            try:
+                strength = depurple.parse_strength(data.get("strength"))
+            except ValueError as exc:
+                return self._error(str(exc), 400)
+            if not depurple.available():
+                return self._error("PS 助手暂不可用：缺少 numpy，装好依赖后重启服务。", 503)
+            # resolve_upload 严格按 owner 匹配：别人的图一律当不存在，不泄露 id 是否有效。
+            meta = app.resolve_upload(upload_id, user["username"])
+            if not meta and user.get("role") == "admin":
+                meta = self._ps_admin_upload(upload_id)
+            if not meta:
+                return self._error("找不到这张图片。", 404)
+            source = Path(meta["path"])
+            if not source.is_file():
+                return self._error("原图已失效，请重新上传。", 404)
+            out = _ps_path(app.settings.data_dir, upload_id, strength)
+
+            cached = depurple.read_cached(out, source)
+            hit = cached is not None
+            stats = cached
+            if stats is None:
+                with _PS_LOCK:
+                    # 等锁期间可能已有人跑完同一张图，进锁后再查一次，别重复算
+                    stats = depurple.read_cached(out, source)
+                    hit = stats is not None
+                    if stats is None:
+                        try:
+                            stats = depurple.process_file(source, out, strength)
+                        except depurple.DepurpleError as exc:
+                            self.log_message("%s -> %s: %s", self.path, exc.status, exc)
+                            return self._error(str(exc), exc.status)
+                        except (OSError, ValueError, MemoryError) as exc:
+                            self.log_message("%s -> 500: %s", self.path, exc)
+                            return self._error(f"处理失败：{exc}（图片过大时请先缩图）", 500)
+            response = {
+                "ok": True,
+                "upload_id": upload_id,
+                "strength": stats.get("strength", strength),
+                "width": stats.get("width"),
+                "height": stats.get("height"),
+                "name": str(meta.get("name") or ""),
+                "url": f"/api/ps/result/{upload_id}?strength={strength}&v={int(time.time() * 1000)}",
+                "download_url": f"/api/ps/result/{upload_id}?strength={strength}&download=1",
+                "cast_before": stats.get("cast_before"),
+                "cast_after": stats.get("cast_after"),
+                "anchors": stats.get("anchors"),
+                "elapsed_ms": stats.get("elapsed_ms"),
+                "cached": hit,
+            }
+            return self._json(response)
+
+        def _ps_result(self, upload_id, query, user):
+            """取去紫结果 PNG：inline 给 <img>，download=1 给附件下载。"""
+            if not re.fullmatch(r"[a-f0-9]{32}", str(upload_id or "")):
+                return self._error("找不到这张图片。", 404)
+            try:
+                strength = depurple.parse_strength(query.get("strength", [""])[0])
+            except ValueError as exc:
+                return self._error(str(exc), 400)
+            meta = self._ps_upload_meta(upload_id)
+            if not meta:
+                return self._error("找不到这张图片。", 404)
+            if user.get("role") != "admin" and meta.get("owner") != user.get("username"):
+                return self._error("找不到这张图片。", 404)
+            path = _ps_path(app.settings.data_dir, upload_id, strength)
+            if not path.is_file():
+                return self._error("这张图还没有生成去紫版本。", 404)
+            download = str(query.get("download", ["0"])[0]).lower() in ("1", "true", "yes")
+            name = _ps_out_name(str(meta.get("name") or ""), strength)
+            return self._send_file(path, "image/png", name,
+                                   inline=not download, attachment=download)
 
         # ---------------------------------------------------------- 批次
         def _batch_create(self, data, user):

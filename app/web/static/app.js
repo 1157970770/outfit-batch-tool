@@ -89,13 +89,14 @@
     if (id === 'batch-view' && window.BatchUI) window.BatchUI.enter();
     if (id === 'tag-view' && window.TagUI) window.TagUI.enter();
     if (id === 'material-view') mountMaterialFrame();
+    if (id === 'ps-view' && window.PsUI) window.PsUI.enter();
   }
-  // 回到上次看的页：只在 create/history/admin/tag/material 之间恢复。
+  // 回到上次看的页：只在 create/history/admin/tag/material/ps 之间恢复。
   // 批次页有自己的状态机（进入即加载批次），刷新时自动跳过去容易让人以为"上次的任务还在"。
   function restoreView() {
     let saved = '';
     try { saved = localStorage.getItem(VIEW_KEY) || ''; } catch (_) { return; }
-    if (!['create-view', 'history-view', 'admin-view', 'tag-view', 'material-view'].includes(saved)) return;
+    if (!['create-view', 'history-view', 'admin-view', 'tag-view', 'material-view', 'ps-view'].includes(saved)) return;
     const tab = document.querySelector(`.tab[data-view="${saved}"]`);
     if (!tab || tab.classList.contains('hidden')) return;
     if (!document.getElementById(saved)) return;

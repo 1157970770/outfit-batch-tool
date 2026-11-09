@@ -9,11 +9,13 @@
   <link rel="stylesheet" href="/static/tag-filter.css">
   <link rel="stylesheet" href="/static/batch.css?v=20261105l">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
+  <link rel="stylesheet" href="/static/ps.css?v=20261109a">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
   <script defer src="/static/app.js?v=20261107b"></script>
   <script defer src="/static/batch.js?v=20261107a"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
+  <script defer src="/static/ps.js?v=20261109a"></script>
 </head>
 <body>
   <!-- 首屏占位：session 判定回来前先显示它，避免登录卡片一闪而过 -->
@@ -53,6 +55,7 @@
         <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
         <button id="tag-tab" class="tab" data-view="tag-view">视频库</button>
         <button id="material-tab" class="tab" data-view="material-view">素材检索</button>
+        <button id="ps-tab" class="tab" data-view="ps-view">PS助手</button>
         <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
 
@@ -522,6 +525,47 @@
             <p id="upload-error" class="error hidden"></p>
           </div>
         </div>
+      </section>
+
+      <section id="ps-view" class="view">
+        <div class="section-head">
+          <div><h1>PS 助手</h1><p class="muted">去紫：AI 多轮生产常把同一件白料越做越紫、发品红。这里在 Lab 空间只扣 A/B、完全不动亮度，把偏色拉回中性，暖色（肤色/米色）只改 10%。</p></div>
+          <div class="top-actions"><button id="ps-reset" class="quiet" type="button">换一张</button></div>
+        </div>
+        <article class="card ps-card">
+          <div class="ps-controls">
+            <label id="ps-drop" class="drop-zone ps-drop" for="ps-file">
+              <input id="ps-file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp" hidden>
+              <strong id="ps-drop-title">点击或拖入一张图片</strong>
+              <span class="muted ps-drop-note">JPG / PNG / WebP / BMP，单张 ≤20MB、≤1200 万像素</span>
+            </label>
+            <div class="ps-settings">
+              <label class="ps-strength">强度 <output id="ps-strength-out">100</output>
+                <input id="ps-strength" type="range" min="0" max="100" step="5" value="100">
+              </label>
+              <p class="muted ps-hint">100 = 全量扣偏色；调小更保守（保留一点原偏色）；0 = 原图。</p>
+              <div class="ps-actions">
+                <button id="ps-run" class="primary" type="button" disabled>去紫</button>
+                <a id="ps-download" class="quiet disabled" aria-disabled="true">下载 PNG</a>
+              </div>
+              <p id="ps-error" class="error hidden"></p>
+              <p id="ps-stats" class="ps-stats muted hidden"></p>
+            </div>
+          </div>
+          <div id="ps-compare" class="ps-compare" hidden>
+            <figure class="ps-pane">
+              <div class="ps-pane-head"><span class="ps-badge">原图</span><span id="ps-before-meta" class="muted"></span></div>
+              <div class="ps-frame"><img id="ps-before" alt="原图"></div>
+            </figure>
+            <figure class="ps-pane">
+              <div class="ps-pane-head"><span class="ps-badge ps-badge-after">去紫后</span><span id="ps-after-meta" class="muted"></span></div>
+              <div class="ps-frame">
+                <img id="ps-after" alt="去紫结果">
+                <div id="ps-stale" class="ps-stale hidden">强度已改，点「去紫」重算</div>
+              </div>
+            </figure>
+          </div>
+        </article>
       </section>
 
       <section id="material-view" class="view">

@@ -1,0 +1,50 @@
+/* PS 助手（去紫）：左侧选图 + 强度，右侧原图/结果两栏对比。
+   颜色全部走 style.css 的变量，跟全站保持一致；不引入新字体/新依赖。 */
+.ps-card { padding: 16px; }
+.ps-controls { display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .ps-controls { grid-template-columns: 1fr; } }
+
+.ps-drop {
+  display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center;
+  min-height: 148px; padding: 16px; text-align: center; cursor: pointer;
+  border: 1.5px dashed var(--line-strong); border-radius: var(--radius-lg);
+  background: var(--paper); transition: border-color .15s, background .15s;
+}
+.ps-drop:hover, .ps-drop.dragging { border-color: var(--blue); background: #f5f8ff; }
+.ps-drop.busy { cursor: progress; opacity: .75; }
+.ps-drop-note { font-size: 12px; }
+
+.ps-settings { display: flex; flex-direction: column; gap: 10px; }
+.ps-strength { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 600; }
+.ps-strength output { font-family: var(--font-mono); color: var(--blue); min-width: 2.2em; }
+.ps-strength input[type="range"] { flex: 1 1 200px; accent-color: var(--blue); }
+.ps-hint { font-size: 12px; margin: 0; }
+.ps-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ps-actions .disabled { pointer-events: none; opacity: .45; }
+.ps-stats { margin: 0; font-size: 13px; }
+.ps-stats strong { font-family: var(--font-mono); color: var(--ink); }
+.ps-stats .better { color: var(--green); }
+.ps-error { margin: 0; }
+
+.ps-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+@media (max-width: 760px) { .ps-compare { grid-template-columns: 1fr; } }
+.ps-pane { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ps-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.ps-badge {
+  font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+  background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+}
+.ps-badge-after { background: #eef8f2; color: var(--green); border-color: #cbe7d8; }
+.ps-frame {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  min-height: 180px; padding: 8px; border-radius: var(--radius-md);
+  border: 1px solid var(--line); background: repeating-conic-gradient(#f2f3f5 0 25%, #fff 0 50%) 0 0/16px 16px;
+}
+.ps-frame img { max-width: 100%; max-height: 62vh; display: block; border-radius: 4px; }
+.ps-frame img:not([src]) { display: none; }
+.ps-stale {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-md); background: rgba(246, 247, 249, .82);
+  color: var(--amber); font-weight: 600; font-size: 13px; text-align: center; padding: 12px;
+}
+.ps-empty { color: var(--muted); font-size: 13px; }

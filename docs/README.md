@@ -13,6 +13,7 @@
 | [web-lan.md](web-lan.md) | 局域网部署、访问地址、常见网络问题 | 2026-10 |
 | [dev-runtime-split.md](dev-runtime-split.md) | **运行区/开发区分区**：布局、发布流程、切换与回滚、打标器归属 | 2026-11-06 |
 | [ui-rollback.md](ui-rollback.md) | 界面改版的基线、回滚步骤与改版约定 | 2026-11-02 |
+| [ps-assistant.md](ps-assistant.md) | **PS 助手 tab（去紫）**：算法口径、接口与错误码、结果缓存、像素上限与排障 | 2026-11-09 |
 | [web-tag-filter-handover.md](web-tag-filter-handover.md) | 标签筛选改造交接（含清单适配细节） | 2026-10-30 |
 
 ## 二、引擎 / 协议 / 存储
