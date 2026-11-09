@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:                      # 作为包导入（测试/界面）
+    from . import traffic
     from .storage import Storage, file_fingerprint, object_key
     from .wan_api import (
         MAX_IMAGES, STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
@@ -36,6 +37,7 @@ try:                      # 作为包导入（测试/界面）
         resolve_body, resolve_image,
     )
 except ImportError:       # 直接 python3 app/core.py 时
+    import traffic  # type: ignore
     from storage import Storage, file_fingerprint, object_key  # type: ignore
     from wan_api import (  # type: ignore
         MAX_IMAGES, STATUS_CANCELED, STATUS_FAILED, STATUS_SUCCEEDED, STATUS_UNKNOWN,
@@ -520,15 +522,21 @@ class BatchRunner:
             if budget:
                 raise EngineError(budget)
             urls: list[str] = []
+            # 记下每张图「会从 COS 被万相拉走」的字节数：inline(base64) 的不产生
+            # 外网流量，记为 0；COS 上的就是本地文件大小（上传没有改动字节）。
+            sizes: list[int] = []
             for index, path in enumerate(paths, 1):
                 if not Path(path).is_file():
                     raise EngineError(f"第 {index} 张图片已丢失：{Path(path).name}")
                 self.log(f"准备第 {index}/{len(paths)} 张图片：{Path(path).name}")
                 try:
-                    urls.append(resolve_image(path, self._uploader))
+                    url = resolve_image(path, self._uploader)
                 except MediaError as exc:
                     raise EngineError(f"第 {index} 张图片处理失败：{exc}") from None
+                urls.append(url)
+                sizes.append(int(Path(path).stat().st_size) if url.startswith("http") else 0)
             self._image_urls = urls
+            self._image_bytes = sizes
             self._image_url = urls[0]
             self.log(f"{len(urls)} 张图片已就绪（{describe_media_source(urls[0])}），"
                      f"{len(self.spec.templates)} 条任务共用")
@@ -690,6 +698,31 @@ class BatchRunner:
         self._save_state()
         return rec
 
+    def _note_egress(self, tid: str) -> None:
+        """记一笔「这条任务即将让万相来拉素材」的推定流量。
+
+        真正的拉取发生在阿里云侧，本机看不到字节，只能按对象真实大小估：
+        模板体积来自清单里的 ``size_mb``（catalog 已带进 ``spec.templates``），
+        图片体积是上传前的本地文件大小（COS 上传不改字节，base64 内联不产生外网流量，
+        记为 0）。这些数字要和 ``preview`` 的实测值分开看，见 app/traffic.py。
+        """
+        if not traffic.is_enabled():
+            return
+        try:
+            size = 0
+            for tpl in self.spec.templates:
+                if str(tpl.get("id")) == str(tid):
+                    size = int(round(float(tpl.get("size_mb") or 0) * 1024 * 1024))
+                    break
+            traffic.record("template", size, tid=tid, job=self.spec.batch_id)
+        except Exception:  # noqa: BLE001 - 观测失败不能影响生产
+            pass
+        try:
+            sizes = list(getattr(self, "_image_bytes", None) or [])
+            traffic.record("image", sum(sizes), n=len(sizes), job=self.spec.batch_id)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _submit_and_wait(self, wire: dict, rec: dict, reattach: str = ""):
         """提交并等待单条任务；调用方负责在飞额度（进入前已占位）。
 
@@ -716,6 +749,7 @@ class BatchRunner:
                 should_stop=self.stop_event.is_set,
             )
         try:
+            self._note_egress(tid)   # 只记账：提交那一刻，素材才真正被万相拉取
             resp = self._client.submit(wire)
         except WanError as exc:
             # 请求可能已送达云端：结果未知，既不能当失败重试，也不能当没花钱。

@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from _tmpdir import tempdir  # noqa: E402
 sys.path.insert(0, str(ROOT))
 
+from app import traffic  # noqa: E402
 from app.web.auth import make_password  # noqa: E402
 from app.web.server import WebApplication, make_handler  # noqa: E402
 from app.web.settings import load_settings  # noqa: E402
@@ -151,6 +152,23 @@ def main() -> int:
 
         code, headers, video = call(alice, base, f"/api/jobs/{job_id}/download/001", headers={"Range": "bytes=0-9"})
         assert code == 206 and len(video) == 10, (code, len(video))
+
+        # COS 流量账本（app/traffic.py）：预览/下载是我们自己代理字节，必须按实测记账；
+        # 生产时万相来拉模板/图片，只能按对象大小推定，也要各留一笔。
+        code, _, _ = call(alice, base, "/api/templates/001/preview", headers={"Range": "bytes=0-1023"})
+        assert code in (200, 206), code
+        code, _, preview_full = call(alice, base, "/api/templates/001/preview")
+        assert code == 200 and len(preview_full) > 1024, (code, len(preview_full))
+        code, _, downloaded = call(alice, base, "/api/templates/001/download")
+        assert code == 200 and downloaded == preview_full, (code, len(downloaded))
+        ledger = traffic.collect(days=1)
+        assert ledger["days"] == 1, f"账本没启用：{ledger}"
+        assert ledger["totals"]["preview"]["b"] > 1024, ledger["totals"]
+        assert ledger["totals"]["download"]["b"] == len(preview_full), ledger["totals"]
+        assert ledger["ranges"][ledger["last"]] == {"total": 2, "range": 1}, ledger["ranges"]
+        # 生产那条任务会让万相拉 1 个模板 + 1 张定妆图（manifest 无 size_mb，模板字节为 0）
+        assert ledger["totals"]["template"]["n"] >= 1, ledger["totals"]
+        assert ledger["totals"]["image"]["n"] >= 1, ledger["totals"]
         code, _, _ = call(bob, base, "/api/login", "POST", {"username": "bob", "password": "bob-pass-12345"})
         assert code == 200
         code, _, _ = call(bob, base, f"/api/jobs/{job_id}")
@@ -269,6 +287,9 @@ def main() -> int:
         assert code == 403, code
         code, _, _ = call(alice, base, "/api/admin/archive-sign", "POST", {"keys": [entry["key"]]})
         assert code == 403, code
+
+        # 签名成功后也要落一笔归档账（字节在同事电脑侧，只记条数）
+        assert traffic.collect(days=1)["totals"]["archive"]["n"] >= 1, traffic.collect(days=1)["totals"]
 
         print("OK 网页上传 → mock 生成 → 下载 → 用户隔离 → 账号管理 → 云端归档检索与签名")
         return 0

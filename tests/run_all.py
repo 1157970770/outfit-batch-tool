@@ -34,6 +34,7 @@ REQUIRED = [
     "test_template_store",
     "test_tag_truth",
     "test_cos_rest",
+    "test_traffic",
     "test_tag_backup",
     "test_style_usage",
     "test_web_auth",

@@ -27,6 +27,7 @@ from http.cookies import SimpleCookie
 
 from app import config as appconfig
 from app import depurple
+from app import traffic
 from app.imggen import ImageGenError, ImageGenManager
 from app.media import MediaError, validate_image
 from app.prompts import PromptLibrary
@@ -166,6 +167,9 @@ class WebApplication:
         self.uploads_dir = settings.data_dir / "uploads"
         self.upload_meta = self.uploads_dir / "meta"
         self.upload_meta.mkdir(parents=True, exist_ok=True)
+        # COS 流量观测（只记账，不改变任何行为）：先把一周的真实去向量出来，
+        # 再决定要不要做预览缓存。账本落在 <data_dir>/traffic/YYYY-MM-DD.jsonl。
+        traffic.configure(settings.data_dir / "traffic")
         self._template_store = None
         self._template_store_lock = threading.Lock()
         self._output_store = None
@@ -1595,6 +1599,9 @@ def make_handler(app: WebApplication):
                                   "expires_at": deadline})
                 except Exception as exc:  # noqa: BLE001
                     failed.append({"key": key, "error": str(exc)[:200]})
+            # 直链交给同事后才会产生外网下行；字节数在本机看不到，只记「签了多少条」，
+            # 让报表至少知道这条渠道有没有在用，不至于凭空漏掉一笔。
+            traffic.record("archive", 0, n=len(links), m="link")
             return self._json({"ok": True, "links": links, "failed": failed,
                                "expires_at": deadline})
 
@@ -1950,9 +1957,17 @@ def make_handler(app: WebApplication):
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 response_started = True
-                if self.command != "HEAD" and status < 400:
-                    shutil.copyfileobj(response, self.wfile, length=64 * 1024)
-                response.close()
+                # 数出真正转发出去的字节：浏览器播一次可能发多条 Range 请求，
+                # 每条都记一笔（含连接中断时已送出的半截），这才是 COS 的计费字节。
+                counter = traffic.CountingReader(response)
+                try:
+                    if self.command != "HEAD" and status < 400:
+                        shutil.copyfileobj(counter, self.wfile, length=64 * 1024)
+                finally:
+                    traffic.record("preview", counter.count, tid=template_id, st=status,
+                                   rng=1 if self.headers.get("Range") else 0,
+                                   m=self.command)
+                    response.close()
             except (TemplateError, OSError, urllib.error.URLError, RuntimeError) as exc:
                 if response_started:
                     # 响应头已经发出去了，再写一次 HTTP 错误会把 JSON 混进视频流。
@@ -1999,9 +2014,14 @@ def make_handler(app: WebApplication):
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
-                if self.command != "HEAD":
-                    shutil.copyfileobj(response, self.wfile, length=64 * 1024)
-                response.close()
+                counter = traffic.CountingReader(response)
+                try:
+                    if self.command != "HEAD":
+                        shutil.copyfileobj(counter, self.wfile, length=64 * 1024)
+                finally:
+                    traffic.record("download", counter.count, tid=template_id,
+                                   st=status, m=self.command)
+                    response.close()
             except (TemplateError, OSError, urllib.error.URLError, RuntimeError) as exc:
                 return self._error(f"下载失败：{exc}", 502)
 
