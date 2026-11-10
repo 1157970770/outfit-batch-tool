@@ -15,6 +15,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = '服务器内部错误，请稍后重试。';
+    /** `{ok:false,error}` 之外的附加字段（如 conflict/revision/impact），原样回给前端。 */
+    let extra: Record<string, unknown> = {};
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -22,7 +24,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       if (typeof body === 'string') {
         message = body;
       } else if (body && typeof body === 'object') {
-        const payload = body as { ok?: unknown; error?: unknown; message?: unknown };
+        const payload = body as Record<string, unknown>;
         // 三种来源按优先级取文案：
         // 1) 我们自己抛的 `{ok:false,error}`（ConflictError 等）→ error 就是中文
         // 2) `new BadRequestException('中文')` 在 Nest 里变成 `{message:'中文',error:'Bad Request'}`，
@@ -30,10 +32,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
         // 3) 校验管道给的 message 数组 → 用「；」拼接
         if (payload.ok === false && typeof payload.error === 'string') {
           message = payload.error;
+          const { ok: _ok, error: _error, message: _message, ...rest } = payload;
+          extra = rest;
         } else if (typeof payload.message === 'string') {
           message = payload.message;
         } else if (Array.isArray(payload.message)) {
-          message = payload.message.join('；');
+          message = (payload.message as unknown[]).join('；');
         } else if (typeof payload.error === 'string') {
           message = payload.error;
         }
@@ -54,6 +58,6 @@ export class ApiExceptionFilter implements ExceptionFilter {
     // Nest 内置 404 的默认文案是 "Not Found"；统一成中文，和 Python 版一致
     if (status === HttpStatus.NOT_FOUND && /^not found$/i.test(message)) message = '页面或接口不存在。';
 
-    res.status(status).json({ ok: false, error: message });
+    res.status(status).json({ ok: false, error: message, ...extra });
   }
 }

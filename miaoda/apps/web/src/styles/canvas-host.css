@@ -1,0 +1,16 @@
+/* 画布：整页交给 canvas 包自己的 root，这里只管容器尺寸。 */
+
+.canvas-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 72vh;
+}
+
+.canvas-root {
+  flex: 1;
+  min-height: 72vh;
+  border: 1px solid var(--line, #2a3038);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0c0f13;
+}

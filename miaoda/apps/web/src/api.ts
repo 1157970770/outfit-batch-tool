@@ -28,17 +28,23 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** 401 时不触发全局跳登录（登录接口自己处理）。 */
   skipUnauthorized?: boolean;
+  /** 原始字节流（视频上传这类接口不吃 JSON）。 */
+  raw?: BodyInit;
+  /** 追加/覆盖请求头（与 `raw` 搭配用：X-File-Name / X-Tags 等）。 */
+  headers?: Record<string, string>;
 }
 
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, signal, skipUnauthorized } = options;
+  const { method = 'GET', body, signal, skipUnauthorized, raw, headers } = options;
   const init: RequestInit = {
     method,
     credentials: 'same-origin',
     signal,
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...(headers || {}) },
   };
-  if (body !== undefined) {
+  if (raw !== undefined) {
+    init.body = raw;
+  } else if (body !== undefined) {
     init.headers = { ...init.headers, 'Content-Type': 'application/json' };
     init.body = JSON.stringify(body);
   }

@@ -5,13 +5,13 @@ import { BootView, LoginView } from '@/pages/Entry';
 import { CreatePage } from '@/pages/CreatePage';
 import { BatchPage } from '@/pages/BatchPage';
 import { HistoryPage } from '@/pages/HistoryPage';
+import { TagPage } from '@/pages/TagPage';
+import { AdminPage } from '@/pages/AdminPage';
+import { MaterialPage } from '@/pages/MaterialPage';
+import { PsPage } from '@/pages/PsPage';
+import { ImageGenPage } from '@/pages/ImageGenPage';
+import { CanvasPage } from '@/pages/CanvasPage';
 import {
-  AdminPlaceholder,
-  CanvasPlaceholder,
-  ImageGenPlaceholder,
-  MaterialPlaceholder,
-  PsPlaceholder,
-  TagPlaceholder,
   VIEWS,
   ViewSection,
   useView,
@@ -24,12 +24,12 @@ const PAGES: Record<string, ComponentType> = {
   create: CreatePage,
   batch: BatchPage,
   history: HistoryPage,
-  admin: AdminPlaceholder,
-  tag: TagPlaceholder,
-  material: MaterialPlaceholder,
-  ps: PsPlaceholder,
-  imagegen: ImageGenPlaceholder,
-  canvas: CanvasPlaceholder,
+  admin: AdminPage,
+  tag: TagPage,
+  material: MaterialPage,
+  ps: PsPage,
+  imagegen: ImageGenPage,
+  canvas: CanvasPage,
 };
 
 export function App() {

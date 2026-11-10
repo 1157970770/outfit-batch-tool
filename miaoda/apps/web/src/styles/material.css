@@ -1,0 +1,16 @@
+/* 素材检索：整页 iframe，撑满可视高度。 */
+
+.material-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 70vh;
+}
+
+.material-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 78vh;
+  border: 0;
+  border-radius: 10px;
+  background: #fff;
+}

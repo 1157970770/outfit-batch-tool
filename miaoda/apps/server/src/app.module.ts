@@ -7,6 +7,7 @@ import { UploadsModule } from './uploads/uploads.module';
 import { WanModule } from './wan/wan.module';
 import { JobsModule } from './jobs/jobs.module';
 import { BatchesModule } from './batches/batches.module';
+import { AdminModule } from './admin/admin.module';
 import { ApiModule } from './api/api.module';
 import { SessionGuard } from './auth/session.guard';
 import { ApiExceptionFilter } from './common/api-exception.filter';
@@ -22,6 +23,7 @@ import { APP_FILTER, APP_GUARD } from '@nestjs/core';
     WanModule,
     JobsModule,
     BatchesModule,
+    AdminModule,
     ApiModule,
   ],
   providers: [

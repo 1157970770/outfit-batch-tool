@@ -49,6 +49,29 @@ export interface PublicTemplate {
   upload_state: string;
 }
 
+/** 标签页行：字段与 Python `TemplateCatalog.public_tags()` 一一对应。 */
+export interface TagPublicRow {
+  id: string;
+  name: string;
+  filename: string;
+  relative_path: string;
+  tags: string[];
+  tag_categories: Record<string, string>;
+  deprecated: boolean;
+  deprecated_at: unknown;
+  deprecated_by: string;
+  ready: boolean;
+  upload_state: string;
+  duration: number | null;
+  size_mb: number | null;
+  missing: boolean;
+  changed: boolean;
+  touched_at: unknown;
+  touched_by: string;
+  uploaded_at: number;
+  rating: number;
+}
+
 export class TemplateError extends Error {}
 
 interface CatalogState {
@@ -332,6 +355,48 @@ export class TemplateCatalogService {
       ready: Boolean(item.url || item.key),
       upload_state: item.upload_state,
     }));
+  }
+
+  /**
+   * 标签页专用行：在用 + 未打标 + 已弃用**全量**，带弃用信息与 ready。
+   *
+   * 与 Python `TemplateCatalog.public_tags()` 逐字段对齐；返回顺序固定为
+   * 「在用（候选集顺序）→ 未打标（按数字 ID 升序）→ 已弃用（按数字 ID 升序）」，
+   * 前端直接按这个顺序渲染三段列表，不用自己排。
+   */
+  publicTags(): TagPublicRow[] {
+    const payload = (item: TemplateRow): TagPublicRow => ({
+      id: item.id,
+      name: item.name || '',
+      filename: item.filename || '',
+      relative_path: item.relative_path || '',
+      tags: [...item.tags],
+      tag_categories: { ...item.tag_categories },
+      deprecated: Boolean(item.deprecated),
+      deprecated_at: item.deprecated_at,
+      deprecated_by: item.deprecated_by || '',
+      ready: Boolean(item.url || item.key),
+      upload_state: item.upload_state || '',
+      duration: item.duration,
+      size_mb: item.size_mb,
+      missing: Boolean(item.missing),
+      changed: Boolean(item.changed),
+      touched_at: item.touched_at,
+      touched_by: item.touched_by || '',
+      uploaded_at: Number(item.uploaded_at || 0),
+      rating: Number(item.rating || 0),
+    });
+    const numericId = (row: TagPublicRow): number => (/^\d+$/.test(row.id) ? Number(row.id) : 0);
+    const state = this.ensure();
+    const rows = state.items.map(payload);
+    const untagged = [...state.untagged.values()].map(payload).sort((a, b) => numericId(a) - numericId(b));
+    const retired = [...state.retired.values()].map(payload).sort((a, b) => numericId(a) - numericId(b));
+    return [...rows, ...untagged, ...retired];
+  }
+
+  /** 强制重建候选集（标签写成功后要立刻看到新行）。 */
+  rebuild(): Promise<void> {
+    return this.build(true);
   }
 
   resolve(templateId: string, includeRetired = false): TemplateRow {

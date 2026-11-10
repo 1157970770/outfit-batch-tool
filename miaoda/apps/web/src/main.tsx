@@ -8,6 +8,12 @@ import '@/styles/components.css';
 import '@/styles/create.css';
 import '@/styles/batch.css';
 import '@/styles/history.css';
+import '@/styles/tag.css';
+import '@/styles/admin.css';
+import '@/styles/material.css';
+import '@/styles/ps.css';
+import '@/styles/imagegen.css';
+import '@/styles/canvas-host.css';
 
 const host = document.getElementById('root');
 if (!host) throw new Error('缺少 #root 挂载点');
