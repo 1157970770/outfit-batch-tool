@@ -59,6 +59,7 @@ python run_web.py
 | 标签（所有人） | 给视频打标签 / 批量改标签、**上传新视频**（≤50MB，直传 COS 并立即可用）、**弃用与恢复**（软删除）、标签库与**自定义大类**的新建/改名/合并/删除、整库版本历史与回滚；数据落 `web-data/template_tags.json`，网页与本地打标工具共用 |
 | 管理（仅 admin） | 服务状态、账号列表、重新加载场景、**账户用量**（条数/成功失败/计费秒/预估金额，点账户看逐条明细并导出 CSV） |
 | 生图 | 提示词 + 最多 10 张参考图直接出图：选 VIP 型号 / 17 档尺寸（含 4:5 竖版）/ 质量 / 1–8 张，记录卡实时显示进度，成品可单张预览或下载；走 `server/imagegen.json` 里的老张 Key，与视频链路完全独立 |
+| 自由视频 | 通用 wan3.0 生产：提示词 + 任意参考图（≤10）/ 参考视频（≤5，单段 ≤15 秒）/ 参考音频（≤5）直接出片，支持文生视频、参考图生视频、视频编辑与配音，不选模板、不填款号；独立队列独立记录，见 [docs/free-video-tab.md](docs/free-video-tab.md) |
 
 权限按 `owner` 隔离：普通账号只看自己的任务与批次，管理员可按账户筛选。
 **快速通道**：≤3 条的批次走独立队列与独立在飞池，不与本人的大批量排队。
@@ -199,11 +200,13 @@ python scripts/cos_check.py
 | 文档 | 用途 |
 | --- | --- |
 | [AGENTS.md](AGENTS.md) | **给接手模型/人的入口地图**（先读这个） |
+| [docs/core-code-and-migration.md](docs/core-code-and-migration.md) | **核心代码导读 + 迁移手册**：搬什么/不搬什么、八步迁移、必改地址、验收清单 |
 | [docs/architecture.md](docs/architecture.md) | **网页版架构**：分层、线程、额度、数据、接口 |
 | [docs/project-summary-20261102.md](docs/project-summary-20261102.md) | v0.6.0 现状、参数、运维、风险 |
 | [docs/account-usage-and-quota.md](docs/account-usage-and-quota.md) | 单 Key 共用 + 账户用量口径 |
 | [docs/web-lan.md](docs/web-lan.md) | 局域网部署与排障 |
 | [docs/wan-3.0-reference-to-video.md](docs/wan-3.0-reference-to-video.md) | 官方接口规格 |
+| [docs/free-video-tab.md](docs/free-video-tab.md) | 自由视频 tab（通用 wan3.0）：用法、接口、参数、数据与限制 |
 | [docs/cos-setup.md](docs/cos-setup.md) | COS 接入手册 |
 | [docs/backup-tag-store.md](docs/backup-tag-store.md) | 标签库真源每日备份到 COS、恢复步骤 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |

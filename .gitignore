@@ -49,6 +49,8 @@ assets/定妆图.png
 _*.py
 # 例外：测试的共享临时目录 helper 要进仓库
 !tests/_tmpdir.py
+# 例外：包的 __init__.py 必须入库（上面的 _*.py 会误伤，见 AGENTS.md §7）
+!**/__init__.py
 
 # 真实密码表（含分配出去的密码，绝不提交）
 server/passwords.json

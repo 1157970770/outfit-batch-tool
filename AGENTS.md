@@ -74,12 +74,15 @@ New-Item -ItemType Junction -Path 'D:\批量视频任务设计区\web-data-dev\u
 局域网网页版批量视频生产器：1 张定妆图 + 最多 9 张细节图 + N 个视频模板 → N 条 7 秒换装视频，
 调用阿里云百炼 `wan3.0-video`，成品落本地并可选归档腾讯云 COS。
 另有一个「生图」tab：提示词 + 参考图直接出图（老张 API 的 GPT Image VIP 与 Nano Banana 2.1，与视频链路完全独立）。
+还有一个「自由视频」tab：提示词 + 任意参考图/视频/音频直接生产（文生视频、参考图生视频、视频编辑、配音），
+不选模板、不填款号，任务不落 `web-data/jobs`、不进 `BatchRunner`，见 [docs/free-video-tab.md](docs/free-video-tab.md)。
 
 | 组成 | 入口 | 说明 |
 | --- | --- | --- |
 | 网页端 | `run_web.py` → `app/web/` | 标准库 `ThreadingHTTPServer` + 原生 JS |
 | 引擎 | `app/core.py` / `app/wan_api.py` | 纯 Python，网页与 CLI 共用 |
 | 生图 | `app/imggen/` | 独立队列 + urllib 客户端，不占视频的在飞名额 |
+| 自由视频 | `app/videogen/` | 独立队列 + 独立记录；复用 `WanClient` 但与换装/模板/COS 归档链路无关 |
 
 ## 2. 三分钟跑起来
 
@@ -188,6 +191,7 @@ app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守�
 | `web-data/{uploads,output,logs}/` | 定妆图与细节图、成片、任务日志 | ❌ |
 | `web-data/ps/<upload_id>_s<强度>.png` + `.json` | PS 助手去紫结果（PNG + 统计侧车）；路径由原图 id 与强度派生，无登记表，可随时整目录删 | ❌ |
 | `web-data/imagegen/tasks/<id>.json` + `files/<id>/` | 生图任务记录、成品 `<n>.png` + `<n>.meta.json` 侧车、参考图副本 `ref<n>.<ext>`（创建任务时拷贝，uploads 删了也能复现） | ❌ |
+| `web-data/videogen/{tasks,files,uploads}/` | 自由视频任务记录（`tasks/<id>.json`）、参考素材副本与成品 `shot-<n>.mp4`、参考视频/音频上传元数据；删任务会连 `files/<id>/` 一起删，`uploads/` 不回收 | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 
 **多图（v0.17.0）**：两页都支持 10 个槽位（槽位 1 定妆图必填，2–10 细节图可选），数组顺序即模型 `imageUrls` 顺序与 prompt 的「图N」。job / batch 以 `images[]` 为唯一真源，`image_path/image_name/image_url` 保留为**主图别名**（老数据零迁移）。`/api/jobs`、`/api/batches` 收 `upload_ids[]`（兼容旧 `upload_id`）；锁定后细节图走 `POST /api/batches/<id>/images` 的 `op=add/remove`，主图不可换。删除细节图后序号自动左移；**不改 prompt**，指代由用户自己写「图2…图10」。COS 关闭时 `app/media.py:base64_budget_error` 会按总量 40MB 兜底拒绝。uploads 目录目前**没有 GC**，10 倍图量会持续堆积，后续可加「按 job/batch 引用计数 + 7 天」的清理。
@@ -222,9 +226,10 @@ python tests/test_web.py         # 网页端端到端：登录/上传/任务/用
 python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分组 + 额度断言
 python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格 / probe / HTTP zip
 python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / 取图下载 / 权限 / 重启恢复
+python tests/test_videogen.py    # 自由视频 tab：选项 / 文生·图生·视频编辑 / 校验 / 权限 / 取消 / 删除
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口、批次与生图端到端（29 套，含 `test_path_relocate`），全部离线运行。
+`tests/run_all.py` 覆盖引擎、存储、网页接口、批次、生图与自由视频端到端（30 套，含 `test_path_relocate`），全部离线运行。
 
 ## 7. 别动 / 小心
 
@@ -244,6 +249,7 @@ python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / �
 
 - `server.py` 2000+ 行、`wan_api.py` 1120 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
 - 生图任务是**单进程内存队列**（`queue.Queue` + 守护线程），没有跨进程锁；同一 `data_dir` 起两个实例会互相抢任务文件，别这么干。重启不做断点续传，进行中的任务直接落成「生成失败」。
+- 自由视频（`app/videogen/`）同样是单进程内存队列 + 守护线程（线程数 `web.json.videogen_max_inflight`，默认 2），重启不续传、`count>1` 串行跑；取消是协作式的，已提交给引擎的任务不撤回、照常计费。
 - 测试是独立脚本，没有 pytest 夹具；`tests/run_all.py` 只是顺序执行器。
 - `wan.price_per_second` 三档均为 `null`，金额用公开价目表兜底，与真实账单有偏差。
 - 本仓库只维护网页端与引擎；不要再引入 GUI 界面或桌面打包相关代码。
@@ -252,6 +258,7 @@ python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / �
 
 | 文档 | 用途 |
 | --- | --- |
+| [docs/core-code-and-migration.md](docs/core-code-and-migration.md) | **核心代码导读 + 迁移手册**：搬什么/不搬什么、配置与数据清单、八步迁移、必改的硬编码地址、验收清单 |
 | [docs/architecture.md](docs/architecture.md) | **网页版代码架构**：分层、线程、额度、数据模型、接口 |
 | [docs/project-summary-20261102.md](docs/project-summary-20261102.md) | v0.6.0 现状、参数表、运维与风险 |
 | [docs/account-usage-and-quota.md](docs/account-usage-and-quota.md) | 单 Key 共用与账户用量监控口径 |
@@ -259,5 +266,6 @@ python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / �
 | [docs/dev-runtime-split.md](docs/dev-runtime-split.md) | 运行区/设计区分区：布局、发布与回滚 |
 | [docs/ui-rollback.md](docs/ui-rollback.md) | 界面改版的基线与回滚步骤 |
 | [docs/ps-assistant.md](docs/ps-assistant.md) | PS 助手 tab（去紫）：算法口径、接口、像素上限与排障 |
+| [docs/free-video-tab.md](docs/free-video-tab.md) | 自由视频 tab（通用 wan3.0）：用法、接口、参数口径、数据落盘、并发计费与限制 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
 | [README.md](README.md) | 对外说明与快速开始 |

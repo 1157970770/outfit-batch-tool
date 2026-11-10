@@ -29,6 +29,7 @@ from app import config as appconfig
 from app import depurple
 from app import traffic
 from app.imggen import ImageGenError, ImageGenManager
+from app.videogen import VideoGenError, VideoGenManager
 from app.media import MediaError, validate_image
 from app.prompts import PromptLibrary
 from app.runtime import build_storages
@@ -183,6 +184,9 @@ class WebApplication:
         # 生图 tab（老张 API）：任务落 web-data/imagegen/，与视频任务队列完全独立，
         # 互不抢在飞名额；配置来自 server/imagegen.json（缺失时该 tab 显示「未配置」）。
         self.imagegen = ImageGenManager(settings)
+        # 自由视频 tab（通用 wan3.0 生产）：独立的落盘目录与队列，不读模板清单、
+        # 不占 job 槽位；参考素材（视频/音频）需要 COS，图片可走 Base64。
+        self.videogen = VideoGenManager(settings)
 
     def resolve_upload(self, upload_id: str, owner: str) -> dict | None:
         """按 upload_id 取上传元数据；归属不符或文件已丢失返回 None。"""
@@ -521,7 +525,8 @@ def make_handler(app: WebApplication):
                                                 "unlisted_files": (app.catalog.tag_workbook_info or {}).get("unlisted_files"),
                                                 "manifest_warning": (app.catalog.tag_workbook_info or {}).get("manifest_warning", ""),
                                                "notice": cfg.get("NOTICE") or "",
-                                               "imagegen": app.imagegen.options()},
+                                               "imagegen": app.imagegen.options(),
+                                               "videogen": app.videogen.options()},
                                    "prompts": [{"id": k, "title": v["title"], "body": v["body"]} for k, v in app.prompts.items()]})
             if path == "/api/templates":
                 if not self._user():
@@ -588,6 +593,23 @@ def make_handler(app: WebApplication):
                                                user, reference=parts[4] == "references")
                 if len(parts) == 4:
                     return self._imagegen_detail(parts[3], user)
+            if path == "/api/videogen/tasks":
+                user = self._user()
+                if not user:
+                    return
+                return self._videogen_list(urllib.parse.parse_qs(parsed.query), user)
+            if path.startswith("/api/videogen/tasks/"):
+                user = self._user()
+                if not user:
+                    return
+                parts = path.strip("/").split("/")
+                query = urllib.parse.parse_qs(parsed.query)
+                if len(parts) == 6 and parts[4] == "videos":
+                    return self._videogen_file(parts[3], parts[5], query, user)
+                if len(parts) == 7 and parts[4] == "refs":
+                    return self._videogen_ref(parts[3], parts[5], parts[6], query, user)
+                if len(parts) == 4:
+                    return self._videogen_detail(parts[3], user)
             if path == "/api/style-usage":
                 user = self._user()
                 if not user:
@@ -762,6 +784,20 @@ def make_handler(app: WebApplication):
             # 视频上传是原始字节流（不用 JSON：50MB 走 base64 会白白多占 1/3 内存）
             if path == "/api/tags/videos/upload":
                 return self._upload_template(user)
+            # 自由视频的参考视频/音频同样走原始字节流（最大 100MB，不能先读成 JSON）。
+            if path == "/api/videogen/upload":
+                return self._videogen_upload(user)
+            # 取消不需要请求体：别走 _body()，否则空 body 会被当成格式错误。
+            if path.startswith("/api/videogen/tasks/") and path.endswith("/cancel"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 5:
+                    try:
+                        leftover = int(self.headers.get("Content-Length") or 0)
+                    except (TypeError, ValueError):
+                        leftover = 0
+                    if leftover > 0:
+                        self.rfile.read(leftover)
+                    return self._videogen_cancel(parts[3], user)
             try:
                 data = self._body()
             except LengthRequired as exc:
@@ -776,6 +812,8 @@ def make_handler(app: WebApplication):
                 return self._ps_depurple(data, user)
             if path == "/api/imagegen/tasks":
                 return self._imagegen_create(data, user)
+            if path == "/api/videogen/tasks":
+                return self._videogen_create(data, user)
             if path == "/api/jobs":
                 return self._create_job(data, user)
             if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -913,6 +951,10 @@ def make_handler(app: WebApplication):
                 parts = path.strip("/").split("/")
                 if len(parts) == 4:
                     return self._imagegen_delete(parts[3], user)
+            if path.startswith("/api/videogen/tasks/"):
+                parts = path.strip("/").split("/")
+                if len(parts) == 4:
+                    return self._videogen_delete(parts[3], user)
             return self._error("页面或接口不存在。", 404)
 
         def _login(self, data):
@@ -1294,6 +1336,131 @@ def make_handler(app: WebApplication):
             try:
                 app.imagegen.delete_task(task_id, user)
             except ImageGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True})
+
+        # ---------------------------------------------------------- 自由视频（通用 wan3.0）
+        def _videogen_list(self, query, user):
+            try:
+                limit = int(str(query.get("limit", ["40"])[0] or ""))
+            except (TypeError, ValueError):
+                limit = 40
+            return self._json({
+                "ok": True,
+                "items": app.videogen.list_tasks(user, limit=limit),
+                "configured": app.videogen.configured,
+                "reason": app.videogen.unconfigured_reason(),
+            })
+
+        def _videogen_detail(self, task_id, user):
+            try:
+                task = app.videogen.get_record(task_id, user)
+            except VideoGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True, "task": task})
+
+        def _videogen_create(self, data, user):
+            # 参考图复用 /api/uploads 的 upload_id（顺序即「图1、图2…」）；
+            # 参考视频/音频先走 /api/videogen/upload 拿 upload_id，这里只做引用。
+            slots, error = self._resolve_image_slots(data, user, allow_empty=True)
+            if slots is None:
+                return error
+            try:
+                task = app.videogen.create_task(user, data, slots)
+            except VideoGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True, "task": task}, 201)
+
+        def _videogen_upload(self, user):
+            """接收一段参考视频/音频（原始字节流）：边收边写临时文件，再交管理器校验登记。"""
+            def reject(message, status=400):
+                self.log_message("videogen upload rejected [%s]: %s", status, message)
+                return self._error(message, status)
+
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if length <= 0:
+                return reject("请选择要上传的素材。", 400)
+            kind = str(self.headers.get("X-Kind") or "").strip().lower()
+            if kind not in ("video", "audio"):
+                return reject("素材类型无效。", 400)
+            limit_mb = 100 if kind == "video" else 15
+            if length > limit_mb * 1024 * 1024:
+                return reject(f"单个{'视频' if kind == 'video' else '音频'}不能超过 {limit_mb}MB。", 413)
+            raw_name = urllib.parse.unquote(self.headers.get("X-File-Name", ""))
+            filename = Path(raw_name).name or ("reference.mp4" if kind == "video" else "reference.mp3")
+            suffix = Path(filename).suffix.lower()
+            allowed = {".mp4", ".mov", ".m4v"} if kind == "video" else {".wav", ".mp3"}
+            if suffix not in allowed:
+                return reject("视频只收 mp4/mov/m4v，音频只收 wav/mp3。", 400)
+            folder = app.settings.data_dir / "videogen" / "tmp"
+            folder.mkdir(parents=True, exist_ok=True)
+            temp = folder / f"{uuid.uuid4().hex}{suffix}"
+            remaining = length
+            try:
+                with temp.open("wb") as handle:
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            raise ConnectionError("连接中断，文件未传完")
+                        handle.write(chunk)
+                        remaining -= len(chunk)
+                item = app.videogen.add_upload(user, temp, filename, kind)
+            except ConnectionError as exc:
+                return reject(f"接收文件失败：{exc}", 400)
+            except OSError as exc:
+                return reject(f"保存文件失败：{exc}", 400)
+            except VideoGenError as exc:
+                return reject(str(exc), exc.status)
+            finally:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return self._json({"ok": True, "upload": item}, 201)
+
+        def _videogen_file(self, task_id, raw_index, query, user):
+            if not re.fullmatch(r"[a-f0-9]{32}", str(task_id or "")):
+                return self._error("找不到这条视频。", 404)
+            try:
+                index = int(str(raw_index or ""))
+            except (TypeError, ValueError):
+                return self._error("找不到这条视频。", 404)
+            try:
+                path, name = app.videogen.video_file(task_id, index, user)
+            except VideoGenError as exc:
+                return self._error(str(exc), exc.status)
+            download = str(query.get("download", ["0"])[0]).lower() in ("1", "true", "yes")
+            return self._send_file(path, "video/mp4", name, inline=not download, attachment=download)
+
+        def _videogen_ref(self, task_id, kind, raw_index, query, user):
+            if not re.fullmatch(r"[a-f0-9]{32}", str(task_id or "")):
+                return self._error("找不到这个素材。", 404)
+            try:
+                index = int(str(raw_index or ""))
+            except (TypeError, ValueError):
+                return self._error("找不到这个素材。", 404)
+            try:
+                path, name = app.videogen.reference_file(task_id, kind, index, user)
+            except VideoGenError as exc:
+                return self._error(str(exc), exc.status)
+            download = str(query.get("download", ["0"])[0]).lower() in ("1", "true", "yes")
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            return self._send_file(path, mime, name, inline=not download, attachment=download)
+
+        def _videogen_cancel(self, task_id, user):
+            try:
+                task = app.videogen.cancel_task(task_id, user)
+            except VideoGenError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True, "task": task})
+
+        def _videogen_delete(self, task_id, user):
+            try:
+                app.videogen.delete_task(task_id, user)
+            except VideoGenError as exc:
                 return self._error(str(exc), exc.status)
             return self._json({"ok": True})
 

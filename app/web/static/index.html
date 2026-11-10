@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <link rel="stylesheet" href="/static/ps.css?v=20261109b">
   <link rel="stylesheet" href="/static/imagegen.css?v=20261109c">
+  <link rel="stylesheet" href="/static/videogen.css?v=20261110a">
   <link rel="stylesheet" href="/static/canvas/canvas.css?v=20261109t">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
@@ -19,6 +20,7 @@
   <script defer src="/static/tag.js?v=20261104d"></script>
   <script defer src="/static/ps.js?v=20261109d"></script>
   <script defer src="/static/imagegen.js?v=20261109e"></script>
+  <script defer src="/static/videogen.js?v=20261110a"></script>
   <script defer src="/static/canvas/canvas.js?v=20261109t"></script>
 </head>
 <body>
@@ -61,6 +63,7 @@
         <button id="material-tab" class="tab" data-view="material-view">素材检索</button>
         <button id="ps-tab" class="tab" data-view="ps-view">PS助手</button>
       <button id="imagegen-tab" class="tab" data-view="imagegen-view">生图</button>
+      <button id="videogen-tab" class="tab" data-view="videogen-view">自由视频</button>
       <button id="canvas-tab" class="tab" data-view="canvas-view">画布</button>
         <a class="tab tab-link" href="https://www.runninghub.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开 RunningHub">RunningHub ↗</a>
       </nav>
@@ -625,6 +628,91 @@
             </div>
             <div id="ig-tasks" class="ig-tasks"></div>
             <p id="ig-empty" class="empty">还没有生成记录。填好提示词点「生成」，图片会出现在这里。</p>
+          </section>
+        </div>
+      </section>
+
+      <section id="videogen-view" class="view">
+        <div class="section-head">
+          <div>
+            <h1>自由视频</h1>
+            <p class="muted">通用 wan3.0 生产：文生视频、参考图生视频、参考视频编辑、配音，不必先选模板或款号。成品存在本机 web-data/videogen/，重启不丢。</p>
+          </div>
+          <div class="top-actions">
+            <button id="vg-refresh" class="quiet" type="button">刷新记录</button>
+          </div>
+        </div>
+
+        <div class="vg-layout">
+          <article class="card vg-composer">
+            <label class="vg-field">
+              <span class="vg-label">提示词</span>
+              <textarea id="vg-prompt" rows="6" maxlength="20000" placeholder="描述画面、动作、镜头与风格；引用参考素材时写「图1」「视频1」「音频1」"></textarea>
+              <span id="vg-prompt-count" class="muted vg-count">0 / 20000</span>
+            </label>
+
+            <label class="vg-field">
+              <span class="vg-label">反向提示词 <span class="muted">（可选）</span></span>
+              <input id="vg-negative" type="text" maxlength="2000" placeholder="不希望出现的内容，例如：模糊、文字、多余手指">
+            </label>
+
+            <div class="vg-field">
+              <span class="vg-label">参考图 <span class="muted">（可选，最多 10 张；顺序即「图1、图2…」）</span></span>
+              <label class="drop-zone vg-drop" for="vg-files">
+                <input id="vg-files" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.bmp" aria-label="选择参考图">
+                <strong>点击或拖入参考图</strong>
+                <span class="muted vg-drop-note">JPG / PNG / WebP / BMP，单张 ≤20MB</span>
+              </label>
+              <div id="vg-refs" class="vg-refs"></div>
+            </div>
+
+            <div class="vg-grid">
+              <div class="vg-field">
+                <span class="vg-label">参考视频 <span class="muted">（≤5 段，单段 ≤15 秒）</span></span>
+                <label class="quiet vg-upload-btn" for="vg-videos">+ 添加视频</label>
+                <input id="vg-videos" class="vg-file-input" type="file" multiple accept=".mp4,.mov,.m4v,video/mp4,video/quicktime" aria-label="选择参考视频">
+                <div id="vg-video-list" class="vg-file-list"></div>
+              </div>
+              <div class="vg-field">
+                <span class="vg-label">参考音频 <span class="muted">（≤5 段）</span></span>
+                <label class="quiet vg-upload-btn" for="vg-audios">+ 添加音频</label>
+                <input id="vg-audios" class="vg-file-input" type="file" multiple accept=".wav,.mp3,audio/wav,audio/mpeg" aria-label="选择参考音频">
+                <div id="vg-audio-list" class="vg-file-list"></div>
+              </div>
+            </div>
+
+            <div class="vg-grid vg-grid-3">
+              <label class="vg-field"><span class="vg-label">生成方式</span><select id="vg-mode" title="自动模式会按素材推断"></select></label>
+              <label class="vg-field"><span class="vg-label">分辨率</span><select id="vg-resolution"></select></label>
+              <label class="vg-field"><span class="vg-label">画面比例</span><select id="vg-ratio"></select></label>
+            </div>
+            <div class="vg-grid vg-grid-3">
+              <label class="vg-field"><span class="vg-label">时长</span><select id="vg-duration"></select></label>
+              <label class="vg-field"><span class="vg-label">生成条数</span><select id="vg-count"></select></label>
+              <label class="vg-field"><span class="vg-label">种子 <span class="muted">（留空随机）</span></span><input id="vg-seed" type="number" min="-1" max="2147483647" step="1" placeholder="随机"></label>
+            </div>
+
+            <div class="vg-switches">
+              <label class="vg-check"><input id="vg-audio" type="checkbox"> 生成配音</label>
+              <label class="vg-check"><input id="vg-prompt-extend" type="checkbox"> 提示词扩写</label>
+              <label class="vg-check"><input id="vg-watermark" type="checkbox"> 加水印</label>
+            </div>
+
+            <div class="vg-actions">
+              <button id="vg-submit" class="primary" type="button">开始生成</button>
+              <button id="vg-clear" class="quiet" type="button">清空</button>
+              <span id="vg-hint" class="muted vg-hint"></span>
+            </div>
+            <p id="vg-error" class="error hidden"></p>
+          </article>
+
+          <section class="vg-history" aria-label="生成记录">
+            <div class="vg-history-head">
+              <h2>生成记录</h2>
+              <span id="vg-status" class="muted"></span>
+            </div>
+            <div id="vg-tasks" class="vg-tasks"></div>
+            <p id="vg-empty" class="empty">还没有生成记录。写清提示词（需要时补参考图/视频/音频），点「开始生成」。</p>
           </section>
         </div>
       </section>
