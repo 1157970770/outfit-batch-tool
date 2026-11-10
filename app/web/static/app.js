@@ -91,6 +91,7 @@
     if (id === 'material-view') mountMaterialFrame();
     if (id === 'ps-view' && window.PsUI) window.PsUI.enter();
     if (id === 'imagegen-view' && window.ImageGenUI) window.ImageGenUI.enter();
+    if (id === 'videogen-view' && window.VideoGenUI) window.VideoGenUI.enter();
     if (id !== 'canvas-view' && window.CanvasUI) window.CanvasUI.leave();
     if (id === 'canvas-view' && window.CanvasUI) window.CanvasUI.enter();
   }
@@ -99,7 +100,7 @@
   function restoreView() {
     let saved = '';
     try { saved = localStorage.getItem(VIEW_KEY) || ''; } catch (_) { return; }
-    if (!['create-view', 'history-view', 'admin-view', 'tag-view', 'material-view', 'ps-view', 'imagegen-view', 'canvas-view'].includes(saved)) return;
+    if (!['create-view', 'history-view', 'admin-view', 'tag-view', 'material-view', 'ps-view', 'imagegen-view', 'videogen-view', 'canvas-view'].includes(saved)) return;
     const tab = document.querySelector(`.tab[data-view="${saved}"]`);
     if (!tab || tab.classList.contains('hidden')) return;
     if (!document.getElementById(saved)) return;
