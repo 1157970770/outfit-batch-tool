@@ -1,0 +1,283 @@
+/* 通用组件基元：面板、分段控件、chip、按钮、表格、提示条。
+   这些类名尽量贴近原生版（.panel / .segmented / .chip / .btn-sm），
+   后面移植大批量、打标、管理页时可以直接复用，不用再各写一套。 */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.panel-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.panel-head b {
+  font-size: 15px;
+}
+
+.panel-head small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(76, 141, 255, 0.16);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  flex: none;
+}
+
+.panel-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.field-row .field {
+  flex: 1;
+}
+
+.field select,
+.field textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2, #10141a);
+  color: var(--text);
+  font: inherit;
+}
+
+.field textarea {
+  min-height: 150px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+/* 分段控件：原生版所有「N 条」「自动推荐 / 我来挑选」都是这一套 */
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  background: var(--panel-2, #10141a);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.segmented button,
+.segmented .segment {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.segmented button.active,
+.segmented button:hover,
+.segmented .segment:has(input:checked) {
+  background: rgba(76, 141, 255, 0.18);
+  color: var(--text);
+}
+
+.segmented-sm button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* chip：状态徽标 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.chip-ok {
+  color: #58d68d;
+  border-color: rgba(88, 214, 141, 0.4);
+  background: rgba(88, 214, 141, 0.1);
+}
+
+.chip-warn {
+  color: #f5b041;
+  border-color: rgba(245, 176, 65, 0.4);
+  background: rgba(245, 176, 65, 0.1);
+}
+
+.chip-bad {
+  color: #ec7063;
+  border-color: rgba(236, 112, 99, 0.4);
+  background: rgba(236, 112, 99, 0.1);
+}
+
+.chip-busy {
+  color: var(--accent);
+  border-color: rgba(76, 141, 255, 0.4);
+  background: rgba(76, 141, 255, 0.1);
+}
+
+.chip-muted {
+  color: var(--muted);
+}
+
+/* 按钮：与原生 .primary / .quiet / .btn-sm 同名，方便对照 */
+.primary {
+  border: 0;
+  border-radius: 9px;
+  padding: 10px 18px;
+  background: linear-gradient(180deg, #5b9bff, #3a7bf0);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.quiet {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.quiet:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-sm {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.link-button {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.link-button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.error {
+  color: #ec7063;
+  font-size: 13px;
+  margin: 10px 0 0;
+}
+
+.error-banner,
+.notice-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.error-banner {
+  color: #ffb3a7;
+  border: 1px solid rgba(236, 112, 99, 0.35);
+  background: rgba(236, 112, 99, 0.1);
+}
+
+.notice-banner {
+  color: #cfe0ff;
+  border: 1px solid rgba(76, 141, 255, 0.28);
+  background: rgba(76, 141, 255, 0.08);
+}
+
+/* 款号标签输入：6 格自适应 */
+.tag-input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.tag-input-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tag-input-grid input {
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2, #10141a);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* 表格：任务记录、管理端用量都用这套 */
+table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.data-table th,
+table.data-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+table.data-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+}

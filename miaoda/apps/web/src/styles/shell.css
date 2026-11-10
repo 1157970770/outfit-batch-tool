@@ -1,0 +1,334 @@
+/* P0 外壳样式：只覆盖 boot / login / topbar / tabs / 占位页；
+   业务页样式在 P1–P5 逐步从 app/web/static/*.css 迁入并做作用域收敛。 */
+
+:root {
+  --bg: #0f1216;
+  --panel: #171b21;
+  --panel-2: #1e242c;
+  --line: #2a323c;
+  --text: #e8edf3;
+  --muted: #93a1b1;
+  --accent: #4c8dff;
+  --accent-2: #2f6fe4;
+  --danger: #f15b5b;
+  --ok: #3ec27a;
+  --radius: 10px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+}
+
+.view {
+  display: none;
+}
+
+.view.active-view {
+  display: block;
+}
+
+.boot-view,
+.login-view {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+}
+
+.boot-view.active-view,
+.login-view.active-view {
+  display: grid;
+}
+
+.boot-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.boot-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.login-card {
+  width: min(360px, calc(100vw - 32px));
+  padding: 28px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.login-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.login-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  min-height: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field input {
+  height: 38px;
+  padding: 0 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn {
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+.btn-ghost {
+  height: 30px;
+  font-size: 12px;
+  background: transparent;
+}
+
+.app-view {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dev-chip {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #3a2f14;
+  color: #e5b567;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.service-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.who {
+  color: var(--muted);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 18px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+.tab {
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab.active {
+  background: var(--bg);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.views {
+  flex: 1;
+  padding: 18px;
+}
+
+.placeholder {
+  max-width: 760px;
+  display: grid;
+  gap: 10px;
+}
+
+.placeholder-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.placeholder-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.phase-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.placeholder-summary {
+  margin: 0;
+  color: var(--text);
+  opacity: 0.86;
+}
+
+.placeholder-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  display: grid;
+  gap: 4px;
+}
+
+.notice-bar {
+  margin: 0 18px 10px;
+  padding: 8px 12px;
+  border: 1px solid #4a3a12;
+  border-radius: 8px;
+  background: #241d0d;
+  color: #e5b567;
+  font-size: 12px;
+}
+
+.foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.muted {
+  opacity: 0.7;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translate(-50%, 12px);
+  padding: 9px 16px;
+  border-radius: 8px;
+  background: #222a33;
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  z-index: 9000;
+}
+
+.toast.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.toast-error {
+  border-color: #6b2b2b;
+  background: #35191a;
+}
+
+.toast-success {
+  border-color: #2b6b45;
+  background: #16301f;
+}
