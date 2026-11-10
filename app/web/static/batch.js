@@ -1506,17 +1506,18 @@
     // 失败条目给一个重试入口（接口 #9），否则 failed 条目在页面上就是死路。
     const retryBox = $('batch-retry');
     retryBox.replaceChildren();
-    // 超时条目（P0）：先按原 taskId 复查一次云端，出片就补下载，**不要直接重试**——
+    // 超时 / 下载失败条目（P0）：先按原 taskId 复查一次云端，出片就补下载，**不要直接重试**——
     // 直接重试会重新提交，而上一次云端大概率已经出片并计费了。
     const timeoutJobs = Array.isArray(batch.timeout_jobs) ? batch.timeout_jobs : [];
+    const dlFailed = Number(batch.download_failed_items) || 0;
     if (timeoutJobs.length) {
-      const recheck = el('button', 'primary', '复查超时任务');
+      const recheck = el('button', 'primary', `复查补下载（${timeoutJobs.length} 个任务）`);
       recheck.type = 'button';
       recheck.disabled = b.busy;
-      recheck.title = '按原 taskId 查询云端：已出片的直接补下载，不重新提交、不二次计费';
+      recheck.title = '按原 taskId 查询云端：已出片/已计费的直接补下载，不重新提交、不二次计费';
       recheck.addEventListener('click', () => recheckBatch(batch));
       retryBox.append(recheck, el('span', 'muted',
-        `有 ${timeoutJobs.length} 个任务含等待超时的条目；先复查，确认云端真失败再重试。`));
+        `有 ${timeoutJobs.length} 个任务含等待超时/下载失败的条目；先复查，确认云端真失败再重试。`));
       retryBox.classList.remove('hidden');
     }
     if (failed > 0) {
@@ -1525,10 +1526,12 @@
       retry.type = 'button';
       retry.disabled = b.busy || !!activeId || closed;
       retry.title = activeId ? '当前批次还有任务在跑'
-        : timeoutJobs.length ? '其中含等待超时的条目：建议先点「复查超时任务」，直接重试会二次计费'
+        : timeoutJobs.length ? '其中含等待超时/下载失败的条目：建议先点「复查补下载」，直接重试会二次计费'
         : '只重跑失败条目，不改清单';
       retry.addEventListener('click', () => retryFailed(batch, retryCount));
-      retryBox.append(retry, el('span', 'muted', '只重跑失败条目，已完成的不会重复提交。'));
+      retryBox.append(retry, el('span', 'muted',
+        dlFailed ? `只重跑失败条目；其中 ${dlFailed} 条是「云端已出片、只是下载失败」，会被跳过，请用「复查补下载」补回来。`
+          : '只重跑失败条目，已完成的不会重复提交。'));
       retryBox.classList.remove('hidden');
     }
     if (!retryBox.childNodes.length) retryBox.classList.add('hidden');
@@ -1587,10 +1590,12 @@
   async function retryFailed(batch, count) {
     if (b.busy || !batch || !batch.id) return;
     const timeoutJobs = Array.isArray(batch.timeout_jobs) ? batch.timeout_jobs : [];
+    const dlFailed = Number(batch.download_failed_items) || 0;
     const warn = timeoutJobs.length
-      ? `\n\n注意：这批里还有等待超时的条目（${timeoutJobs.length} 个任务）。\n超时的含义是「本机没等到」，云端多数已经出片并计费了——\n直接重试会让同一条模板二次提交、二次计费。\n建议先点「复查超时任务」。`
+      ? `\n\n注意：这批里还有等待超时/下载失败的条目（${timeoutJobs.length} 个任务）。\n超时/下载失败的含义是「云端很可能已经出片并计费，只是本机没拿到」——\n直接重试会让同一条模板二次提交、二次计费。\n建议先点「复查补下载」。`
       : '';
-    if (!confirm(`重试失败的 ${count} 条？${warn}\n\n提交后不能撤回。`)) return;
+    const skipNote = dlFailed ? `\n\n其中 ${dlFailed} 条是「云端已出片、只是下载失败」，本次会跳过。` : '';
+    if (!confirm(`重试失败的 ${count} 条？${warn}${skipNote}\n\n提交后不能撤回。`)) return;
     b.busy = true;
     renderProduce(batch);
     try {
@@ -1598,7 +1603,10 @@
         method: 'POST',
         body: JSON.stringify({ count }),
       });
-      toast(`已重新排入 ${num(data.taken, count)} 条失败条目。`);
+      const skippedDl = Number(data.skipped_download_failed) || 0;
+      toast(skippedDl
+        ? `已重新排入 ${num(data.taken, count)} 条；${skippedDl} 条「云端已出片、只是下载失败」已跳过（请点「复查补下载」）。`
+        : `已重新排入 ${num(data.taken, count)} 条失败条目。`);
       b.busy = false;
       await refreshBatch(false);
     } catch (err) {
@@ -1617,7 +1625,7 @@
      由服务端 _heal_items 自动从「失败」变成「已完成」。 */
   async function recheckBatch(batch) {
     if (b.busy || !batch || !batch.id) return;
-    if (!confirm('把这一批里等待超时的条目按原 taskId 问一次云端？\n\n只查询、不重新提交：云端已出片的会直接补下载；\n云端确实失败的才转成「失败」，那时再重试不会二次计费。')) return;
+    if (!confirm('把这一批里等待超时 / 下载失败的条目按原 taskId 问一次云端？\n\n只查询、不重新提交：云端已出片（已计费）的会直接补下载；\n云端确实失败的才转成「失败」，那时再重试不会二次计费。')) return;
     b.busy = true;
     renderProduce(batch);
     try {
@@ -1628,8 +1636,8 @@
       const started = Array.isArray(data.jobs) ? data.jobs.length : 0;
       const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
       toast(started
-        ? `已开始复查 ${started} 个任务的超时条目${skipped ? `（${skipped} 个已在复查中，跳过）` : ''}，稍后刷新看结果。`
-        : '没有可复查的超时条目。');
+        ? `已开始复查 ${started} 个任务的超时/下载失败条目${skipped ? `（${skipped} 个已在复查中，跳过）` : ''}，稍后刷新看结果。`
+        : '没有可复查的超时/下载失败条目。');
       b.busy = false;
       // 复查是后台线程：3 分钟内保持轮询，等补下载把条目翻成已完成。
       b.recheckPoll = Date.now() + 180000;

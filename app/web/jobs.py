@@ -134,6 +134,31 @@ def clean_style_no(value) -> str:
 # timeout（等待超时）可重试：云端大概率已出片，但重试是用户核对后的显式选择。
 _RETRYABLE_RECORD_STATES = frozenset({"failed", "invalid", "expired", "canceled", "skipped", "timeout"})
 
+
+def needs_recheck(rec: dict) -> bool:
+    """这条记录该走「复查补下载」，而不是「重试」。
+
+    两种情况，共同点是**云端可能已经出片并按秒计费了**，重试 = 重新提交 = 二次计费：
+
+    1. `status == "timeout"`：本机没在时限内等到结果，云端多半已经出片；
+    2. `download_failed`：云端明确已出片（有 usage、已记账），只是本机取文件失败
+       ——2026-11-10 job b1cc 就是这种情况（TLS 断流），错的只是本机这一步。
+
+    复查只按原 taskId 查询 + 补下载，补好了记录会自己翻成 success。
+    """
+    rec = rec or {}
+    return str(rec.get("status") or "") == "timeout" or bool(rec.get("download_failed"))
+
+
+def retry_blocked_download_failed(job: dict) -> list[dict]:
+    """重试会把它们重新提交、二次计费的条目（云端已出片，只是下载失败）。
+
+    给自己重试时：这些必须排除，计数回传给前端好提示「已跳过 N 条」。
+    """
+    return [rec for rec in (job or {}).get("records") or []
+            if rec.get("status") in _RETRYABLE_RECORD_STATES and needs_recheck(rec)
+            and rec.get("download_failed")]
+
 # 统计口径里的「失败侧」：非成功终态全部计入，保证 items = success + failed + unfinished。
 # unknown（提交结果未知/停止等待）云端可能已建任务并计费，必须算失败侧而非静默消失；
 # skipped 与 timeout 一样在重试白名单里，同属失败侧。
@@ -653,10 +678,9 @@ class JobManager:
                 raise ValueError("任务还在跑，跑完再复查")
             if (job.get("recheck") or {}).get("running"):
                 raise ValueError("上一次复查还没结束，请稍等")
-            targets = [rec for rec in job.get("records") or []
-                       if str(rec.get("status") or "") == "timeout"]
+            targets = [rec for rec in job.get("records") or [] if needs_recheck(rec)]
             if not targets:
-                raise ValueError("没有等待超时的条目需要复查")
+                raise ValueError("没有等待超时或下载失败的条目需要复查")
             job["recheck"] = {
                 "running": True,
                 "auto": bool(auto),
@@ -668,7 +692,8 @@ class JobManager:
                 "errors": 0,
                 "started_at": time.time(),
                 "finished_at": None,
-                "message": f"正在向云端复查 {len(targets)} 条超时任务（只查询，不重新提交）…",
+                "message": (f"正在向云端复查 {len(targets)} 条超时/下载失败任务"
+                            "（只查询，不重新提交）…"),
             }
             self._save(job)
             self.changed.notify_all()
@@ -686,12 +711,11 @@ class JobManager:
                 if job is None:
                     return
                 records = {str(rec.get("id")): dict(rec) for rec in job.get("records") or []}
-                targets = [rec for rec in records.values()
-                           if str(rec.get("status") or "") == "timeout"]
+                targets = [rec for rec in records.values() if needs_recheck(rec)]
                 out_dir = relocate(job.get("out_dir"), self.root, must_exist=False)
                 spec = self._build_spec(job, Path(out_dir))
             runner = BatchRunner(spec, log=lambda m: self._append_log(job_id, m))
-            self._append_log(job_id, f"复查超时任务：{len(targets)} 条，按原 taskId 向云端查询")
+            self._append_log(job_id, f"复查超时/下载失败任务：{len(targets)} 条，按原 taskId 向云端查询")
 
             def on_update(rec: dict) -> None:
                 with self.changed:
@@ -786,7 +810,7 @@ class JobManager:
             return
         if (job.get("recheck") or {}).get("auto"):
             return
-        if not any(str(r.get("status") or "") == "timeout" for r in job.get("records") or []):
+        if not any(needs_recheck(r) for r in job.get("records") or []):
             return
 
         def _later() -> None:
@@ -850,9 +874,19 @@ class JobManager:
             if source.get("status") not in {"partial", "failed", "canceled"}:
                 raise ValueError("任务尚未结束，暂时不能重试")
             failed_ids = {str(r.get("id")) for r in source.get("records", [])
-                          if r.get("status") in _RETRYABLE_RECORD_STATES}
+                          if r.get("status") in _RETRYABLE_RECORD_STATES
+                          and not needs_recheck(r)}
             selected = [dict(t) for t in source.get("templates", []) if str(t.get("id")) in failed_ids]
             if not selected:
+                # 云端已出片、只是本机取文件失败的条目（download_failed）：它在重试白名单里，
+                # 但重试 = 重新提交 = 二次计费（b1cc 教训）。先复查补下载，补回来自己就成功了。
+                blocked = retry_blocked_download_failed(source)
+                if blocked:
+                    raise ValueError(
+                        f"其中 {len(blocked)} 条是「云端已出片、只是下载失败」的条目："
+                        "重试会重新提交同一条模板、二次计费。"
+                        "请先点「复查补下载」按原 taskId 把成片补回来——补成功后条目会自己变成已完成。"
+                    )
                 if any(str(r.get("status")) == "running" for r in source.get("records", [])):
                     raise ValueError("还有条目在等云端出片，请稍后再重试")
                 unknown = sum(1 for r in source.get("records", []) if str(r.get("status")) == "unknown")
@@ -1149,7 +1183,9 @@ class JobManager:
                 safe["summary"] = None
             safe["records"] = []
             record_keys = ("id", "status", "seconds", "error", "task_id", "request_id",
-                           "billable_seconds", "estimated_cost", "verify", "cos_key")
+                           "billable_seconds", "estimated_cost", "verify", "cos_key",
+                           # 云端已出片、只是下载失败：前端据此把「重试」提示成「复查补下载」。
+                           "download_failed")
             if not admin:
                 record_keys = tuple(k for k in record_keys if k not in _MONEY_KEYS)
             for rec in job.get("records", []):
