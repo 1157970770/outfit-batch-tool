@@ -6,6 +6,8 @@ import { bootstrap } from '@/session';
 import '@/styles/shell.css';
 import '@/styles/components.css';
 import '@/styles/create.css';
+import '@/styles/batch.css';
+import '@/styles/history.css';
 
 const host = document.getElementById('root');
 if (!host) throw new Error('缺少 #root 挂载点');

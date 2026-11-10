@@ -3,11 +3,11 @@ import { useEffect, type ComponentType } from 'react';
 import { isAdmin, logout, useSession } from '@/session';
 import { BootView, LoginView } from '@/pages/Entry';
 import { CreatePage } from '@/pages/CreatePage';
+import { BatchPage } from '@/pages/BatchPage';
+import { HistoryPage } from '@/pages/HistoryPage';
 import {
   AdminPlaceholder,
-  BatchPlaceholder,
   CanvasPlaceholder,
-  HistoryPlaceholder,
   ImageGenPlaceholder,
   MaterialPlaceholder,
   PsPlaceholder,
@@ -22,8 +22,8 @@ const MATERIAL_URL = 'http://192.168.10.179:8700';
 
 const PAGES: Record<string, ComponentType> = {
   create: CreatePage,
-  batch: BatchPlaceholder,
-  history: HistoryPlaceholder,
+  batch: BatchPage,
+  history: HistoryPage,
   admin: AdminPlaceholder,
   tag: TagPlaceholder,
   material: MaterialPlaceholder,

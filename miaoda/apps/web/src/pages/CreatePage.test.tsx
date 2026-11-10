@@ -1,14 +1,12 @@
 /**
  * 小批量试跑页的渲染级自检（jsdom）：确认外壳、10 个图片槽位、候选场景、提交按钮都在，
  * 并且切到「历史」页签时不会炸。真实浏览器里的视觉与拖拽手感仍靠人工验收。
+ *
+ * 注意：App 会把所有页面都挂载（只切 active-view 类），批次页也渲染了一套槽位，
+ * 所以断言必须限定在 `#create-view` 里，不能全文档查。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-
-vi.mock('@/session', async () => {
-  const actual = await vi.importActual<typeof import('@/session')>('@/session');
-  return actual;
-});
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const TEMPLATES = {
   ok: true,
@@ -88,6 +86,7 @@ beforeEach(() => {
       const url = String(input);
       if (url.includes('/api/bootstrap')) return json(BOOTSTRAP);
       if (url.includes('/api/templates')) return json(TEMPLATES);
+      if (url.includes('/api/batches')) return json({ ok: true, batches: [] });
       if (url.includes('/api/jobs')) return json({ ok: true, jobs: [], queued: 0, max_active: 2 });
       return json({ ok: false, error: '未命中 mock' }, 404);
     }),
@@ -106,34 +105,43 @@ async function renderReadyApp() {
   return render(<App />);
 }
 
+function createView(): HTMLElement {
+  const node = document.getElementById('create-view');
+  if (!node) throw new Error('缺少 #create-view');
+  return node;
+}
+
 describe('CreatePage', () => {
   it('渲染十个图片槽位、候选场景与提交按钮', async () => {
-    const { container } = await renderReadyApp();
+    await renderReadyApp();
+    const view = within(createView());
 
-    await waitFor(() => expect(container.querySelectorAll('.slot-cell')).toHaveLength(10));
+    await waitFor(() => expect(createView().querySelectorAll('.slot-cell')).toHaveLength(10));
     expect(screen.getAllByText('小批量试跑').length).toBeGreaterThan(0);
-    expect(screen.getByText('定妆图（必填）')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '确认提交' })).toBeTruthy();
-    expect(screen.getByText('换装有字幕')).toBeTruthy();
+    expect(view.getByText('定妆图（必填）')).toBeTruthy();
+    expect(view.getByRole('button', { name: '确认提交' })).toBeTruthy();
+    expect(view.getByText('换装有字幕')).toBeTruthy();
 
-    fireEvent.click(screen.getByText('我来挑选'));
-    await waitFor(() => expect(container.querySelectorAll('.pick-card')).toHaveLength(2));
-    expect(screen.getByText('#001')).toBeTruthy();
+    fireEvent.click(view.getByText('我来挑选'));
+    await waitFor(() => expect(createView().querySelectorAll('.pick-card')).toHaveLength(2));
+    expect(view.getByText('#001')).toBeTruthy();
   });
 
   it('切到历史页签显示空状态而不是报错', async () => {
     await renderReadyApp();
-    fireEvent.click(screen.getByRole('button', { name: '历史' }));
-    await waitFor(() => expect(screen.getByText('试跑历史')).toBeTruthy());
-    expect(document.body.textContent).toContain('还没有试跑任务');
+    const view = within(createView());
+    fireEvent.click(view.getByRole('button', { name: '历史' }));
+    await waitFor(() => expect(view.getByText('试跑历史')).toBeTruthy());
+    expect(createView().textContent).toContain('还没有试跑任务');
   });
 
   it('没选图片就提交会给出提示，而不是发请求', async () => {
     await renderReadyApp();
-    const submit = screen.getByRole('button', { name: '确认提交' }) as HTMLButtonElement;
+    const view = within(createView());
+    const submit = view.getByRole('button', { name: '确认提交' }) as HTMLButtonElement;
     // 候选集加载完之前按钮是禁用的，先等它可用再点
     await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
-    await waitFor(() => expect(screen.getByText('请先上传服装图片。')).toBeTruthy());
+    await waitFor(() => expect(view.getByText('请先上传服装图片。')).toBeTruthy());
   });
 });

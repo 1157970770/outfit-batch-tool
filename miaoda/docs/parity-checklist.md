@@ -36,15 +36,15 @@
 
 ## P2 · 批次与历史
 
-- [ ] 状态机：`draft → locked → closed`；条目 `pending/producing/done/failed`；无独立 `running`（由 `active_job_id` 派生）
-- [ ] 读时对账：job 状态回写条目；producing 条目在重启后可恢复/落失败
-- [ ] 锁定后只能增删细节图（主图不可换），删后序号左移
-- [ ] 生产轮次 5/10/20/50/100；单批 ≤500；单轮 ≤100；重试 1..100
-- [ ] 一 batch 一文件、原子写；删除批次只删 JSON 不动视频
-- [ ] 历史分组：`group_by=owner|day|none`；未分组键 `__ungrouped__`
-- [ ] 管理员 `?scope=all`、按 `owner` 过滤；普通账号只见自己
-- [ ] 整批 ZIP：多轮收集、试跑资格判定、`probe` 与 HTTP zip 一致
-- [ ] 三栏对比层（定妆图 + 生成视频 + 模板视频），Esc/遮罩关闭
+- [x] 状态机：`draft → locked → closed`；条目 `pending/producing/done/failed`；无独立 `running`（由 `active_job_id` 派生）
+- [x] 读时对账：job 状态回写条目（`p2-smoke` 实测 5/5 转 `done`、`active_job_id` 清空）；producing 条目重启后落失败——**未做重启实测**
+- [x] 锁定后只能增删细节图（主图不可换），删后序号左移；关闭批次后改图 409
+- [x] 生产轮次 5/10/20/50/100；单批 ≤500；单轮 ≤100；重试 1..100
+- [x] 一 batch 一文件、原子写；删除批次只删 JSON 不动视频
+- [x] 历史分组：`group_by=owner|day|none`；未分组键 `__ungrouped__`（批量分组已实测，`owner`/`day` 仅代码与单测覆盖）
+- [ ] 管理员 `?scope=all`、按 `owner` 过滤；普通账号只见自己（**仅单测覆盖，未做双账号端到端**）
+- [x] 整批 ZIP：多轮收集、试跑资格判定、`probe` 与 HTTP zip 一致
+- [x] 三栏对比层（定妆图 + 生成视频 + 模板视频），Esc/遮罩关闭
 
 ## P3 · 视频库与管理端
 
