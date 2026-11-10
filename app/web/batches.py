@@ -29,7 +29,7 @@ from pathlib import Path
 
 from app.web.jobs import (
     MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _FAILED_RECORD_STATES, _redact,
-    clean_style_no, clean_tags, duration_ok, image_slots,
+    clean_style_no, clean_tags, duration_ok, image_slots, needs_recheck,
 )
 from app.web.paths import relocate
 from app.web.style_usage import StyleUsageLedger
@@ -261,6 +261,7 @@ class BatchManager:
                         and str(rec.get("status")) == "success"):
                     item["state"] = "done"
                     item["error"] = ""
+                    item.pop("download_failed", None)
                     changed = True
                     break
         if changed:
@@ -308,14 +309,22 @@ class BatchManager:
             if status in _RECORD_DONE:
                 item["state"] = "done"
                 item["error"] = ""
+                item.pop("download_failed", None)
                 success += 1
             elif status in _RECORD_UNTOUCHED:
                 item["state"] = "pending"
                 item["job_id"] = ""
                 item["error"] = ""
+                item.pop("download_failed", None)
             else:
                 item["state"] = "failed"
                 item["error"] = _redact(str(rec.get("error") or ""))[:300] or f"任务状态 {status or '未知'}"
+                # 云端已出片、只是本机下载失败：标出来，重试时必须跳过（重试=二次提交=二次计费），
+                # 只能走「复查补下载」。
+                if rec.get("download_failed"):
+                    item["download_failed"] = True
+                else:
+                    item.pop("download_failed", None)
                 failed += 1
         batch["active_job_id"] = ""
         finished = time.time()
@@ -505,7 +514,7 @@ class BatchManager:
             job = self.jobs.jobs.get(job_id) if self.jobs is not None else None
             if not isinstance(job, dict):
                 continue
-            if any(str(rec.get("status")) == "timeout" for rec in job.get("records") or []):
+            if any(needs_recheck(rec) for rec in job.get("records") or []):
                 keep.append(job_id)
         return keep
 
@@ -547,9 +556,12 @@ class BatchManager:
             data["image_urls"] = [f"/api/uploads/{s['upload_id']}" for s in slots if s.get("upload_id")]
             data["image_names"] = [s["name"] for s in slots]
             data["runs"] = [dict(run) for run in (batch.get("runs") or [])]
-            # 还有超时记录的 job：前端据此显示「复查超时任务」按钮，
+            # 还有超时/下载失败记录的 job：前端据此显示「复查补下载」按钮，
             # 复查成功时批次条目会被 _heal_items 自动改回已完成。
             data["timeout_jobs"] = self._timeout_jobs(batch)
+            # 云端已出片、只是下载失败的条目数：重试会跳过它们，前端要把话说清楚。
+            data["download_failed_items"] = sum(
+                1 for item in (batch.get("items") or []) if item.get("download_failed"))
             return data
 
     def _record_index(self, cache: dict[str, dict], job_id: str) -> dict[str, dict]:
@@ -882,7 +894,16 @@ class BatchManager:
                 raise BatchError(f"第 {index} 张批次图片已丢失，请重新上传或新开批次。", 404)
         image_path = Path(slots[0]["path"])
         queue = [item for item in (batch.get("items") or []) if item.get("state") in wanted]
+        # 「云端已出片、只是下载失败」的条目绝不能重跑：重跑=重新提交=二次计费。
+        # 它们只能走批次页的「复查补下载」。这里排掉并计数，前端提示「已跳过 N 条」。
+        blocked_download = [item for item in queue if item.get("download_failed")]
+        if blocked_download:
+            queue = [item for item in queue if not item.get("download_failed")]
         if not queue:
+            if blocked_download:
+                raise BatchError(
+                    f"这 {len(blocked_download)} 条是「云端已出片、只是下载失败」的条目："
+                    "重试会重新提交、二次计费。请先点「复查补下载」按原 taskId 把成片补回来。", 409)
             raise BatchError(empty_message, 409)
         # 额度校验放在改任何状态之前：超限就是纯拒绝，条目一个都不动。
         self._quota_check(user, min(len(queue), max(1, int(count or 0))))
@@ -896,6 +917,7 @@ class BatchManager:
                 item["state"] = "failed"
                 item["job_id"] = ""
                 item["error"] = "模板已不可用"
+                item.pop("download_failed", None)
                 blocked.append(str(item.get("template_id")))
             else:
                 taken.append((item, live))
@@ -977,6 +999,7 @@ class BatchManager:
         return {
             "job": job,
             "batch": self.public(batch),
+            "skipped_download_failed": len(blocked_download),
             "taken": len(taken),
             "blocked": blocked,
             "cost_estimate": self._money_view(user, self.estimate([live for _, live in taken], resolution)),

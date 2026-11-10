@@ -601,9 +601,12 @@
       root.append(strip);
     }
     if (job.status === 'succeeded' || job.status === 'partial') { const dl = document.createElement('a'); dl.className = 'link-btn'; dl.href = job.download_all; dl.textContent = '下载已完成视频和报告（ZIP）'; root.append(dl); const first = (job.records || []).find(r => r.status === 'success' && r.download_url); if (first) { const player = document.createElement('video'); player.controls = true; player.preload = 'metadata'; player.className = 'preview-video'; player.src = first.download_url; root.append(player); } }
-    // 等待超时（P0）：先按原 taskId 复查云端——多数超时在云端其实已出片并计费，
-    // 直接点「重试」会重新提交、二次扣费。所以复查按钮放在重试按钮**前面**。
-    const timeoutCount = (job.records || []).filter(r => r.status === 'timeout').length;
+    // 等待超时 / 下载失败（P0）：先按原 taskId 复查云端——云端大多已出片并计费，
+    // 下载失败更是「已扣费、只差文件」。直接点「重试」会重新提交、二次扣费。
+    // 所以复查按钮放在重试按钮**前面**。
+    const recheckable = (job.records || []).filter(r => r.status === 'timeout' || r.download_failed);
+    const timeoutCount = recheckable.length;
+    const dlCount = recheckable.filter(r => r.download_failed).length;
     const recheck = job.recheck && typeof job.recheck === 'object' ? job.recheck : null;
     if (timeoutCount || (recheck && recheck.running)) {
       const btn = document.createElement('button'); btn.className = 'quiet'; btn.type = 'button';
@@ -611,17 +614,17 @@
         btn.textContent = `复查中 ${recheck.checked || 0}/${recheck.total || timeoutCount}`;
         btn.disabled = true;
       } else {
-        btn.textContent = `复查超时任务（${timeoutCount} 条）`;
+        btn.textContent = `复查补下载（${timeoutCount} 条）`;
         btn.title = '按原 taskId 查询云端：已出片的直接补下载，不重新提交、不二次计费';
         btn.addEventListener('click', async () => {
-          if (!confirm(`按原 taskId 复查这 ${timeoutCount} 条超时记录？\n\n只查询、不重新提交：云端已出片的会直接补下载；云端确实失败的才转成「失败」，那时再重试不会二次计费。`)) return;
+          if (!confirm(`按原 taskId 复查这 ${timeoutCount} 条记录（其中 ${dlCount} 条是云端已出片、只是下载失败）？\n\n只查询、不重新提交：云端已出片的会直接补下载；云端确实失败的才转成「失败」，那时再重试不会二次计费。`)) return;
           try { const data = await api(`/api/jobs/${job.id}/recheck`, { method: 'POST', body: '{}' }); toast('已开始复查，结果会自动刷新。'); state.selectedJob = job.id; renderDetail(data.job); scheduleDetailPoll(job.id, data.job && data.job.status, true); } catch (err) { toast(err.message); }
         });
       }
       root.append(btn);
     }
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled','unknown','timeout','skipped'].includes(r.status)).length;
-    if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.title = timeoutCount ? '其中含等待超时的条目：建议先「复查超时任务」，直接重试会二次计费' : ''; retry.addEventListener('click', async () => { const warn = timeoutCount ? `\n\n注意：其中 ${timeoutCount} 条是等待超时——云端可能已出片并计费，直接重试会二次提交。\n建议先点「复查超时任务」。` : ''; if (!confirm(`只重试失败的 ${failedCount} 条？${warn}`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); toast('失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
+    if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.title = dlCount ? `其中 ${dlCount} 条是「云端已出片、只是下载失败」：重试会二次计费，请先「复查补下载」` : timeoutCount ? '其中含等待超时的条目：建议先「复查补下载」，直接重试会二次计费' : ''; retry.addEventListener('click', async () => { const warn = timeoutCount ? `\n\n注意：其中 ${timeoutCount} 条是等待超时/下载失败——云端可能已出片并计费，直接重试会二次提交。\n建议先点「复查补下载」。` : ''; const skip = dlCount ? `\n其中 ${dlCount} 条「云端已出片、只是下载失败」会被跳过。` : ''; if (!confirm(`只重试失败的 ${failedCount} 条？${warn}${skip}`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); const skipped = Number(data.skipped_download_failed) || 0; toast(skipped ? `已重新排队；${skipped} 条「云端已出片、只是下载失败」已跳过（请点「复查补下载」）。` : '失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
     const list = document.createElement('div'); list.className = 'record-list';
     (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
     const logs = document.createElement('div'); logs.className = 'log-box'; logs.textContent = (job.log_tail || []).slice(-60).join('\n') || '任务日志将在这里显示。'; root.append(logs);

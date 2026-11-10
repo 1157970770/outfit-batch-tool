@@ -12,6 +12,7 @@ API 协议在 app/wan_api.py（官方 DashScope / 旧 RunningHub 双通道），
 from __future__ import annotations
 
 import csv
+import http.client
 import json
 import random
 import shutil
@@ -147,13 +148,52 @@ def plan_batch(templates: list[dict], mode: str, group: int | None = None,
 # HTTP / 本地工具
 # ---------------------------------------------------------------------------
 
-def download_file(url: str, dest: Path) -> None:
+DOWNLOAD_ATTEMPTS = 4                      # 首次 + 3 次重试
+DOWNLOAD_RETRY_DELAYS = (2, 5, 12)         # 秒；断线多为瞬时抖动，退避够用即可
+
+
+def download_file(url: str, dest: Path, attempts: int = DOWNLOAD_ATTEMPTS) -> None:
+    """把成片取回本地，断线自动重试。
+
+    为什么必须重试：下载发生在云端**已经出片并按秒计费之后**。一次 TLS 断流
+    （2026-11-10 job b1cc 的 `UNEXPECTED_EOF_WHILE_READING`）就让这条已付费的成片
+    丢掉，用户只能去控制台按 taskId 手工找回。抖动的网络重试几次基本都能过。
+
+    每次尝试都从零写 `.part`，不做续传：成片只有十几 MB，重下的代价远小于
+    「半个文件 + Range 续传」拼出一个静默损坏的成品。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": "outfit-batch/1.0", "Accept": "*/*"})
-    with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as fh:
-        shutil.copyfileobj(resp, fh)
-    tmp.replace(dest)
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            if tmp.exists():
+                tmp.unlink()
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "outfit-batch/1.0", "Accept": "*/*"})
+            with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+            if tmp.stat().st_size <= 0:
+                raise OSError("下载到的文件是空的")
+            tmp.replace(dest)
+            return
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            # 4xx（除 408/429）是确定的拒绝：签名过期、无权限，重试没有意义。
+            if 400 <= exc.code < 500 and exc.code not in (408, 429):
+                break
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            last_exc = exc
+        if attempt < attempts:
+            time.sleep(DOWNLOAD_RETRY_DELAYS[min(attempt - 1, len(DOWNLOAD_RETRY_DELAYS) - 1)])
+    try:
+        if tmp.exists():
+            tmp.unlink()      # 别把半个文件留在输出目录里冒充成片
+    except OSError:
+        pass
+    if last_exc is not None:
+        raise last_exc
+    raise OSError("下载失败，原因未知")
 
 
 def probe_duration(path: Path) -> float | None:

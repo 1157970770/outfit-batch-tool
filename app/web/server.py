@@ -35,7 +35,8 @@ from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
 from app.web.batches import PRODUCE_CHOICES, PRODUCE_MIN, BatchError, BatchManager
-from app.web.jobs import MAX_IMAGE_SLOTS, JobManager, _redact, image_slots
+from app.web.jobs import (MAX_IMAGE_SLOTS, JobManager, _redact, image_slots,
+                          retry_blocked_download_failed)
 from app.web.paths import relocate
 from app.web.settings import WebSettings, load_settings
 from app.web.templates import TemplateCatalog, TemplateError
@@ -786,9 +787,12 @@ def make_handler(app: WebApplication):
                 if not source:
                     return self._error("找不到该任务。", 404)
                 try:
+                    # 下载失败（云端已出片）的条目不算可重试：计入并回传，前端好提示「已跳过」。
+                    skipped = len(retry_blocked_download_failed(source))
                     retry = app.jobs.retry_failed(job_id, user["username"],
                                                   user.get("role") == "admin")
-                    return self._json({"ok": True, "job": retry}, 201)
+                    return self._json({"ok": True, "job": retry,
+                                       "skipped_download_failed": skipped}, 201)
                 except ValueError as exc:
                     return self._error(exc, 409)
             # 复查超时任务：按原 taskId 问云端（只查询、不提交），出片就补下载。

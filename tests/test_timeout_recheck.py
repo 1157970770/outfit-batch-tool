@@ -13,6 +13,7 @@
 4. 没有 taskId 的记录 → 保持 timeout，提示只能重提；
 5. 复查期间再次点击被拒（不并发打云端）；
 6. 批次条目被复查救活后，_reconcile 自动把 failed 升成 done；批次页能读到 timeout_jobs。
+7. 「云端已出片、只是下载失败」（download_failed）：重试必须被拒（二次计费），复查能补回。
 """
 from __future__ import annotations
 
@@ -35,8 +36,10 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 from app.web.auth import make_password  # noqa: E402
-from app.web.batches import BatchManager  # noqa: E402
-from app.web.jobs import JobManager  # noqa: E402
+from app.web.batches import BatchError, BatchManager  # noqa: E402
+from app.web.jobs import (  # noqa: E402
+    JobManager, needs_recheck, retry_blocked_download_failed,
+)
 from app.web.settings import load_settings  # noqa: E402
 
 MOCK = ROOT / "tests" / "mock_dashscope.py"
@@ -253,7 +256,74 @@ def main() -> int:
         assert job["recheck"]["checked"] == 1, job["recheck"]  # 只剩 004 这条超时
         print("  ✓ 批次级复查：只查剩余超时条目，依旧不重新提交")
 
+        # ---------- 8. 「云端已出片、只是下载失败」：不许重试，只能复查补下载 ----------
+        # 2026-11-10 job b1cc 的真实教训：云端 succeeded 并已计费 15s，本机下载时 TLS 断流，
+        # 记录落成 failed+download_failed；用户在页面上点「只重试失败的 1 条」→ 又提交一次
+        # → 二次计费。所以这类记录必须被重试排除、被复查纳入。
+        dl_out = Path(tmp) / "web-data" / "output" / "WEB-alice-dlfail000001"
+        dl_out.mkdir(parents=True, exist_ok=True)
+        dl_job = base_job(tmp, "dlfail000001", status="partial", total=1, done=0, summary=None, records=[
+            {"id": "001", "status": "failed", "download_failed": True,
+             "task_id": "task-ok-dl", "provider": "dashscope", "resolution": "720P",
+             "file": str(dl_out / "001.mp4"), "billable_seconds": 15.0, "estimated_cost": 4.5,
+             "error": "云端已出片并按 15 秒计费，但下载失败：URLError: <urlopen error "
+                      "[SSL: UNEXPECTED_EOF_WHILE_READING]>"},
+        ])
+        write_job(settings, tmp, dl_job)
+        manager.jobs[dl_job["id"]] = dl_job     # 本段只测这两条链路，直接把 job 放进内存
+        rec = dl_job["records"][0]
+        assert needs_recheck(rec) and needs_recheck({"status": "timeout"}), rec
+        assert not needs_recheck({"status": "failed"}), "普通失败不该走复查"
+        assert len(retry_blocked_download_failed(dl_job)) == 1, dl_job
+        print("  ✓ needs_recheck 认出「下载失败」；普通失败仍算可重试")
+
+        before = mock_stats(base)["submitted"]
+        try:
+            manager.retry_failed("dlfail000001", "alice")
+            raise AssertionError("下载失败的记录绝不能被重试（会二次提交、二次计费）")
+        except ValueError as exc:
+            assert "二次计费" in str(exc) and "复查" in str(exc), exc
+        assert mock_stats(base)["submitted"] == before, "被拒的重试不能真的提交任务"
+        print("  ✓ 点重试被拒，并提示改走「复查补下载」（submitted 未变）")
+
+        # 批次侧：条目带上 download_failed 标记，批次页据此提示「会被跳过」
+        bm.batches["batchdlfail"] = {
+            "id": "batchdlfail", "batch_no": "T-DL-01", "owner": "alice", "state": "locked",
+            "images": [{"upload_id": "", "name": "look.png", "path": str(tmp / "look.png")}],
+            "image_name": "look.png",
+            "items": [{"template_id": "001", "state": "producing",
+                       "job_id": "dlfail000001", "error": ""}],
+            "runs": [{"job_id": "dlfail000001", "count": 1, "started_at": time.time()}],
+            "active_job_id": "dlfail000001", "total_items": 1, "done": 0, "failed": 0,
+            "pending": 0, "created_at": time.time() - 600, "updated_at": time.time() - 600,
+        }
+        spawned = bm.batches["batchdlfail"]
+        assert bm._reconcile(spawned) is True
+        assert spawned["items"][0]["download_failed"] is True, spawned["items"][0]
+        assert bm.public(spawned)["download_failed_items"] == 1, bm.public(spawned)
+        assert bm.public(spawned)["timeout_jobs"] == ["dlfail000001"], bm.public(spawned)
+        try:
+            bm.retry_failed("batchdlfail", {"username": "alice", "role": "user"}, {"count": 10})
+            raise AssertionError("批次重试也必须跳过下载失败条目")
+        except BatchError as exc:
+            assert "二次计费" in str(exc), exc
+        assert mock_stats(base)["submitted"] == before, "批次重试被拒时也不能提交"
+        print("  ✓ 批次条目带 download_failed 标记，批次重试同样被拒")
+
+        # 复查能把它补回来：按原 taskId 下载 → success，批次条目自动升 done 并清标记
+        manager.recheck_timeouts("dlfail000001")
+        dl_job = wait_recheck(manager, "dlfail000001")
+        rec = dl_job["records"][0]
+        assert rec["status"] == "success", rec
+        assert Path(rec["file"]).is_file() and Path(rec["file"]).stat().st_size > 0, rec
+        assert mock_stats(base)["submitted"] == before, "复查补下载不能重新提交"
+        assert bm._heal_items(spawned) is True, spawned["items"]
+        assert spawned["items"][0]["state"] == "done", spawned["items"][0]
+        assert "download_failed" not in spawned["items"][0], spawned["items"][0]
+        print("  ✓ 复查补下载成功，记录/批次条目恢复为完成，全程零新提交")
+
         print("OK 超时续查：只查不提交 / 补下载记账 / 云端判死转终态 / 无 taskId 保留 / 批次自动救回")
+        print("OK 下载失败：不许重试（防二次计费）/ 复查补回 / 批次标记与自动恢复")
         return 0
     finally:
         for instance in managers:
