@@ -37,7 +37,14 @@ if (apiBase.startsWith('http://') && !/^http:\/\/(127\.0\.0\.1|localhost)/.test(
   );
 }
 
-const env = { ...process.env, VITE_API_BASE: apiBase, TEMP: join(root, '.tmp'), TMP: join(root, '.tmp') };
+const env = {
+  ...process.env,
+  VITE_API_BASE: apiBase,
+  // 套壳只保留《妙搭复刻需求手册》里的 5 个模块；要全量页面就传 VITE_VIEW_SCOPE=all。
+  VITE_VIEW_SCOPE: String(process.env.VITE_VIEW_SCOPE || 'core').toLowerCase(),
+  TEMP: join(root, '.tmp'),
+  TMP: join(root, '.tmp'),
+};
 mkdirSync(env.TEMP, { recursive: true });
 
 console.log(`▶ 构建前端（VITE_API_BASE=${apiBase}）…`);

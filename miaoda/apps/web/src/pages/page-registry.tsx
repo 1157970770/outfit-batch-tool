@@ -4,33 +4,37 @@ import { Placeholder } from '@/ui/Placeholder';
 
 const VIEW_STORAGE_KEY = 'outfit.view';
 
+/**
+ * 页面范围开关。
+ *
+ * `docs/妙搭复刻需求手册.md` 只保留 5 个模块（试跑 / 批次 / 历史 / 模板库 / 管理），
+ * 去掉紫、素材检索、画布、自由视频、生图。代码不删，用这一层开关控制：
+ * 套壳构建（`build-shell.mjs`）注入 `VITE_VIEW_SCOPE=core`，本地开发默认 `all`。
+ */
+const SCOPE = String(import.meta.env.VITE_VIEW_SCOPE || 'all').toLowerCase();
+export const CORE_SCOPE = SCOPE === 'core';
+
 /** 导航顺序与原版 index.html 一致；canvas 是最后一页，material 用 iframe。 */
-export const VIEWS = [
-  { key: 'create', label: '小批量试跑', admin: false },
-  { key: 'batch', label: '大批量生产', admin: false },
-  { key: 'history', label: '历史任务', admin: false },
-  { key: 'admin', label: '管理', admin: true },
-  { key: 'tag', label: '视频库', admin: false },
-  { key: 'material', label: '素材检索', admin: false },
-  { key: 'ps', label: 'PS 助手', admin: false },
-  { key: 'imagegen', label: '生图', admin: false },
-  { key: 'videogen', label: '自由视频', admin: false },
-  { key: 'canvas', label: '画布', admin: false },
+const ALL_VIEWS = [
+  { key: 'create', label: '小批量试跑', admin: false, core: true },
+  { key: 'batch', label: '大批量生产', admin: false, core: true },
+  { key: 'history', label: '历史任务', admin: false, core: true },
+  { key: 'admin', label: '管理', admin: true, core: true },
+  { key: 'tag', label: '视频库', admin: false, core: true },
+  { key: 'material', label: '素材检索', admin: false, core: false },
+  { key: 'ps', label: 'PS 助手', admin: false, core: false },
+  { key: 'imagegen', label: '生图', admin: false, core: false },
+  { key: 'videogen', label: '自由视频', admin: false, core: false },
+  { key: 'canvas', label: '画布', admin: false, core: false },
 ] as const;
 
-export type ViewKey = (typeof VIEWS)[number]['key'];
+export const VIEWS = ALL_VIEWS.filter((view) => !CORE_SCOPE || view.core);
 
-const RESTORE_VIEWS: ViewKey[] = [
-  'create',
-  'history',
-  'admin',
-  'tag',
-  'material',
-  'ps',
-  'imagegen',
-  'videogen',
-  'canvas',
-];
+export type ViewKey = (typeof ALL_VIEWS)[number]['key'];
+
+const RESTORE_VIEWS: ViewKey[] = (ALL_VIEWS.filter((view) => !CORE_SCOPE || view.core) as readonly { key: ViewKey }[]).map(
+  (view) => view.key,
+).filter((key) => key !== 'batch');
 
 export function useView(defaultKey: ViewKey = 'create'): [ViewKey, (key: ViewKey) => void] {
   const [view, setView] = useState<ViewKey>(() => {

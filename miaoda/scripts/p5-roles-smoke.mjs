@@ -200,9 +200,7 @@ async function main() {
   // 批次隔离（批次必须带有效 prompt_id，与 Python 同口径）
   const boot = await call('/api/bootstrap', { cookie: aCookie });
   const promptId = boot.json?.prompts?.[0]?.id;
-  profileCheck: {
-    check('A 能读到提示词库', Boolean(promptId), `bootstrap status ${boot.status}`);
-  }
+  check('A 能读到提示词库', Boolean(promptId), `bootstrap status ${boot.status}`);
   const batchRes = await call('/api/batches', {
     method: 'POST',
     cookie: aCookie,
@@ -210,6 +208,7 @@ async function main() {
       batch_no: `P5-${randomUUID().slice(0, 6)}`,
       tags: { top: 'P5A-001' },
       prompt_id: promptId,
+      prompt: boot.json?.prompts?.[0]?.body || '把图1的衣服换到图2的模特身上。',
       resolution: '480P',
       duration: 5,
     },
