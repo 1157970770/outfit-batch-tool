@@ -20,6 +20,8 @@
 .batch-card-main{min-width:0}
 .batch-card-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .batch-card-title b{font-size:14px;overflow-wrap:anywhere}
+/* 批次列表上的任务分类徽标：一眼区分服装换装 / 项链手串 */
+.batch-card-title .batch-category{height:20px;padding:0 6px;font-size:11px;font-weight:600;color:#2a5db0;border-color:#c8d8f2;background:#eef4ff;flex:none}
 .batch-card-side{display:flex;align-items:center;gap:8px}
 
 /* ---------- 面板 ---------- */
@@ -330,6 +332,18 @@
 .batch-items-head select:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 
 /* ---------- 历史任务分组 ---------- */
+/* 详情不再挂在列表最下面：宽屏时变成右侧独立一列，列表与详情各自滚动。
+   没有打开详情时保持单列，避免空白右栏抢走列表宽度。 */
+.history-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start}
+.history-layout > *{min-width:0}
+.history-layout .detail-card{margin-top:0}
+@media (min-width:1180px){
+  .history-layout:has(#job-detail:not(.hidden)){grid-template-columns:minmax(0,1fr) minmax(380px,34%)}
+  /* 左侧列表 / 右侧详情：显式定列，避免 grid 自动把详情排到第二行。 */
+  .history-layout:has(#job-detail:not(.hidden)) > #history-groups,
+  .history-layout:has(#job-detail:not(.hidden)) > #jobs-list{grid-column:1}
+  .history-layout:has(#job-detail:not(.hidden)) > #job-detail{grid-column:2;grid-row:1;position:sticky;top:70px;max-height:calc(100vh - 84px);overflow:auto}
+}
 .history-groups{display:grid;gap:11px}
 .history-empty-note{margin:0;padding:8px 12px;background:var(--bg);border:1px dashed var(--line-strong);border-radius:8px;font-size:12px}
 .history-group{margin:0;padding:0;overflow:hidden}
@@ -349,6 +363,7 @@
 .history-record.is-admin{grid-template-columns:minmax(0,1.1fr) 92px minmax(0,1.1fr) auto}
 .history-record-name b{display:block;font-size:13px;overflow-wrap:anywhere}
 .history-record-name small{display:block;font-size:11px;color:var(--muted)}
+.history-record-name .history-record-uid{font:10.5px/1.5 var(--font-mono);color:var(--muted);letter-spacing:.02em}
 .history-record-info small{display:block;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .history-record .record-actions{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
 /* 重跑是这一行的主动作，给一点颜色区分「对比 / 下载 / 任务详情」这些查看类按钮 */

@@ -37,7 +37,7 @@ python run_web.py
 | `app/web/cli.py` | 190 | 命令行：初始化、增删账号、自检、启动 | `main()` |
 | `app/web/server.py` | 1696 | 路由、鉴权、静态文件、CSV/ZIP/视频下载 | `WebApplication`、`make_handler`、`serve` |
 | `app/web/jobs.py` | 800 | 任务队列、调度、事件回写、用量统计 | `JobManager.create/_dispatch/_run_job` |
-| `app/web/batches.py` | 1637 | 批次生命周期、候选筛选、草稿清单、锁定、多轮生产、历史分组 | `BatchManager.create/candidates/selection/lock/produce` |
+| `app/web/batches.py` | 1641 | 批次生命周期、候选筛选、草稿清单、锁定、多轮生产、历史分组 | `BatchManager.create/candidates/selection/lock/produce` |
 | `app/web/templates.py` | 557 | 模板目录：标签工作簿 + 云端 manifest 交叉索引 | `TemplateCatalog` |
 | `app/web/settings.py` | 234 | 配置读取与上限裁剪、单价兜底 | `load_settings`、`WebSettings` |
 | `app/web/auth.py` | 95 | 密码哈希、HMAC 会话、登录限流 | `SessionSigner`、`LoginLimiter` |
@@ -186,8 +186,9 @@ while not stop:
 | `prompt` / `prompt_id` | 实际提交的提示词 |
 | `resolution` / `duration` / `total` / `done` | 生成参数与进度 |
 | `tags` | 6 栏位标签 `{top/lining/pants/shoes/scene/note}`（v0.10.0 起，top 必填进 COS 路径） |
+| `category` | 任务分类快照（`服装换装` / `项链手串`）。建批次时冻结、提交时从批次抄进 job，批次删了也能按分类统计；试跑/老任务为空，统计时归「未分类」 |
 | `style_no` | 旧款号字段（v0.9.0 老数据展示用，新任务不再写入） |
-| `records[]` | 每条：`id / status / seconds / billable_seconds / estimated_cost / cost_source / error / cos_key` |
+| `records[]` | 每条：`id（模板 ID） / record_id（视频唯一 ID） / status / seconds / billable_seconds / estimated_cost / cost_source / error / cos_key` |
 | `summary` | 引擎汇总（success / failed / 计费秒等） |
 | `batch_ref` | 关联批次 id（试跑为空） |
 | `log_tail` | 最近几十行日志，前端直接显示 |
@@ -204,6 +205,7 @@ while not stop:
 | `prompt_id` / `prompt` | 提示词（不改 prompt；「图2…图10」由用户自己写）。绑定后仍可在步骤 4「分批生产」里改，只影响之后的生产 |
 | `resolution` / `duration` | 本批次参数 |
 | `tags` | 6 栏位标签，建批次时填，冻结后不改（旧批次只有 `style_no`） |
+| `category` | 任务分类：`app/web/batches.py::TASK_CATEGORIES` 是唯一真源（现为 服装换装 / 项链手串），由 `/api/bootstrap` 下发前端。建批次时选、之后冻结；不传默认「服装换装」，传非法值 400（不静默归类）；老批次为空 → 统计归「未分类」 |
 | `style_no` | 旧款号字段（v0.9.0），仅老批次存在 |
 | `items[]` | 条目：`template_id / name / tags / state(pending/producing/done/failed) / job_id` |
 | `draft_selection[]` | 草稿态的生产清单：`[{template_id,name}]`；加入/移出/清空即时落盘，锁定后清空 |
@@ -294,7 +296,7 @@ web-data/
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
 | GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、selection（草稿清单）、lock、produce、retry-failed、close |
 | GET | `/api/batches/<id>/files.zip[?probe=1]` | 登录（限本人） | 整批打包下载，**仅大批量且非试跑的批次**；按 runs 收集每一轮成功视频、按场景去重保留最新。`?probe=1` 只回 `{count,batch_no,download_url}` 不落盘，供前端先确认再触发原生下载 |
-| GET | `/api/history/groups[/<key>]` | 登录 | 历史分组 / 组内条目；`group_by=batch\|owner\|day`，`lane=small\|big` 按通道过滤；明细带 `scope` 保证与列表同口径 |
+| GET | `/api/history/groups[/<key>]` | 登录 | 历史分组 / 组内条目；`group_by=batch\|owner\|day`，`lane=small\|big` 按通道过滤；明细带 `scope` 保证与列表同口径，每条带 `record_id`（视频唯一 ID） |
 | GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |
 | GET | `/api/imagegen/tasks` | 登录（限本人；admin `?scope=all`） | 生图任务列表，`limit` 默认 40 |
 | POST | `/api/imagegen/tasks` | 登录 | 建生图任务（`prompt/model/size/quality/count/upload_ids[]`） |

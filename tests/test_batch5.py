@@ -12,6 +12,7 @@
 7. 模板清单空表报 TemplateError（而不是 StopIteration 崩栈）。
 8. 快速通道条数上限钳死 3。
 9. 批次估算裁剪：普通用户无单价/金额，但保留生产档位 count。
+10. 任务分类统计：服装换装 / 项链手串 / 未分类三个桶，恒等式与合计都要对得上。
 """
 from __future__ import annotations
 
@@ -228,6 +229,54 @@ def test_failure_accounting_identity() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 4b. 按任务分类统计（服装换装 / 项链手串 / 未分类）
+# ---------------------------------------------------------------------------
+
+def test_usage_categories() -> None:
+    tmp = Path(tempdir("batch5-categories-"))
+    manager = make_manager(tmp)
+    manager.settings.unit_price = lambda resolution: (0.3, "test")
+
+    apparel = base_job("j-apparel", owner="alice")
+    apparel["category"] = "服装换装"
+    apparel["records"] = [{"id": "T1", "status": "success", "billable_seconds": 7.0,
+                           "estimated_cost": 2.1},
+                          {"id": "T2", "status": "failed"}]
+    necklace = base_job("j-necklace", owner="bob")
+    necklace["category"] = "项链手串"
+    necklace["records"] = [{"id": "T1", "status": "success", "billable_seconds": 3.0,
+                            "estimated_cost": 0.9}]
+    legacy = base_job("j-legacy", owner="alice")      # 老 job：没有 category 字段
+    legacy["records"] = [{"id": "T1", "status": "success", "billable_seconds": 7.0,
+                          "estimated_cost": 2.1}]
+    for job in (apparel, necklace, legacy):
+        manager.jobs[job["id"]] = job
+
+    usage = manager.usage_for()
+    cats = {row["category"]: row for row in usage["categories"]}
+    check(set(cats) == {"服装换装", "项链手串", "未分类"},
+          f"空分类必须归「未分类」，不能混进业务分类：{cats}")
+    check(cats["服装换装"]["items"] == 2 and cats["服装换装"]["failed"] == 1, cats)
+    check(cats["项链手串"]["items"] == 1 and cats["项链手串"]["success"] == 1, cats)
+    check(float(cats["服装换装"]["estimated_cost"]) == 2.1, cats["服装换装"])
+    check(float(cats["项链手串"]["estimated_cost"]) == 0.9, cats["项链手串"])
+    check(float(cats["未分类"]["estimated_cost"]) == 2.1, "老任务的钱不能从分类统计里消失")
+    for row in usage["categories"]:
+        check(row["items"] == row["success"] + row["failed"] + row["unfinished"],
+              f"分类行也要满足恒等式：{row}")
+        check(abs(float(row["success_rate"]) - (row["success"] / row["items"] if row["items"] else 0)) < 1e-4,
+              f"分类成功率口径与账户一致：{row}")
+    # 分类维度是账户维度的另一个切面：合计必须对得上
+    check(usage["totals"]["items"] == sum(row["items"] for row in usage["categories"]), usage["totals"])
+    check(abs(usage["totals"]["estimated_cost"]
+              - sum(row["estimated_cost"] for row in usage["categories"])) < 1e-9, usage["totals"])
+
+    work = manager.work_for("alice")
+    check({item["category"] for item in work["items"]} == {"服装换装", ""},
+          f"work_for 要带原始分类（空串交给接口层折成「未分类」）：{work['items']}")
+
+
+# ---------------------------------------------------------------------------
 # 5. EXIF 方向（P1-21）
 # ---------------------------------------------------------------------------
 
@@ -343,6 +392,7 @@ def main() -> int:
         test_wait_timeout_lands_timeout_status,
         test_retry_uses_source_owner_and_batch_ref,
         test_failure_accounting_identity,
+        test_usage_categories,
         test_exif_transpose,
         test_cos_rest_token,
         test_empty_sheet_raises_template_error,

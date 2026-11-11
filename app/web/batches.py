@@ -29,7 +29,7 @@ from pathlib import Path
 
 from app.web.jobs import (
     MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _FAILED_RECORD_STATES, _redact,
-    clean_style_no, clean_tags, duration_ok, image_slots, needs_recheck,
+    clean_style_no, clean_tags, duration_ok, image_slots, needs_recheck, record_uid,
 )
 from app.web.paths import relocate
 from app.web.style_usage import StyleUsageLedger
@@ -54,6 +54,12 @@ DAY_KEY = "__day__"
 # 命中即说明这张图能通过 /api/uploads/<id>（带 owner 校验）取回来。
 # 命名保持对外不变，正则统一收在 jobs.py（读老 job 时两边用同一套）。
 UPLOAD_IMAGE_RE = UPLOAD_PATH_RE
+
+# 任务分类：大批量页的「这条业务线是什么」，建批次时冻结，随 job 落盘，
+# 管理端按它汇总消耗（app/web/jobs.py: usage_for 的 categories）。
+# 新增业务线只改这一处；前端下拉与校验都读它（GET /api/bootstrap → service.task_categories）。
+TASK_CATEGORIES = ("服装换装", "项链手串")
+DEFAULT_TASK_CATEGORY = TASK_CATEGORIES[0]
 
 # 计费口径：一条任务的计费秒数 ≈ 模板时长 + 输出视频秒数。
 # 输出默认固定 7 秒（duration=7，API 接受 2–30）；duration=-1 时才按 7 秒估算。
@@ -166,6 +172,9 @@ class BatchManager:
             batch["id"] = batch_id
             if batch.get("state") not in BATCH_STATES:
                 batch["state"] = "draft"
+            # 任务分类：老批次没有这个字段，留空（=未分类），不臆造历史归属。
+            if batch.get("category") not in TASK_CATEGORIES:
+                batch["category"] = ""
             # 草稿生产清单：老批次没有这个字段，按空清单处理；锁定/关闭后不再保留。
             batch["draft_selection"] = self._clean_selection(batch.get("draft_selection"))
             if batch.get("state") != "draft":
@@ -575,6 +584,7 @@ class BatchManager:
         with self.mutex:
             data = {key: batch.get(key) for key in (
                 "id", "batch_no", "title", "owner", "state", "image_upload_id", "image_name",
+                "category",
                 "prompt_id", "prompt", "resolution", "duration", "tag_filters", "tag_excludes",
                 "style_no", "tags",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
@@ -630,9 +640,11 @@ class BatchManager:
             row["download_url"] = (f"/api/jobs/{job_id}/download/{template_id}"
                                    if done and job_id and template_id else "")
             warn = ""
+            rec = {}
             if done and job_id:
                 rec = self._record_index(cache, job_id).get(template_id) or {}
                 warn = str((rec.get("verify") or {}).get("warn") or "")
+            row["record_id"] = record_uid(job_id, rec) if rec else ""
             row["verify_warn"] = _redact(warn)[:200]
             items.append(row)
         if item_state:
@@ -665,6 +677,11 @@ class BatchManager:
         prompt_id = str(data.get("prompt_id") or "").strip()
         prompt = str(data.get("prompt") or "").strip()
         resolution = str(data.get("resolution") or "").strip().upper()
+        # 任务分类：老调用（含回归测试）不带这个字段时按默认业务线落，避免历史接口直接 400；
+        # 传了就必须是白名单里的值，写错要立刻报错，不能静默归到「服装换装」。
+        category = str(data.get("category") or "").strip() or DEFAULT_TASK_CATEGORY
+        if category not in TASK_CATEGORIES:
+            raise BatchError("任务分类只能是：" + " / ".join(TASK_CATEGORIES) + "。")
         # 网页标配「输出固定 7 秒」；-1（跟随素材）与 2–30 的其他秒数仍接受，向后兼容老批次。
         duration = _as_int(data.get("duration"), DEFAULT_DURATION)
         # 多图：upload_ids 有序（槽位 1 = 定妆图）；缺省时回退老的单个 upload_id。
@@ -705,6 +722,8 @@ class BatchManager:
                 "style_no": re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("style_no") or "")).strip()[:40],
                 "tags": batch_tags,
                 "state": "draft",
+                # 任务分类：批次级冻结（建好后不可改），生产时原样写进 job 供用量统计。
+                "category": category,
                 # images[] 是唯一真源；三个单值字段是主图别名，供老前端/老代码读取。
                 "images": slots,
                 "image_upload_id": (slots[0]["upload_id"] if slots else ""),
@@ -1070,6 +1089,7 @@ class BatchManager:
                 batch_ref=str(batch["id"]), limit_items=len(taken),
                 tags=dict(batch.get("tags") or {}),
                 style_no=str(batch.get("style_no") or ""),
+                category=str(batch.get("category") or ""),
                 images=slots,
             )
         except ValueError as exc:
@@ -1605,6 +1625,8 @@ class BatchManager:
                     rows.append({
                         "job_id": str(job.get("id")),
                         "template_id": template_id,
+                        # 每条视频的稳定唯一 ID（新记录落盘，老记录按 job+模板兜底）。
+                        "record_id": record_uid(str(job.get("id")), rec),
                         # 这一条属于第几批：run_no 是它最近一次生产所在轮次，
                         # run_nos 列出它出现过的全部轮次（重试会让同一条落在多轮）。
                         "run_no": run_no_by_job.get(str(job.get("id")), 0),

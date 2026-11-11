@@ -145,6 +145,9 @@ def main() -> int:
         assert job and job["status"] == "succeeded", job
         assert job["lane"] == "small", job          # 1 条试跑走快速通道
         assert job["records"][0]["status"] == "success", job
+        # 小批量同样给每条视频分配唯一 ID（12 位十六进制），用于历史明细/详情对账。
+        record_id = job["records"][0].get("record_id")
+        assert isinstance(record_id, str) and len(record_id) == 12, job["records"][0]
         assert "out_dir" not in (job.get("summary") or {}), job
         with urllib.request.urlopen(f"http://127.0.0.1:{mock_port}/stats", timeout=5) as response:
             mock_state = json.loads(response.read().decode("utf-8"))
@@ -245,6 +248,16 @@ def main() -> int:
         assert usage_rows["alice"]["estimated_cost"] > 0, usage_rows["alice"]
         assert usage_body["totals"]["estimated_cost"] > 0, usage_body["totals"]
 
+        # 按任务分类统计：试跑任务没有分类，统一归「未分类」；分类合计必须与 totals 对齐
+        assert set(usage_body) >= {"accounts", "categories", "totals"}, usage_body.keys()
+        usage_cats = {row["category"]: row for row in usage_body["categories"]}
+        assert set(usage_cats) == {"未分类"}, usage_cats
+        assert usage_cats["未分类"]["items"] == usage_body["totals"]["items"], usage_cats
+        assert sum(row["estimated_cost"] for row in usage_body["categories"]) == \
+            usage_body["totals"]["estimated_cost"], usage_body["categories"]
+        for row in usage_body["categories"]:
+            assert row["items"] == row["success"] + row["failed"] + row["unfinished"], row
+
         # 逐条明细：哪个账户跑了哪个视频、多少计费秒、多少钱
         code, _, work = call(admin, base, "/api/admin/accounts/alice/work")
         assert code == 200, work
@@ -254,10 +267,12 @@ def main() -> int:
         assert item["template_id"] == "001" and item["template_name"] == "测试场景", item
         assert item["status"] == "success" and item["estimated_cost"], item
         assert item["cost_source"] == "record", item
+        assert item["category"] == "未分类", item          # 试跑任务没有分类，明细里显式归桶
         assert work_data["total_cost"] > 0, work_data
         code, _, csv_raw = call(admin, base, "/api/admin/accounts/alice/work.csv")
         assert code == 200, code
         assert "模板ID".encode("utf-8") in csv_raw and b"001" in csv_raw, csv_raw[:200]
+        assert "任务分类".encode("utf-8") in csv_raw and "未分类".encode("utf-8") in csv_raw, csv_raw[:300]
 
         # 历史任务没有落金额时，按当前单价回算（cost_source=derived）
         record = app.jobs.jobs[job_id]["records"][0]

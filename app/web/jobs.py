@@ -58,6 +58,18 @@ def image_slots(record: dict, data_dir: Path | None = None) -> list[dict]:
              "path": fix(path)}]
 
 
+def record_uid(job_id: str, record: dict) -> str:
+    """一条生产视频的稳定 ID。
+
+    新记录由 `app.core.new_record_id()` 落盘；老数据没有这个字段，用
+    `job_id-template_id` 兜底（同一 job 内模板 ID 唯一，所以不会重复）。
+    """
+    value = str((record or {}).get("record_id") or "")
+    if value:
+        return value
+    return f"{str(job_id or '')}-{str((record or {}).get('id') or '')}"
+
+
 def normalize_images(raw, image_path: Path, image_name: str) -> list[dict]:
     """把入参归一成有序槽位数组。raw=None 时用旧的位置参数造单元素列表。"""
     if raw is None:
@@ -126,6 +138,20 @@ def clean_style_no(value) -> str:
     """旧款号字段（v0.9.0 及以前）：仅用于读取老数据，新提交一律走 clean_tags。"""
     text = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
     return text[:_STYLE_MAX]
+
+
+# 任务分类的兜底名：老任务、试跑任务（没有批次）没有分类字段，统计时归到这里，
+# 绝不能把它们的消耗从报表里丢掉。
+UNCATEGORIZED = "未分类"
+
+
+def clean_category(value) -> str:
+    """任务分类是有限枚举，合法性由 BatchManager.create 把关；这里只做去噪与截断。
+
+    老 job 没有这个字段 → 空串，读取端（usage_for / work_for）统一折算成 UNCATEGORIZED。
+    """
+    text = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
+    return text[:20]
 
 
 # 重试时认的非成功终态：skipped 是「被取消/批量放弃」的条目，重跑一次才有意义；
@@ -344,6 +370,7 @@ class JobManager:
                duration: int = 5, prompt_body: str | None = None, *,
                batch_ref: str = "", limit_items: int | None = None,
                tags: dict | None = None, style_no: str = "",
+               category: str = "",
                admin: bool = False, images: list[dict] | None = None) -> dict:
         """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。
 
@@ -351,6 +378,8 @@ class JobManager:
         image_path/image_name；缺省时用旧的位置参数造单元素列表。
         tags：6 栏位标签（上衣必填）；style_no：v0.9.0 旧字段，读老批次时兜底，
         两者都缺时报错——云端归档路径必须有上衣款号。
+        category：任务分类（批次生产时由批次原样带入），管理端按它汇总消耗；
+        试跑没有分类，留空。
         """
         slots = normalize_images(images, image_path, image_name)
         if not slots:
@@ -403,6 +432,8 @@ class JobManager:
             "tags": job_tags,
             # 旧款号字段：只服务 v0.9.0 老数据展示，新任务不再写入。
             "style_no": clean_style_no(style_no),
+            # 任务分类：把生成那一刻的分类快照进 job，批次日后被删也不影响分类统计。
+            "category": clean_category(category),
             # small = 快速通道（≤small_lane_items 条）；big = 走大批量队列。
             "lane": lane,
         }
@@ -997,12 +1028,14 @@ class JobManager:
 
     def usage_for(self, start: float | None = None, end: float | None = None,
                   owner: str = "") -> dict:
-        """按账户汇总工作量：任务数、条数、成功/失败、计费秒、预估金额、最近活跃。
+        """按账户 + 按任务分类汇总工作量：任务数、条数、成功/失败、计费秒、预估金额。
 
         口径说明：
           · 条数以 job.records 为准（进行中的 job 也有记录）；
           · 金额是「计费秒 × 单价」的估算，真实账单以阿里云为准；
           · 含零使用量的账户，方便管理员看出"谁还没开始用"。
+          · categories 与 accounts 同口径、同一批 job，只是分组维度不同：老任务与
+            试跑任务没有分类字段，统一归到 UNCATEGORIZED，保证两边总数能对上。
         """
         # unknown = 提交结果未知（云端可能已建任务并计费），必须计入失败侧，
         # 否则账上既不算成功也不算失败，会从统计里静默消失。
@@ -1017,7 +1050,13 @@ class JobManager:
                     "timeout": 0,
                     "billable_seconds": 0.0, "estimated_cost": 0.0, "last_at": 0.0}
 
+        def blank_category(name: str) -> dict:
+            return {"category": name, "jobs": 0, "items": 0, "success": 0, "failed": 0,
+                    "unfinished": 0, "timeout": 0, "billable_seconds": 0.0,
+                    "estimated_cost": 0.0, "last_at": 0.0}
+
         rows: dict[str, dict] = {}
+        cats: dict[str, dict] = {}
         for name, record in (self.settings.users or {}).items():
             rows[str(name)] = blank(str(name), str(record.get("role", "user")),
                                     bool(record.get("enabled", True)))
@@ -1033,38 +1072,59 @@ class JobManager:
                     continue
                 row = rows.setdefault(name, blank(name))
                 row["jobs"] += 1
+                cat_name = str(job.get("category") or "").strip() or UNCATEGORIZED
+                cat = cats.setdefault(cat_name, blank_category(cat_name))
+                cat["jobs"] += 1
                 if job.get("status") in {"queued", "running"}:
                     row["unfinished"] += 1
+                    cat["unfinished"] += 1
                 for rec in job.get("records") or []:
                     status = str(rec.get("status") or "")
                     row["items"] += 1
+                    cat["items"] += 1
                     if status == "success":
                         row["success"] += 1
+                        cat["success"] += 1
                     elif status == "timeout":
                         # 超时单列：既算进 failed（业务上没拿到片子），也单独计数，
                         # 让管理员知道其中有多少条是「本机没等到、云端可能已计费」。
                         row["failed"] += 1
                         row["timeout"] += 1
+                        cat["failed"] += 1
+                        cat["timeout"] += 1
                     elif status in failed_states:
                         row["failed"] += 1
+                        cat["failed"] += 1
                     elif status == "running":
                         row["unfinished"] += 1
+                        cat["unfinished"] += 1
                     try:
-                        row["billable_seconds"] += float(rec.get("billable_seconds") or 0)
+                        seconds = float(rec.get("billable_seconds") or 0)
                     except (TypeError, ValueError):
-                        pass
+                        seconds = 0.0
+                    row["billable_seconds"] += seconds
+                    cat["billable_seconds"] += seconds
                     cost_value, _cost_source = self._record_cost(rec, job)
                     row["estimated_cost"] += cost_value
+                    cat["estimated_cost"] += cost_value
                 row["last_at"] = max(row["last_at"], created,
+                                     float(job.get("finished_at") or 0))
+                cat["last_at"] = max(cat["last_at"], created,
                                      float(job.get("finished_at") or 0))
 
         for row in rows.values():
             row["success_rate"] = round(row["success"] / row["items"], 4) if row["items"] else 0.0
             row["billable_seconds"] = round(row["billable_seconds"], 2)
             row["estimated_cost"] = round(row["estimated_cost"], 2)
+        for cat in cats.values():
+            cat["success_rate"] = round(cat["success"] / cat["items"], 4) if cat["items"] else 0.0
+            cat["billable_seconds"] = round(cat["billable_seconds"], 2)
+            cat["estimated_cost"] = round(cat["estimated_cost"], 2)
 
         accounts = sorted(rows.values(),
                           key=lambda r: (-r["estimated_cost"], -r["items"], r["owner"]))
+        categories = sorted(cats.values(),
+                            key=lambda r: (-r["estimated_cost"], -r["items"], r["category"]))
         totals = {key: 0 for key in ("jobs", "items", "success", "failed", "unfinished",
                                      "timeout")}
         for row in accounts:
@@ -1073,7 +1133,7 @@ class JobManager:
         totals["billable_seconds"] = round(sum(row["billable_seconds"] for row in accounts), 2)
         totals["estimated_cost"] = round(sum(row["estimated_cost"] for row in accounts), 2)
         totals["accounts"] = len(accounts)
-        return {"accounts": accounts, "totals": totals}
+        return {"accounts": accounts, "categories": categories, "totals": totals}
 
     def work_for(self, owner: str, start: float | None = None, end: float | None = None,
                  status: str = "", offset: int = 0, limit: int = 100,
@@ -1111,6 +1171,8 @@ class JobManager:
                         "job_id": str(job.get("id")),
                         "batch_id": str(job.get("batch_id") or ""),
                         "batch_ref": str(job.get("batch_ref") or ""),
+                        # 任务分类（老任务为空，由 server 侧按批次兜底后再折成「未分类」）
+                        "category": str(job.get("category") or ""),
                         "template_id": template_id,
                         "template_name": names.get(template_id, ""),
                         "status": rec_status,
@@ -1162,6 +1224,7 @@ class JobManager:
             safe = {k: job.get(k) for k in (
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
                 "batch_id",                 "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
+                "category",
                 "duration", "total", "done", "message", "log_tail", "cancel_requested",
                 "lane", "style_no", "tags")}
             # 复查超时任务（P0）的进度：前端据此显示「已复查 3/23」并保持轮询。
@@ -1190,6 +1253,8 @@ class JobManager:
                 record_keys = tuple(k for k in record_keys if k not in _MONEY_KEYS)
             for rec in job.get("records", []):
                 public_record = {k: rec.get(k) for k in record_keys if k in rec}
+                # 每条视频的唯一 ID：老记录没有落盘时由 job + 模板 ID 派生，只读时补也不变。
+                public_record["record_id"] = record_uid(str(job.get("id")), rec)
                 if public_record.get("error"):
                     public_record["error"] = _redact(public_record["error"])
                 safe["records"].append(public_record)

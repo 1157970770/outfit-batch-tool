@@ -127,6 +127,31 @@
       produceMin: Math.max(1, num(svc.produce_min, PRODUCE_MIN_FALLBACK) || PRODUCE_MIN_FALLBACK),
     };
   }
+  // 任务分类：以 /api/bootstrap 的 service.task_categories 为准（后端 TASK_CATEGORIES 是唯一真源）；
+  // 服务端没下发时退回这两条业务线，保证页面还能用。
+  const TASK_CATEGORY_FALLBACK = ['服装换装', '项链手串'];
+  function taskCategories() {
+    const svc = App.state.service || {};
+    const list = Array.isArray(svc.task_categories)
+      ? svc.task_categories.map((value) => txt(value).trim()).filter(Boolean)
+      : [];
+    return list.length ? list : TASK_CATEGORY_FALLBACK;
+  }
+  // 老批次没有分类：给一个占位项（value=''），不要假装它当时就属于「服装换装」。
+  // 分类在建批次时冻结，查看已有批次只读（setFormFrozen 会一起禁用）。
+  function fillCategoryOptions(selected) {
+    const select = $('batch-category');
+    if (!select) return;
+    const current = selected === undefined || selected === null ? select.value : txt(selected);
+    const values = taskCategories();
+    select.replaceChildren();
+    if (!current || !values.includes(current)) {
+      const label = current ? `${current}（已停用）` : '未分类（老批次）';
+      select.append(new Option(label, current));
+    }
+    values.forEach((value) => select.append(new Option(value, value)));
+    select.value = current;
+  }
   // 生产条数的合法区间：上限同时受「单次上限」与「清单剩余」钳制；
   // 剩余不足最小单位时下限降到 1（否则零头永远提交不出去）。
   function produceRange(batch) {
@@ -335,7 +360,7 @@
 
   /* ---------- 步骤 A：建批次 ---------- */
   function setFormFrozen(frozen) {
-    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution'].forEach((id) => {
+    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution', 'batch-category'].forEach((id) => {
       const node = $(id);
       if (node) node.disabled = frozen;
     });
@@ -344,8 +369,8 @@
     $('batch-create-btn').disabled = frozen;
     $('batch-image-slots').classList.toggle('is-frozen', frozen);
     $('batch-a-hint').textContent = frozen
-      ? '批次级设置已冻结：画质、时长、定妆图建立后不可改；细节图可在步骤 3 追加，提示词在步骤 4「分批生产」里可改（只影响之后的生产）。'
-      : '画质、时长、定妆图在批次级冻结；提示词建好后仍可在分批生产阶段修改。';
+      ? '批次级设置已冻结：任务分类、画质、时长、定妆图建立后不可改；细节图可在步骤 3 追加，提示词在步骤 4「分批生产」里可改（只影响之后的生产）。'
+      : '任务分类、画质、时长、定妆图在批次级冻结；提示词建好后仍可在分批生产阶段修改。';
   }
   // 已有批次：折叠冻结的建批次表单（省下一整屏）；新建批次时必须是展开的。
   function setBatchFormOpen(open) {
@@ -367,6 +392,7 @@
   }
   function fillBatchForm(batch) {
     $('batch-no').value = txt(batch.batch_no);
+    fillCategoryOptions(txt(batch.category));
     // 6 栏位标签：老批次只有 style_no 时映射到「上衣」栏位显示。
     const legacy = !batch.tags && txt(batch.style_no) ? { top: txt(batch.style_no) } : batch.tags;
     App.fillTagSlots('batch-tags', legacy || {});
@@ -388,6 +414,7 @@
     // 收起状态下这一行就是「这个批次是什么」的全部信息
     $('batch-a-summary').textContent = [
       txt(batch.batch_no) || '未命名批次',
+      txt(batch.category) || '未分类',
       App.tagSummaryText(batch.tags, txt(batch.style_no)) || '',
       txt(batch.title) || '',
       txt(batch.resolution) || '—',
@@ -403,6 +430,7 @@
   }
   function resetBatchForm() {
     $('batch-no').value = '';
+    fillCategoryOptions(taskCategories()[0] || '');
     App.fillTagSlots('batch-tags', {});
     $('batch-title').value = '';
     $('batch-prompt-body').value = '';
@@ -433,12 +461,14 @@
   async function createBatch() {
     if (b.busy) return;
     const batchNo = $('batch-no').value.trim();
+    const category = $('batch-category').value;
     const title = $('batch-title').value.trim();
     const promptBody = $('batch-prompt-body').value.trim();
     const promptId = $('batch-prompt-select').value;
     const resolution = $('batch-resolution').value;
     clearBatchError();
     if (batchNo.length < 1 || batchNo.length > 40) { showBatchError('批次号必填，1–40 个字符。'); $('batch-no').focus(); return; }
+    if (!category) { showBatchError('请选择任务分类（服装换装 / 项链手串）。'); $('batch-category').focus(); return; }
     if (!b.slots.length || !b.slots[0].file) { showBatchError('请先在槽位 1 上传定妆图。'); return; }
     if (!promptId) { showBatchError('请选择提示词模板。'); return; }
     if (!promptBody) { showBatchError('提示词不能为空，请选择模板或填写内容。'); return; }
@@ -461,7 +491,7 @@
       }
       const ids = upload.uploadIds;
       btn.textContent = '正在创建批次…';
-      const payload = { batch_no: batchNo, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_ids: ids, upload_id: ids[0] };
+      const payload = { batch_no: batchNo, category, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_ids: ids, upload_id: ids[0] };
       const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
       if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
       Slots.resetSlots(b.slots);          // 上传用的 object URL 用完即释放
@@ -2135,6 +2165,8 @@
     const main = el('div', 'batch-card-main');
     const title = el('div', 'batch-card-title');
     title.append(el('b', null, txt(batch.batch_no) || '未命名批次'));
+    // 任务分类：批次列表一眼看出这批属于哪条业务线（老批次没有分类就不显示）。
+    if (txt(batch.category)) title.append(el('span', 'chip batch-category', txt(batch.category)));
     title.append(el('span', `status ${running ? 'batch-producing' : `batch-${state}`}`, running ? '生产中' : (BATCH_STATE_TEXT[state] || state)));
     main.append(title);
     const meta = [fmtTime(batch.created_at), `已结束 ${done + failed} / ${total}`, `待生产 ${pending}`];
@@ -2591,6 +2623,11 @@
     const row = el('div', `history-record${adminAll ? ' is-admin' : ''}`);
     const nameCell = el('div', 'history-record-name');
     nameCell.append(el('b', null, txt(item.template_name) || txt(item.template_id) || '未命名场景'), el('small', null, txt(item.template_id)));
+    if (txt(item.record_id)) {
+      const uid = el('small', 'history-record-uid', `视频 ID ${txt(item.record_id)}`);
+      uid.title = '这条视频的唯一 ID：跨任务、跨批次都不会重复';
+      nameCell.append(uid);
+    }
     // 「第几批 20 条」：按批次分组时后端给出 run_nos / run_total；重试过的条目会列出全部轮次。
     const runNos = Array.isArray(item.run_nos) ? item.run_nos.filter(no => num(no)) : [];
     if (runNos.length && num(item.run_total)) {

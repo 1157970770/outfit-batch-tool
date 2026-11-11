@@ -589,8 +589,10 @@
   function renderDetail(job) {
     state.detailStatus = job.status;
     state.detailSig = detailSig(job);
-    const root = $('job-detail'); root.classList.remove('hidden'); root.replaceChildren();
-    const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.batch_id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = job.message || statusText[job.status]; left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status;
+    const root = $('job-detail'); const wasHidden = root.classList.contains('hidden'); root.classList.remove('hidden'); root.replaceChildren();
+    // 窄屏没有右侧栏：详情会落到列表下面，打开时主动滚过去；宽屏右侧直接可见，不打扰。
+    if (wasHidden && window.matchMedia('(max-width:1179px)').matches) root.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = [job.batch_id ? `批次号 ${job.batch_id}` : '', job.message || statusText[job.status]].filter(Boolean).join(' · '); left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status;
     const side = document.createElement('div'); side.className = 'job-actions';
     const close = document.createElement('button'); close.className = 'quiet btn-sm'; close.type = 'button'; close.textContent = '关闭';
     close.addEventListener('click', () => { root.classList.add('hidden'); state.selectedJob = null; state.detailStatus = null; });
@@ -665,7 +667,7 @@
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled','unknown','timeout','skipped'].includes(r.status)).length;
     if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.title = dlCount ? `其中 ${dlCount} 条是「云端已出片、只是下载失败」：重试会二次计费，请先「复查补下载」` : timeoutCount ? '其中含等待超时的条目：建议先「复查补下载」，直接重试会二次计费' : ''; retry.addEventListener('click', async () => { const warn = timeoutCount ? `\n\n注意：其中 ${timeoutCount} 条是等待超时/下载失败——云端可能已出片并计费，直接重试会二次提交。\n建议先点「复查补下载」。` : ''; const skip = dlCount ? `\n其中 ${dlCount} 条「云端已出片、只是下载失败」会被跳过。` : ''; if (!confirm(`只重试失败的 ${failedCount} 条？${warn}${skip}`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); const skipped = Number(data.skipped_download_failed) || 0; toast(skipped ? `已重新排队；${skipped} 条「云端已出片、只是下载失败」已跳过（请点「复查补下载」）。` : '失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
     const list = document.createElement('div'); list.className = 'record-list';
-    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
+    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); if (rec.record_id) { const uid = document.createElement('small'); uid.className = 'record-id'; uid.textContent = `视频 ID ${rec.record_id}`; uid.title = '这条视频的唯一 ID，跨任务、跨批次不会重复'; info.append(uid); } const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
     const logs = document.createElement('div'); logs.className = 'log-box'; logs.textContent = (job.log_tail || []).slice(-60).join('\n') || '任务日志将在这里显示。'; root.append(logs);
   }
 
@@ -892,6 +894,46 @@
     root.append(table, sum);
   }
 
+  // 按任务分类汇总：与上面按账户的表同一批 job、同一口径，只是分组维度不同，
+  // 老任务/试跑任务归「未分类」（后端 usage_for 统一折算，这里不再判断）。
+  function renderUsageCategories(categories) {
+    const root = $('usage-category-table'); if (!root) return;
+    root.replaceChildren();
+    const rows = Array.isArray(categories) ? categories : [];
+    if (!rows.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = '这个时间范围内还没有分类用量。'; root.append(empty); return; }
+    const table = document.createElement('table');
+    const thead = document.createElement('thead'); const hr = document.createElement('tr');
+    ['任务分类', '任务', '条数', '成功', '失败', '超时', '计费秒', '预估金额'].forEach(label => {
+      const th = document.createElement('th'); th.textContent = label; hr.append(th);
+    });
+    thead.append(hr); table.append(thead);
+    const tbody = document.createElement('tbody');
+    const totals = rows.reduce((acc, row) => {
+      ['jobs', 'items', 'success', 'failed', 'timeout'].forEach(key => { acc[key] += Number(row[key] || 0); });
+      acc.billable_seconds += Number(row.billable_seconds || 0);
+      acc.estimated_cost += Number(row.estimated_cost || 0);
+      return acc;
+    }, { jobs: 0, items: 0, success: 0, failed: 0, timeout: 0, billable_seconds: 0, estimated_cost: 0 });
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      const cells = [row.category || '未分类', row.jobs, row.items, row.success, row.failed,
+        Number(row.timeout || 0) || '—',
+        Number(row.billable_seconds || 0) ? Number(row.billable_seconds).toFixed(1) : '—',
+        Number(row.estimated_cost || 0) ? `¥${Number(row.estimated_cost).toFixed(2)}` : '—'];
+      cells.forEach(value => { const td = document.createElement('td'); td.textContent = String(value); tr.append(td); });
+      tbody.append(tr);
+    });
+    const tr = document.createElement('tr');
+    tr.className = 'usage-total';
+    ['合计', totals.jobs, totals.items, totals.success, totals.failed, totals.timeout || '—',
+      totals.billable_seconds.toFixed(1), `¥${totals.estimated_cost.toFixed(2)}`].forEach(value => {
+      const td = document.createElement('td'); td.textContent = String(value); tr.append(td);
+    });
+    tbody.append(tr);
+    table.append(tbody);
+    root.append(table);
+  }
+
   const ACCOUNT_PAGE = 100;
   function accountQuery(extra = {}) {
     const params = new URLSearchParams();
@@ -931,7 +973,7 @@
     } else {
       const table = document.createElement('table');
       const thead = document.createElement('thead'); const hr = document.createElement('tr');
-      ['时间', '批次号', '视频', '状态', '计费秒', '金额'].forEach(label => {
+      ['时间', '批次号', '任务分类', '视频', '状态', '计费秒', '金额'].forEach(label => {
         const th = document.createElement('th'); th.textContent = label; hr.append(th);
       });
       thead.append(hr); table.append(thead);
@@ -940,7 +982,7 @@
         const tr = document.createElement('tr');
         const when = item.created_at ? new Date(item.created_at * 1000).toLocaleString() : '—';
         const video = item.template_name ? `${item.template_name}（${item.template_id}）` : item.template_id;
-        const cells = [when, item.batch_no || '未分组', video,
+        const cells = [when, item.batch_no || '未分组', item.category || '未分类', video,
           statusText[item.status] || item.status || '—',
           item.billable_seconds != null ? Number(item.billable_seconds).toFixed(1) : '—',
           item.estimated_cost != null ? `¥${Number(item.estimated_cost).toFixed(2)}` : '—'];
@@ -970,7 +1012,9 @@
           const del = document.createElement('button'); del.className = 'quiet'; del.textContent = '删除'; del.addEventListener('click', async () => { if (!confirm(`确定删除账号 ${account.username}？\n\n删除后该账号无法登录且不可恢复（与其相关的历史任务保留）。`)) return; try { await api(`/api/admin/users/${encodeURIComponent(account.username)}`, { method: 'DELETE' }); toast(`账号 ${account.username} 已删除。`); await refreshAdmin(); } catch (err) { toast(err.message); } }); actions.append(del); }
         row.append(name, info, actions); usersRoot.append(row); });
       state.adminUsers = userData.users || [];
-      renderUsage(await api('/api/admin/usage'));
+      const usageData = await api('/api/admin/usage');
+      renderUsageCategories(usageData.categories);
+      renderUsage(usageData);
       if (state.usageOwner && !$('account-detail').classList.contains('hidden')) await loadAccount(true);
     } catch (err) { toast(err.message); }
   }

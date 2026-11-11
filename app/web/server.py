@@ -35,8 +35,9 @@ from app.prompts import PromptLibrary
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
-from app.web.batches import PRODUCE_CHOICES, PRODUCE_MIN, BatchError, BatchManager
-from app.web.jobs import (MAX_IMAGE_SLOTS, JobManager, _redact, image_slots,
+from app.web.batches import (PRODUCE_CHOICES, PRODUCE_MIN, TASK_CATEGORIES,
+                             BatchError, BatchManager)
+from app.web.jobs import (MAX_IMAGE_SLOTS, UNCATEGORIZED, JobManager, _redact, image_slots,
                           retry_blocked_download_failed)
 from app.web.paths import relocate
 from app.web.settings import WebSettings, load_settings
@@ -557,6 +558,7 @@ def make_handler(app: WebApplication):
                                                "produce_choices": [choice for choice in PRODUCE_CHOICES
                                                                    if choice <= app.settings.max_batch_run_items],
                                                "produce_min": PRODUCE_MIN,
+                                               "task_categories": list(TASK_CATEGORIES),
                                                "max_images": MAX_IMAGES,
                                                "max_concurrency": app.settings.max_concurrency,
                                                 "tag_filter_enabled": any(app.catalog.tag_values.values()),
@@ -1851,6 +1853,11 @@ def make_handler(app: WebApplication):
                     ref = str(item.get("batch_ref") or "")
                     batch = app.batches.batches.get(ref) if ref else None
                     item["batch_no"] = str((batch or {}).get("batch_no") or "")
+                    # 老 job 没落 category：按所属批次兜底（批次已删就真的不知道了），
+                    # 仍为空则归「未分类」——与 usage_for 的分类口径完全一致。
+                    item["category"] = (str(item.get("category") or "").strip()
+                                        or str((batch or {}).get("category") or "").strip()
+                                        or UNCATEGORIZED)
             if not csv_mode:
                 data.update({"ok": True, "status": status,
                              "from": query.get("from", [""])[0],
@@ -1872,13 +1879,14 @@ def make_handler(app: WebApplication):
             buffer = io.StringIO()
             writer = csv.writer(buffer)
             cost_labels = {"record": "实测", "derived": "按当前单价回算", "missing": ""}
-            writer.writerow(["时间", "批次号", "模板ID", "模板名称", "状态",
+            writer.writerow(["时间", "批次号", "任务分类", "模板ID", "模板名称", "状态",
                              "计费秒", "预估金额(元)", "金额来源", "分辨率", "输出时长(秒)", "任务ID"])
             for item in data["items"]:
                 created = float(item.get("created_at") or 0)
                 writer.writerow([
                     time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created)) if created else "",
                     _csv_safe(item.get("batch_no") or ""),
+                    _csv_safe(item.get("category") or UNCATEGORIZED),
                     _csv_safe(item.get("template_id") or ""),
                     _csv_safe(item.get("template_name") or ""),
                     _csv_safe(labels.get(str(item.get("status")), str(item.get("status") or ""))),

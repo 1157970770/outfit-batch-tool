@@ -282,6 +282,7 @@ def main() -> int:
         service = body(boot)["service"]
         assert service["produce_choices"] == [5, 10, 20, 50, 100], service
         assert service["produce_min"] == 5, service
+        assert service["task_categories"] == ["服装换装", "项链手串"], service
 
         image = io.BytesIO()
         Image.new("RGB", (256, 320), (230, 220, 210)).save(image, format="PNG")
@@ -299,6 +300,8 @@ def main() -> int:
         assert code == 201, (code, created)
         batch = body(created)["batch"]
         assert batch["tags"] == {"top": "AW26-001", "pants": "PZ-77"}, batch
+        # 不传任务分类时按默认业务线记账（老调用方不用改）
+        assert batch["category"] == "服装换装", batch
         # 上衣缺了必须 400
         code, _, no_tag = call(alice, base, "/api/batches", "POST", {
             "batch_no": "AW26-100", "prompt_id": prompt_id, "prompt": prompt_text,
@@ -324,6 +327,22 @@ def main() -> int:
         code, _, listed = call(alice, base, "/api/batches")
         assert code == 200 and len(body(listed)["batches"]) == 1, listed
         assert "items" not in body(listed)["batches"][0], "列表不返回全量条目"
+
+        # 任务分类：显式选「项链手串」要原样存下并回显；非法分类立刻 400，不静默归类
+        code, _, necklace = call(alice, base, "/api/batches", "POST", {
+            "batch_no": "AW26-900", "prompt_id": prompt_id, "prompt": prompt_text,
+            "resolution": "720P", "duration": 7, "category": "项链手串",
+            "tags": {"top": "AW26-900"}})
+        assert code == 201, (code, necklace)
+        necklace_id = body(necklace)["batch"]["id"]
+        assert body(necklace)["batch"]["category"] == "项链手串", body(necklace)
+        code, _, bad_cat = call(alice, base, "/api/batches", "POST", {
+            "batch_no": "AW26-901", "prompt_id": prompt_id, "prompt": prompt_text,
+            "resolution": "720P", "duration": 7, "category": "珠宝首饰",
+            "tags": {"top": "AW26-901"}})
+        assert code == 400 and "任务分类" in body(bad_cat)["error"], (code, bad_cat)
+        code, _, gone = call(alice, base, f"/api/batches/{necklace_id}", "DELETE")
+        assert code == 200, (code, gone)
 
         code, _, bound = call(alice, base, f"/api/batches/{batch_id}/image", "POST", {"upload_id": upload_id})
         assert code == 200 and body(bound)["image_name"] == "look.png", (code, bound)
@@ -505,6 +524,8 @@ def main() -> int:
         assert produced["batch"]["active_job_id"] == produced["job"]["id"]
         assert produced["job"]["batch_ref"] == batch_id, produced["job"]
         assert produced["job"]["duration"] == 7, produced["job"]["duration"]   # 输出固定 7 秒
+        # 分类随生产快照进 job：批次后来被删，管理端仍能按分类统计这笔消耗
+        assert produced["job"]["category"] == "服装换装", produced["job"]
         cost = produced["cost_estimate"]
         assert "amount" not in cost and "unit_price" not in cost, cost   # P1-5：普通用户不回金额
         job_ids = [produced["job"]["id"]]
@@ -609,6 +630,9 @@ def main() -> int:
         assert runs[0]["prompt"] and runs[0]["prompt"] != runs[1]["prompt"], runs
         assert runs[0]["prompt_changed"] is False and runs[1]["prompt_changed"] is True, runs
         assert all(row["run_total"] == 2 for row in hist["items"]), hist["items"][:2]
+        # 每条生产出来的视频一个稳定唯一 ID；50 条明细里不能出现重复。
+        hist_uids = [row.get("record_id") for row in hist["items"]]
+        assert all(hist_uids) and len(hist_uids) == len(set(hist_uids)) == READY_COUNT, hist_uids[:5]
         first_rows = [row for row in hist["items"] if row["run_no"] == 1]
         second_rows = [row for row in hist["items"] if row["run_no"] == 2]
         assert len(first_rows) == 20 and len(second_rows) == 30, (len(first_rows), len(second_rows))
@@ -620,6 +644,11 @@ def main() -> int:
         detail = body(detail_raw)["job"]
         assert detail["prompt"] == runs[0]["prompt"], detail
         assert detail["batch_run"]["no"] == 1 and detail["batch_run"]["total"] == 2, detail
+        # 任务详情与历史明细必须给同一个视频 ID，否则两处对不上。
+        detail_uids = {str(rec["id"]): rec.get("record_id") for rec in detail["records"]}
+        first_hist = {row["template_id"]: row["record_id"] for row in first_rows}
+        assert detail_uids == first_hist, (detail_uids, first_hist)
+        assert all(detail_uids.values()), detail_uids
         assert "prompt" not in body(call(alice, base, "/api/jobs")[2])["jobs"][0], \
             "列表每 3.5 秒轮询，不能带最多 4000 字的提示词正文"
         print("  ✓ 分批轮次：第 1/2 批可分辨、第二批标「提示词已改」、任务详情带快照提示词")

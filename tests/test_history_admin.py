@@ -141,7 +141,12 @@ def main() -> int:
         assert first["batch_no"] == "未分组" and first["job_status"] == "succeeded", first
         assert by_tid["010"]["owner"] == "bob", by_tid["010"]
         assert by_tid["010"]["template_name"] == "0010.mp4", by_tid["010"]
-        print("  ✓ 明细字段：owner / created_at / batch_no / job_status 齐备，模板名从 URL 回退成文件名")
+        # 老数据没有落盘 record_id：用 job_id-template_id 兜底，且 10 条互不重复。
+        uids = [item["record_id"] for item in detail["items"]]
+        assert all(uids) and len(uids) == len(set(uids)) == 10, uids
+        assert first["record_id"] == "hist00000001-001", first
+        print("  ✓ 明细字段：owner / created_at / batch_no / job_status / record_id 齐备，"
+              "老数据 ID 稳定回退")
 
         # ---------- 4. 普通用户仍只看得到自己
         mine = batches.history_groups(alice, False, "")
