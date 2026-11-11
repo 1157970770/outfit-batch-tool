@@ -192,10 +192,10 @@ class FakeJobs:
 
     def create(self, owner, image_path, image_name, templates, prompt_id, resolution,
                duration, prompt, *, batch_ref="", limit_items=None, tags=None, style_no="",
-               images=None, admin=False):
+               category="", images=None, admin=False):
         job = {
             "id": f"job-{len(self.created) + 1}", "owner": owner, "status": "queued",
-            "batch_ref": batch_ref, "records": [],
+            "batch_ref": batch_ref, "category": category, "records": [],
             "images": images or [],
             "templates": [{"id": str(t["id"])} for t in templates],
         }

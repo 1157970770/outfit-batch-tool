@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import uuid
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -62,6 +63,15 @@ TOTAL_TEMPLATES = 500
 # 重启/续跑时可接回的记录状态：running = 重启前正在跑；timeout = 本机等超时，
 # 但云端 taskId 仍可能有效（24h 内可查），接回只等不重提，避免二次计费。
 REATTACHABLE_STATES = ("running", "timeout")
+
+
+def new_record_id() -> str:
+    """给每一条生产出来的视频一个稳定、可展示的唯一 ID。
+
+    12 位十六进制与 job id 同风格，碰撞概率可忽略；写入记录后重启、复查、
+    续跑都沿用同一个值，不会因为重新读取而改变。
+    """
+    return uuid.uuid4().hex[:12]
 
 
 class EngineError(RuntimeError):
@@ -493,7 +503,8 @@ class BatchRunner:
                 try:
                     rec = fut.result()
                 except Exception as exc:  # 单条异常不影响整批
-                    rec = {"id": tpl["id"], "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                    rec = {"id": tpl["id"], "record_id": new_record_id(), "status": "failed",
+                           "error": f"{type(exc).__name__}: {exc}"}
                 with self.state.lock:
                     self.state.records[tpl["id"]] = rec
                 done += 1
@@ -586,7 +597,7 @@ class BatchRunner:
         tid = tpl["id"]
         out_file = spec.out_dir / f"{tid}.mp4"
         template_seconds = _as_seconds(tpl.get("duration"))
-        rec = {"id": tid, "template": tpl["url"], "status": "pending",
+        rec = {"id": tid, "record_id": new_record_id(), "template": tpl["url"], "status": "pending",
                "provider": spec.provider, "model": spec.model, "mode": spec.mode,
                "resolution": spec.resolution, "file": str(out_file),
                "billable_seconds": None, "estimated_cost": None, "cost": None,
@@ -605,6 +616,8 @@ class BatchRunner:
         if str(prior.get("status") or "") in REATTACHABLE_STATES and prior.get("task_id"):
             reattach = str(prior["task_id"])
             rec.update({
+                # 重启接回的是同一条视频：沿用旧 record_id，别让历史页里的 ID 变掉。
+                "record_id": str(prior.get("record_id") or rec["record_id"]),
                 "task_id": reattach,
                 "request_id": prior.get("request_id") or "",
                 "submitted_at": prior.get("submitted_at") or "",

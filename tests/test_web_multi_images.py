@@ -48,8 +48,10 @@ PROMPT_ID = "p01"
 
 
 def job_payload(ids, **extra):
+    # 固定挑 001：random 模式下 catalog.choose() 会连同未上云的 051 一起参与抽样，
+    # 抽中 051 就会在建任务前 400——那是“该报错”，但会让多图测试变成 1/51 概率失败。
     payload = {"upload_ids": ids, "upload_id": ids[0] if ids else "",
-               "selection": "random", "count": 1, "confirmed": True,
+               "selection": "selected", "template_id": "001", "count": 1, "confirmed": True,
                "prompt_id": PROMPT_ID, "prompt": "编辑视频1：把服装换成图1这套，细节参考图2。",
                "resolution": "720P", "duration": 7, "tags": {"top": "TEST-TOP"}}
     payload.update(extra)

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261111a">
+  <link rel="stylesheet" href="/static/style.css?v=20261111c">
   <link rel="stylesheet" href="/static/tag-filter.css">
-  <link rel="stylesheet" href="/static/batch.css?v=20261111a">
+  <link rel="stylesheet" href="/static/batch.css?v=20261111c">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <link rel="stylesheet" href="/static/ps.css?v=20261109b">
   <link rel="stylesheet" href="/static/imagegen.css?v=20261109c">
@@ -15,8 +15,8 @@
   <link rel="stylesheet" href="/static/canvas/canvas.css?v=20261109t">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
-  <script defer src="/static/app.js?v=20261111a"></script>
-  <script defer src="/static/batch.js?v=20261111a"></script>
+  <script defer src="/static/app.js?v=20261111c"></script>
+  <script defer src="/static/batch.js?v=20261111c"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
   <script defer src="/static/ps.js?v=20261109d"></script>
   <script defer src="/static/imagegen.js?v=20261109e"></script>
@@ -187,6 +187,7 @@
             <div id="batch-a-body">
               <div class="batch-form-grid batch-form-grid-3">
                 <label class="field">批次号（必填，1–40 字）<input id="batch-no" maxlength="40" autocomplete="off" placeholder="例如 2026-11-秋装-01"></label>
+                <label class="field">任务分类<select id="batch-category" title="决定这批任务算哪条业务线；管理端的消耗按它分组统计"></select></label>
                 <label class="field">备注（可选，≤60 字）<input id="batch-title" maxlength="60" autocomplete="off" placeholder="例如 秋装第二批，测试光线"></label>
               </div>
               <div class="field">
@@ -350,9 +351,11 @@
 
       <section id="history-view" class="view">
         <div class="section-head"><div><h1 id="jobs-heading">历史任务</h1><p class="muted">全部 / 大批量 / 小批量共用同一套分组；小批量默认按提交日期拆开，管理员看全部用户时可切按账户。</p></div><div class="top-actions"><div class="segmented segmented-sm" id="history-scope" role="group" aria-label="历史范围"><button type="button" data-scope="all" class="active">全部</button><button type="button" data-scope="big">大批量</button><button type="button" data-scope="small">小批量</button></div><select id="owner-filter" class="quiet hidden" aria-label="按账户筛选"><option value="">全部账户</option></select><select id="history-group-by" class="quiet" aria-label="分组方式"><option value="day">按日期分组</option><option value="owner">按账户分组</option><option value="batch">按批次分组</option></select><button id="scope-toggle" class="quiet hidden">查看全部用户</button><button id="refresh-btn" class="quiet">刷新</button></div></div>
-        <div id="history-groups" class="history-groups"></div>
-        <div id="jobs-list" class="jobs-list hidden"><div class="empty">暂无任务。开始新建一个试试。</div></div>
-        <article id="job-detail" class="card detail-card hidden"></article>
+        <div class="history-layout">
+          <div id="history-groups" class="history-groups"></div>
+          <div id="jobs-list" class="jobs-list hidden"><div class="empty">暂无任务。开始新建一个试试。</div></div>
+          <article id="job-detail" class="card detail-card hidden"></article>
+        </div>
       </section>
 
       <section id="tag-view" class="view">
@@ -761,7 +764,12 @@
             <button id="archive-copy-btn" class="quiet hidden" type="button">复制全部链接</button>
           </div>
         </article>
-        <article class="card admin-usage"><div class="section-head"><div><h3>账户用量</h3><p class="muted">条数与计费秒来自云端，金额为估算；点账户名看逐条明细。</p></div></div><div id="usage-table" class="usage-table"></div></article>
+        <article class="card admin-usage"><div class="section-head"><div><h3>账户用量</h3><p class="muted">条数与计费秒来自云端，金额为估算；点账户名看逐条明细。</p></div></div>
+          <h4 class="usage-subtitle">按任务分类</h4>
+          <div id="usage-category-table" class="usage-table"></div>
+          <h4 class="usage-subtitle">按账户</h4>
+          <div id="usage-table" class="usage-table"></div>
+        </article>
         <article class="card admin-account hidden" id="account-detail">
           <div class="section-head">
             <div><h3 id="account-title">账户明细</h3><p class="muted" id="account-sub"></p></div>
