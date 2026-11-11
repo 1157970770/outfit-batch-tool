@@ -17,6 +17,7 @@ import type { BatchManagerService } from '../batches/batch-manager.service';
 import { writeJsonAtomic } from '../common/fs-json';
 import type { AppConfigService } from '../config/app-config.service';
 import type { Job, JobManagerService } from '../jobs/job-manager.service';
+import type { StorageService } from '../storage/storage.service';
 import type { TemplateCatalogService } from '../templates/template-catalog.service';
 
 import { ARCHIVE_DISABLED_TEXT, AdminService } from '../admin/admin.service';
@@ -69,6 +70,8 @@ function makeHarness(options: {
   batches?: Record<string, string>;
   info?: Record<string, unknown>;
   items?: number;
+  /** COS 适配器桩：默认「未启用」（archive 两条路径都走 503/空列表）。 */
+  storage?: { enabled?: boolean; listed?: Array<{ key: string; size: number }>; failKeys?: string[] };
 } = {}): Harness {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'outfit-admin-'));
   ROOTS.push(root);
@@ -124,11 +127,22 @@ function makeHarness(options: {
     }),
   };
 
+  const storage = {
+    enabled: Boolean(options.storage?.enabled),
+    cleanPrefix: 'prod',
+    signUrl: (key: string, expires: number) => {
+      if ((options.storage?.failKeys ?? []).includes(key)) throw new Error('签名失败：密钥不对');
+      return `https://video-input-1463907213.cos.ap-guangzhou.myqcloud.com/${key}?q-sign-algorithm=sha1&expires=${expires}`;
+    },
+    listPrefix: async () => options.storage?.listed ?? [],
+  };
+
   const service = new AdminService(
     config as unknown as AppConfigService,
     jobManager as unknown as JobManagerService,
     batches as unknown as BatchManagerService,
     catalog as unknown as TemplateCatalogService,
+    storage as unknown as StorageService,
   );
 
   return {
@@ -643,6 +657,51 @@ describe('admin archive', () => {
       status: 503,
       error: '云端归档未启用，无法生成下载链接。',
     });
+  });
+
+  it('archive-sign 接了 COS：逐条签 7 天链接，单条失败只记 failed', async () => {
+    const harness = makeHarness({ storage: { enabled: true, failKeys: ['prod/output/b.mp4'] } });
+    const out = (await harness.service.archiveSign({
+      keys: ['/prod/output/a.mp4', 'prod/output/a.mp4', 'prod/output/b.mp4'],
+    })) as {
+      ok: boolean;
+      links: Array<{ key: string; url: string; expires_at: number }>;
+      failed: Array<{ key: string; error: string }>;
+      expires_at: number;
+    };
+    expect(out.ok).toBe(true);
+    // 去重后 2 条：a 成功、b 失败
+    expect(out.links).toHaveLength(1);
+    expect(out.links[0].key).toBe('prod/output/a.mp4');
+    expect(out.links[0].url).toContain('q-sign-algorithm=sha1');
+    expect(out.links[0].url).toContain('expires=604800');
+    expect(out.failed).toHaveLength(1);
+    expect(out.failed[0]).toMatchObject({ key: 'prod/output/b.mp4' });
+    expect(out.failed[0].error).toContain('签名失败');
+    expect(out.expires_at).toBe(out.links[0].expires_at);
+  });
+
+  it('账本没命中时按 Python 兜底列举 COS：款号必须是目录段，来源 cos', async () => {
+    const harness = makeHarness({
+      storage: {
+        enabled: true,
+        listed: [
+          { key: 'prod/output/2026-11-11/A001/batch-1/x-3e050759.mp4', size: 12345 },
+          { key: 'prod/output/2026-11-11/A002/batch-1/y-11111111.mp4', size: 999 },
+          // 款号只出现在文件名里，不算命中（Python 只看 segments[:-1]）
+          { key: 'prod/output/2026-11-11/A003/batch-1/A001-22222222.mp4', size: 1 },
+        ],
+      },
+    });
+    const out = (await harness.service.archiveSearch({ style: 'a001' })) as {
+      source: string;
+      total: number;
+      entries: Array<{ key: string; size: number; created_at: null }>;
+    };
+    expect(out.source).toBe('cos');
+    expect(out.total).toBe(1);
+    expect(out.entries[0]).toMatchObject({ size: 12345, created_at: null });
+    expect(out.entries[0].key).toContain('/A001/');
   });
 });
 

@@ -11,9 +11,9 @@
  *   / `_admin_enable_user` / `_admin_delete_user`（第 1842–1934 行）
  *
  * 两条与 Python 现状不同的显式约定（保持 TS 侧行为可预期，已在交接说明里列出）：
- * 1. COS 还没接入（没有 storage 适配器）。`archive-search` 先按本机任务账本（记录的
- *    cos_key）命中；账本为空时**不伪造云端结果**，直接返回 503，文案沿用 Python
- *    `_admin_archive_sign` 的「云端归档未启用，无法生成下载链接。」。
+ * 1. `archive-search` 先按本机任务账本（记录的 cos_key）命中；账本为空时再按
+ *    Python `_admin_archive_search` 的做法列举 `{prefix}/output/` 兜底（COS 未配置时
+ *    仍返回 200 + 空 entries，不伪造云端结果）。
  * 2. `GET /api/admin/users` 在 Python 的 5 个字段（username/role/enabled/quota/used）
  *    之外多带一个 `expires`：需求明确要展示到期时间，Python 该接口没下发。
  */
@@ -30,6 +30,7 @@ import { writeJsonAtomic } from '../common/fs-json';
 import { AppConfigService, type UserRecord } from '../config/app-config.service';
 import type { Job } from '../jobs/job-manager.service';
 import { JobManagerService } from '../jobs/job-manager.service';
+import { StorageService } from '../storage/storage.service';
 import { TemplateCatalogService } from '../templates/template-catalog.service';
 
 /** 管理端接口的查询串：Nest 给的是 `string | string[] | undefined`，统一按首值取。 */
@@ -180,6 +181,7 @@ export class AdminService {
     private readonly jobs: JobManagerService,
     private readonly batches: BatchManagerService,
     private readonly catalog: TemplateCatalogService,
+    private readonly storage: StorageService,
   ) {}
 
   // ---------------------------------------------------------------- 状态 / 模板健康
@@ -630,9 +632,35 @@ export class AdminService {
     }
 
     if (!entries.length) {
-      // 账本没记上就是「没有归档记录」：Python 在这里去列 COS 前缀兜底，
-      // 未接入 COS 时同样只会得到空列表 → 返回 200 + 空 entries，不伪造云端结果。
-      return { ok: true, style, source: 'ledger', entries: [], total: 0 };
+      // 账本没记上（老数据 / 归档异常）：按 Python 的做法列举 `{prefix}/output/` 兜底，
+      // 款号是路径里的一段（最后一段是文件名，不参与匹配）。
+      if (!this.storage.enabled) return { ok: true, style, source: 'ledger', entries: [], total: 0 };
+      let listed: { key: string; size: number }[];
+      try {
+        listed = await this.storage.listPrefix(`${this.storage.cleanPrefix}/output/`, 5000);
+      } catch (err) {
+        throw adminError(`云端列举失败：${(err as Error).message}`, HttpStatus.BAD_GATEWAY);
+      }
+      for (const row of listed) {
+        const key = asText(row.key);
+        if (!key) continue;
+        const segments = key.split('/');
+        const dirs = segments.slice(0, -1).map((s) => s.toLowerCase());
+        if (!dirs.includes(needle)) continue;
+        entries.push({
+          key,
+          size: Number(row.size) || 0,
+          job_id: '',
+          record_id: '',
+          template_id: '',
+          owner: '',
+          batch_ref: '',
+          created_at: null,
+          batch_no: '',
+        });
+      }
+      entries.sort((a, b) => asText(a.key).localeCompare(asText(b.key)));
+      return { ok: true, style, source: 'cos', entries, total: entries.length };
     }
 
     const batchNos = await this.batchNos(entries.map((entry) => asText(entry.batch_ref)));
@@ -641,7 +669,10 @@ export class AdminService {
     return { ok: true, style, source: 'ledger', entries, total: entries.length };
   }
 
-  /** `POST /api/admin/archive-sign`：COS 未接入，参数校验通过后统一 503。 */
+  /**
+   * `POST /api/admin/archive-sign`：给选中的云端对象批量签 7 天下载链接
+   * （COS 永久密钥签名上限；配了 `cos.domain` 时直接给 CDN 直链）。
+   */
   archiveSign(body: Record<string, unknown> = {}): Record<string, unknown> {
     const rawKeys = body.keys;
     if (!Array.isArray(rawKeys) || !rawKeys.length) {
@@ -653,8 +684,23 @@ export class AdminService {
       if (key && !key.split('/').includes('..') && !keys.includes(key)) keys.push(key);
     }
     if (!keys.length) throw adminError('没有可用的对象路径。');
-    // 没有 storage 适配器：不生成假链接
-    throw adminError(ARCHIVE_DISABLED_TEXT, HttpStatus.SERVICE_UNAVAILABLE);
+
+    if (!this.storage.enabled) {
+      throw adminError('云端归档未启用，无法生成下载链接。', HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    const expires = 7 * 24 * 3600;
+    const deadline = Math.floor(Date.now() / 1000) + expires;
+    const links: Array<Record<string, unknown>> = [];
+    const failed: Array<Record<string, unknown>> = [];
+    for (const key of keys) {
+      try {
+        links.push({ key, url: this.storage.signUrl(key, expires), expires_at: deadline });
+      } catch (err) {
+        // 单条签名失败不影响其它条（Python 同样逐条 try）
+        failed.push({ key, error: String((err as Error).message || err).slice(0, 200) });
+      }
+    }
+    return { ok: true, links, failed, expires_at: deadline };
   }
 
   // ---------------------------------------------------------------- 账户管理

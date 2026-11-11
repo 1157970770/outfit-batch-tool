@@ -72,7 +72,9 @@ PORT=3001
 | P6 | 自由视频（提示词/参考素材/分镜/取消） | ✅ |
 | P5 | 视觉回归、画布、妙搭上线 | ⏳ |
 
-阶段验收脚本：`scripts/parity.mjs`、`p1-smoke.mjs`、`p2-smoke.mjs`、`p3-smoke.mjs`、`p4-smoke.mjs`、`p4-imagegen-smoke.mjs`、`p6-smoke.mjs`（都需要 mock 百炼 + 隔离实例，见各脚本头部注释）。
+阶段验收脚本：`scripts/parity.mjs`、`p1-smoke.mjs`、`p2-smoke.mjs`、`p3-smoke.mjs`、`p4-smoke.mjs`、`p4-imagegen-smoke.mjs`、`p5-roles-smoke.mjs`、`p5-cos-smoke.mjs`、`p6-smoke.mjs`（都需要 mock 百炼 + 隔离实例，见各脚本头部注释）。
+
+> `p5-cos-smoke.mjs` 会往真实桶写对象（自动归档）：只在 `cos.prefix` 指向测试前缀时跑，跑完按前缀清理，别在生产 `prod/` 前缀下跑。
 
 ## 注意
 

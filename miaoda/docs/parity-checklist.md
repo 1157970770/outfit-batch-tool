@@ -106,7 +106,8 @@
 - [x] 视频库上传：登记成功后传 `input/tpl/<文件名>` 并写 `manifest_overlay.json`，失败只回 `warning`（不回滚登记）
 - [x] 任务归档：成片成功下载后 `put` 到 `{prefix}/output/<日期>[/款号]/<批次>/<名>-<指纹>.mp4`，记 `cos_key`/`cos_url`；失败记 `archive_error` 且不算任务失败
 - [x] 自由视频参考视频/音频：先传 `videogen/ref/<任务>/<文件名>`，再给 7 天预签名 URL 提交
-- [ ] COS 真连一次（会产生对象与费用，需用户点头）：上传→预览→归档→预签名下载
+- [x] 管理端归档检索与签名接 COS：账本里按款号命中 → `source=ledger`；账本空则列举 `{prefix}/output/` 兜底（款号必须是目录段）→ `source=cos`；`archive-sign` 逐条签 7 天链接、单条失败进 `failed`（`__tests__/admin.test.ts` +2 项）
+- [x] COS 真连一次：上传 → 建任务（mock 出片）→ 自动归档 `{prefix}/output/...` → 账本检索 → 预签名下载 200 → Range 206（`scripts/p5-cos-smoke.mjs` 12/12；测试对象写在隔离前缀 `miaoda-selftest/` 并已清空）
 - [ ] 双额度压测（250 RPM / 15 RPS / 在飞 100+12）：代码已复刻，未在真 Key 上跑
 - [ ] 视觉回归：本机没有浏览器截图工具，目前只能靠 DOM/接口断言与产物包含性检查
 
