@@ -898,6 +898,8 @@ def make_handler(app: WebApplication):
                         return self._batch_images(parts[2], data, user)
                     if action == "candidates":
                         return self._batch_candidates(parts[2], data, user)
+                    if action == "selection":
+                        return self._batch_selection(parts[2], data, user)
                     if action == "lock":
                         return self._batch_lock(parts[2], data, user)
                     if action == "produce":
@@ -1542,6 +1544,13 @@ def make_handler(app: WebApplication):
         def _batch_candidates(self, batch_id, data, user):
             try:
                 result = app.batches.candidates(batch_id, user, data)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **result})
+
+        def _batch_selection(self, batch_id, data, user):
+            try:
+                result = app.batches.selection(batch_id, user, data)
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, **result})

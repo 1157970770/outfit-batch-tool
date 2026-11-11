@@ -387,6 +387,45 @@ def main() -> int:
 
         ready_ids = [item["id"] for item in payload["items"] if item["ready"]]
         assert len(ready_ids) == READY_COUNT
+
+        # 草稿生产清单：加入/重复/未上云/权限/移除/清空；筛选（candidates）不碰清单
+        code, _, sel_detail = call(alice, base, f"/api/batches/{batch_id}")
+        assert code == 200, (code, sel_detail)
+        sel_batch = body(sel_detail)["batch"]
+        assert sel_batch["selection_count"] == 0 and sel_batch["draft_selection"] == [], sel_batch
+        code, _, sel_list = call(alice, base, "/api/batches")
+        sel_row = next(row for row in body(sel_list)["batches"] if row["id"] == batch_id)
+        assert sel_row["selection_count"] == 0 and "draft_selection" not in sel_row, sel_row
+        code, _, added = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                               {"op": "add", "template_ids": ready_ids[:2],
+                                "tag_filters": {"景别": ["近景"]}})
+        assert code == 200, (code, added)
+        added_batch = body(added)["batch"]
+        assert added_batch["selection_count"] == 2, added_batch
+        assert [row["id"] for row in added_batch["draft_selection"]] == ready_ids[:2], added_batch
+        assert all(row["name"] for row in added_batch["draft_selection"]), added_batch
+        assert added_batch["tag_filters"] == {"景别": ["近景"]}, added_batch
+        code, _, added = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                               {"op": "add", "template_ids": [ready_ids[0], ready_ids[2]]})
+        assert code == 200 and body(added)["batch"]["selection_count"] == 3, (code, added)
+        code, _, bad_sel = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                                 {"op": "add", "template_ids": ["051"]})
+        assert code == 400 and "云端" in body(bad_sel)["error"], (code, bad_sel)
+        assert body(call(alice, base, f"/api/batches/{batch_id}")[2])["batch"]["selection_count"] == 3
+        code, _, forbidden_sel = call(bob, base, f"/api/batches/{batch_id}/selection", "POST",
+                                       {"op": "add", "template_ids": [ready_ids[0]]})
+        assert code == 403, (code, forbidden_sel)
+        code, _, removed = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                                 {"op": "remove", "template_ids": [ready_ids[0]]})
+        assert code == 200 and body(removed)["batch"]["selection_count"] == 2, (code, removed)
+        code, _, cleared = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                                 {"op": "clear"})
+        assert code == 200 and body(cleared)["batch"]["selection_count"] == 0, (code, cleared)
+        code, _, _ = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                           {"op": "add", "template_ids": ready_ids[:2]})
+        assert code == 200
+        print("  ✓ 草稿清单：加入/去重/未上云拦截/非 owner 403/移除/清空，筛选不写清单")
+
         code, _, locked = call(alice, base, f"/api/batches/{batch_id}/lock", "POST",
                                {"template_ids": ready_ids + ["051"], "confirmed": True})
         assert code == 400, (code, locked)                    # 含未上云模板必须拦下
@@ -404,6 +443,10 @@ def main() -> int:
         assert code == 409, (code, again)
         code, _, locked_detail = call(alice, base, f"/api/batches/{batch_id}")
         locked_batch = body(locked_detail)["batch"]
+        assert locked_batch["selection_count"] == 0 and locked_batch["draft_selection"] == [], locked_batch
+        code, _, sel_locked = call(alice, base, f"/api/batches/{batch_id}/selection", "POST",
+                                   {"op": "add", "template_ids": [ready_ids[0]]})
+        assert code == 409, (code, sel_locked)
         locked_estimate = locked_batch["cost_estimate"]
         assert locked_batch["tag_excludes"] == {"景别": ["中远景"]}, locked_batch["tag_excludes"]
         assert locked_estimate["count"] == READY_COUNT, locked_estimate
@@ -777,6 +820,17 @@ def main() -> int:
         assert batch2["failed"] == 0 and batch2["done"] == 5, batch2
         print("  ✓ retry-failed：5 条失败带原因，重跑后全部 done")
 
+        # ---------------- 4.6 草稿清单持久化：重启前建一个带 2 条的草稿
+        code, _, created_sel = call(alice, base, "/api/batches", "POST", {
+            "batch_no": "AW26-SEL", "prompt_id": prompt_id, "prompt": prompt_text,
+            "resolution": "720P", "duration": 7, "upload_id": upload_id,
+            "tags": {"top": "AW26-SEL"}})
+        assert code == 201, (code, created_sel)
+        sel_id = body(created_sel)["batch"]["id"]
+        code, _, added = call(alice, base, f"/api/batches/{sel_id}/selection", "POST",
+                               {"op": "add", "template_ids": ready_ids[:2]})
+        assert code == 200 and body(added)["batch"]["selection_count"] == 2, (code, added)
+
         # ---------------- 5. 重启后加载 + 读时对账
         state_path = Path(settings.data_dir) / "batches" / f"{batch_id}.json"
         snapshot = json.loads(state_path.read_text(encoding="utf-8"))
@@ -802,6 +856,8 @@ def main() -> int:
 
         settings2 = reload_settings(tmp)
         app2 = WebApplication(settings2)
+        sel_loaded = app2.batches.batches[sel_id]
+        assert [entry["template_id"] for entry in sel_loaded["draft_selection"]] == ready_ids[:2], sel_loaded
         reloaded = app2.batches.batches[batch_id]
         assert reloaded["active_job_id"] == "", reloaded["active_job_id"]
         assert reloaded["producing"] == 0, reloaded
@@ -809,6 +865,14 @@ def main() -> int:
         assert reloaded["items"][-1]["state"] == "pending", reloaded["items"][-1]
         assert reloaded["done"] == READY_COUNT - 1 and reloaded["pending"] == 1, reloaded
         server2, base2 = start_server(app2)
+        code, _, sel_detail2 = call(alice, base2, f"/api/batches/{sel_id}")
+        assert code == 200, (code, sel_detail2)
+        sel_batch2 = body(sel_detail2)["batch"]
+        assert [row["id"] for row in sel_batch2["draft_selection"]] == ready_ids[:2], sel_batch2
+        assert sel_batch2["selection_count"] == 2, sel_batch2
+        code, _, sel_locked = call(alice, base2, f"/api/batches/{sel_id}/lock", "POST",
+                                   {"confirmed": True})
+        assert code == 200 and body(sel_locked)["batch"]["total_items"] == 2, (code, sel_locked)
         code, _, listed = call(alice, base2, "/api/batches")
         assert code == 200 and batch_id in {row["id"] for row in body(listed)["batches"]}, listed
         print("  ✓ 重启后批次状态正确加载：成功条目收敛 done、查不到的 producing 回 pending")

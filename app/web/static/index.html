@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f7fb">
   <title>换装视频工作台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261107b">
+  <link rel="stylesheet" href="/static/style.css?v=20261111a">
   <link rel="stylesheet" href="/static/tag-filter.css">
-  <link rel="stylesheet" href="/static/batch.css?v=20261105l">
+  <link rel="stylesheet" href="/static/batch.css?v=20261111a">
   <link rel="stylesheet" href="/static/tag.css?v=20261104d">
   <link rel="stylesheet" href="/static/ps.css?v=20261109b">
   <link rel="stylesheet" href="/static/imagegen.css?v=20261109c">
@@ -15,8 +15,8 @@
   <link rel="stylesheet" href="/static/canvas/canvas.css?v=20261109t">
   <!-- 多图槽位组件须先于 app.js / batch.js 加载（defer 保证顺序） -->
   <script defer src="/static/image-slots.js?v=20261105l"></script>
-  <script defer src="/static/app.js?v=20261109c"></script>
-  <script defer src="/static/batch.js?v=20261107a"></script>
+  <script defer src="/static/app.js?v=20261111a"></script>
+  <script defer src="/static/batch.js?v=20261111a"></script>
   <script defer src="/static/tag.js?v=20261104d"></script>
   <script defer src="/static/ps.js?v=20261109d"></script>
   <script defer src="/static/imagegen.js?v=20261109e"></script>
@@ -85,7 +85,7 @@
             <div id="image-slots" class="slot-grid" role="group" aria-label="任务图片槽位"></div>
             <input id="image-file" class="slot-file-input" type="file" multiple accept="image/*,.jpg,.jpeg,.png,.webp,.bmp">
             <div id="image-preview-wrap" class="template-preview-wrap hidden">
-              <video id="template-preview" class="template-preview" controls loop muted playsinline preload="metadata"></video>
+              <div id="template-preview-list" class="template-previews" role="list" aria-label="已选模板预览"></div>
             </div>
             <div id="image-info" class="image-info muted"></div>
           </article>
@@ -216,7 +216,7 @@
           </article>
 
           <article class="card batch-panel hidden" id="batch-step-b">
-            <div class="step-title"><span class="step">2</span><div><h2>筛选候选</h2><p>点卡片即选中并在右侧播放；同一类别内满足任一标签，不同类别之间同时满足。标「✕」的是排除标签，命中的模板不会进候选。</p></div></div>
+            <div class="step-title"><span class="step">2</span><div><h2>筛选候选</h2><p>点卡片即加入生产清单并在右侧播放；同一类别内满足任一标签，不同类别之间同时满足。标「✕」的是排除标签，命中的模板不会进候选。</p></div></div>
             <div id="batch-tag-card" class="tag-filter-card hidden">
               <div id="batch-tag-groups" class="tag-filter-groups"></div>
               <div class="tag-filter-footer">
@@ -226,7 +226,7 @@
             </div>
             <div class="batch-cand-toolbar">
               <div class="batch-toolbar-info">
-                <span id="batch-count-label" class="batch-count">已选 0 / 候选 0</span>
+                <span id="batch-count-label" class="batch-count">清单 0 / 候选 0</span>
                 <span id="batch-tag-summary" class="muted batch-tag-summary"></span>
               </div>
               <div class="batch-toolbar-actions">
@@ -235,10 +235,10 @@
                 <label class="field batch-filter-field">排序<select id="batch-rating-sort"><option value="" selected>默认顺序</option><option value="rating">评分高→低</option></select></label>
                 <!-- 筛掉本款号已经用过的模板（款号-模板账本；与候选行「已用」徽标同源） -->
                 <label class="batch-toggle" id="batch-hide-used-wrap"><input id="batch-hide-used" type="checkbox"><span>隐藏已用</span></label>
-                <button id="batch-select-page" class="quiet" type="button">全选本页</button>
-                <button id="batch-invert" class="quiet" type="button">反选本页</button>
-                <button id="batch-select-all" class="quiet" type="button">全选全部 0 条</button>
-                <label class="batch-toggle"><input id="batch-only-selected" type="checkbox"><span>只看已选</span></label>
+                <button id="batch-select-page" class="quiet" type="button">加入本页</button>
+                <button id="batch-invert" class="quiet" type="button">移出本页</button>
+                <button id="batch-select-all" class="quiet" type="button">加入全部 0 条</button>
+                <label class="batch-toggle"><input id="batch-only-selected" type="checkbox"><span>只看清单</span></label>
               </div>
             </div>
             <div id="batch-cand-chips" class="batch-chips"></div>
@@ -246,6 +246,16 @@
               <div class="batch-cand-main">
                 <div id="batch-cand-grid" class="batch-cand-grid" role="group" aria-label="候选场景列表" tabindex="0"></div>
                 <p id="batch-cand-note" class="muted batch-cand-note hidden"></p>
+                <!-- 生产清单托盘：加入的条目在服务端草稿里持久化，筛选/翻页/刷新标签都不会丢。 -->
+                <div id="batch-picked" class="batch-picked hidden" role="region" aria-label="生产清单">
+                  <div class="batch-picked-head">
+                    <b>生产清单</b>
+                    <span id="batch-picked-count" class="muted">已加入 0 条</span>
+                    <span class="batch-picked-hint">筛选只影响候选展示，已加入的条目不会丢；锁定前可随时移出。</span>
+                    <button id="batch-picked-clear" class="quiet btn-sm" type="button">清空清单</button>
+                  </div>
+                  <div id="batch-picked-list" class="batch-picked-list" role="list"></div>
+                </div>
                 <!-- 候选区底部一行：左边翻页条，右边锁定条。
                      锁定挨着候选清单，右列整列留给播放器；桌面共用一行，避免额外侵占候选高度。 -->
                 <div class="batch-cand-foot">
@@ -256,8 +266,8 @@
                   </div>
                   <div class="batch-lock-bar">
                     <div class="batch-lock-info">
-                      <b id="batch-lock-count">已选 0 条</b>
-                      <p id="batch-lock-hint" class="muted">锁定后清单不可更改，未勾选的候选不会生产。</p>
+                      <b id="batch-lock-count">清单还是空的</b>
+                      <p id="batch-lock-hint" class="muted">在候选卡片点 + 加入生产清单。</p>
                     </div>
                     <button id="batch-lock-btn" class="primary" type="button" disabled>锁定清单</button>
                     <p id="batch-lock-error" class="error hidden"></p>

@@ -102,17 +102,20 @@
    basis 0px + min-height:0 之后，候选区的高度只由右列决定，网格永远只拿剩下的空间，内容多了自己滚。 */
 .batch-cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:5px;align-content:start;flex:1 1 0px;min-height:0;overflow-y:auto;overflow-x:hidden;padding:1px 2px 1px 1px}
 .batch-cand-grid:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-/* 单张卡：两行（勾选框 + 文件名 / 标签），整卡可点 = 选中 + 预览 */
-.batch-cand{display:grid;grid-template-columns:14px minmax(0,1fr);grid-template-areas:"box name" "meta meta";align-items:center;gap:0 6px;min-width:0;padding:4px 8px;border:1px solid var(--line);border-left:3px solid transparent;border-radius:8px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
+/* 单张卡：两行（加入钮 + 文件名 / 标签），整卡可点 = 加入清单 + 预览 */
+.batch-cand{display:grid;grid-template-columns:20px minmax(0,1fr);grid-template-areas:"box name" "meta meta";align-items:center;gap:0 6px;min-width:0;padding:4px 8px;border:1px solid var(--line);border-left:3px solid transparent;border-radius:8px;background:var(--paper);color:var(--ink);text-align:left;cursor:pointer}
 .batch-cand:hover{border-color:color-mix(in srgb,var(--blue) 32%,white);background:color-mix(in srgb,var(--blue) 3%,white)}
 .batch-cand.is-selected{border-color:color-mix(in srgb,var(--blue) 45%,white);border-left-color:var(--blue);background:color-mix(in srgb,var(--blue) 6%,white)}
 .batch-cand.is-unready{border-style:dashed;background:color-mix(in srgb,var(--bg) 55%,white)}
 .batch-cand.is-unready:hover{border-color:color-mix(in srgb,var(--muted) 40%,white)}
 .batch-cand.is-previewing{border-color:var(--blue);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 40%,white)}
 .batch-cand:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
-.batch-cand-pick{grid-area:box;display:flex;align-items:center;justify-content:center;min-width:0;cursor:pointer}
-.batch-cand-check{width:14px;height:14px;margin:0;accent-color:var(--blue);cursor:pointer}
-.batch-cand-check:disabled{cursor:not-allowed}
+.batch-cand-add{grid-area:box;display:flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:1px solid color-mix(in srgb,var(--blue) 42%,white);border-radius:50%;background:var(--paper);color:var(--blue);font-weight:800;font-size:14px;line-height:1;cursor:pointer}
+.batch-cand-add:hover{background:color-mix(in srgb,var(--blue) 10%,white)}
+.batch-cand-add[aria-pressed="true"]{background:var(--blue);border-color:var(--blue);color:#fff}
+.batch-cand-add[aria-pressed="true"]:hover{background:color-mix(in srgb,var(--blue) 86%,black)}
+.batch-cand-add:disabled{opacity:.4;cursor:not-allowed}
+.batch-cand-add:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .batch-cand-line{grid-area:name;display:flex;align-items:center;gap:4px;min-width:0}
 .batch-cand-name{flex:1 1 auto;min-width:0;font-size:12px;font-weight:700;line-height:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .batch-cand.is-unready .batch-cand-name{color:var(--muted);font-weight:600}
@@ -148,6 +151,21 @@
 .batch-cand-meta.is-tiny{font-size:9px;line-height:11px}
 .batch-cand-empty{grid-column:1/-1}
 .batch-cand-note{font-size:11px;line-height:1.4;margin:6px 0 0}
+/* 生产清单托盘：服务端草稿的可见部分，筛选/翻页/刷新标签都不会清空它。
+   放在候选网格与底部锁定条之间，最高 110px，超出自己滚，不把右列播放器挤矮。 */
+.batch-picked{flex:none;margin-top:6px;padding:6px 8px;border:1px solid color-mix(in srgb,var(--blue) 26%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--blue) 4%,white)}
+.batch-picked.hidden{display:none}
+.batch-picked-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.batch-picked-head b{flex:none;font-size:12px;color:var(--ink)}
+.batch-picked-head #batch-picked-count{flex:none;font-size:12px;font-weight:700;color:var(--blue)}
+.batch-picked-hint{flex:1 1 220px;min-width:0;font-size:11px;line-height:1.3;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-picked-head .quiet{flex:none;min-height:26px;padding:3px 10px;font-size:11px}
+.batch-picked-list{display:flex;flex-wrap:wrap;gap:4px;max-height:clamp(64px,11vh,110px);overflow:auto;margin-top:5px}
+.batch-picked-item{display:inline-flex;align-items:center;gap:4px;max-width:240px;min-width:0;padding:2px 3px 2px 8px;border:1px solid color-mix(in srgb,var(--blue) 22%,var(--line));border-radius:999px;background:var(--paper);font-size:11px;line-height:16px}
+.batch-picked-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.batch-picked-remove{flex:none;display:flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--muted);font-size:14px;line-height:1;cursor:pointer}
+.batch-picked-remove:hover{background:color-mix(in srgb,var(--red,#c2410c) 12%,white);color:var(--red,#c2410c)}
+.batch-picked-remove:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
 
 /* ---------- 候选区底部一行：翻页（左） + 锁定（右） ----------
    锁定是对候选清单的操作，因此放在网格下方、分页条之后，右列整列留给播放器。
