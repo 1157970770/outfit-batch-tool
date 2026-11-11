@@ -8,6 +8,9 @@
 
 口径（与 app/web/jobs.py::usage_for 保持一致）：
     · 一行 = 一个账户 + 一天（本地时区，按 job.created_at 归日）；
+    · 「人员」列按账户自动补中文名：1157970770→郑、WUZHIHAO→吴、
+      Caiqike→蔡、Liuhanpeng→刘（DEFAULT_PERSONS / 可被 config.persons 覆盖）；
+      没有映射的账户留空，不覆盖人工填的名字；
     · 生产视频数量 = 当日该账户 status=success 的 record 条数；
     · 消费金额（元）= 当日该账户全部 record 的费用之和：
         rec.estimated_cost 有值用记录值（生成时落的账）；
@@ -39,7 +42,10 @@
       "app_id": "cli_xxx", "app_secret": "xxx",
       "app_token": "bascnxxx", "table_id": "tblxxx",
       "fields": {"account": "账户", "date": "日期",
-                 "count": "生产视频数量", "cost": "消费金额"}   // 可选，字段名可改
+                 "count": "生产视频数量", "cost": "消费金额", "person": "人员"},
+      "persons": {"1157970770": "郑"},              // 可选，覆盖/追加人员映射
+      "summary_table_id": "tblxxx", "daily_table_id": "tblxxx",  // 可选，按 ID 找表（改名也不丢）
+      "daily_fields": {"available": "可用视频数量(待回传数据)"}   // 可选，列名被改过时对齐
     }
 
 区域解析：数据目录默认 <脚本所在仓库>/web-data；--data-root 指定后，
@@ -71,7 +77,16 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRICE_PER_SECOND = {"480P": 0.3, "720P": 0.6, "1080P": 1.2}
 
 DEFAULT_FIELD_NAMES = {"account": "账户", "date": "日期",
-                       "count": "生产视频数量", "cost": "消费金额"}
+                       "count": "生产视频数量", "cost": "消费金额",
+                       "person": "人员"}
+# 账户 → 人员中文名：明细表「人员」列每天自动补；没列出的账户（如 ZHOUHAO）留空，
+# 也允许 server/feishu.json 里用 "persons": {"账户": "姓名"} 覆盖/追加。
+DEFAULT_PERSONS = {
+    "1157970770": "郑",
+    "WUZHIHAO": "吴",
+    "Caiqike": "蔡",
+    "Liuhanpeng": "刘",
+}
 # 汇总表（每天一行：全账户合计），表不存在时自动创建
 SUMMARY_TABLE_NAME = "每日总消耗"
 SUMMARY_FIELD_NAMES = {"date": "日期", "count": "生产视频数量",
@@ -333,6 +348,14 @@ class Feishu:
                           {"table": {"name": name, "default_view_name": "表格", "fields": fields}})
         return str(data.get("table_id") or "")
 
+    def rename_table(self, table_id: str, name: str) -> None:
+        # 更新数据表用 PATCH（PUT 会 404）
+        self._data("PATCH", f"/open-apis/bitable/v1/apps/{self.app_token}/tables/{table_id}",
+                   {"name": name})
+
+    def delete_table(self, table_id: str) -> None:
+        self._data("DELETE", f"/open-apis/bitable/v1/apps/{self.app_token}/tables/{table_id}")
+
     # ---- 字段 ----
 
     def list_fields(self, table_id: str | None = None) -> list[dict]:
@@ -443,6 +466,9 @@ def ensure_fields(fs: Feishu, names: dict) -> list[str]:
     if names["cost"] not in by_name:
         fs.create_field(names["cost"], 2, {"formatter": "0.00"})
         actions.append(f"新建字段「{names['cost']}」(数字)")
+    if names["person"] not in by_name:
+        fs.create_field(names["person"], 1)
+        actions.append(f"新建字段「{names['person']}」(文本，按账户自动补姓名)")
     return actions
 
 
@@ -488,11 +514,15 @@ def ms_to_iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).date().isoformat()
 
 
-def make_fields(names: dict, iso: str, owner: str, count: int, cost: float) -> dict:
-    return {names["account"]: owner,
-            names["date"]: date_ms(iso),
-            names["count"]: int(count),
-            names["cost"]: round(float(cost), 2)}
+def make_fields(names: dict, iso: str, owner: str, count: int, cost: float,
+                person: str = "") -> dict:
+    fields = {names["account"]: owner,
+              names["date"]: date_ms(iso),
+              names["count"]: int(count),
+              names["cost"]: round(float(cost), 2)}
+    if person:  # 没映射到人的账户不写，避免把人工填的名字冲掉
+        fields[names["person"]] = person
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -520,11 +550,13 @@ def scan_existing(fs: Feishu, names: dict) -> tuple[dict, list[str], list[str]]:
         if key in by_key:
             dup_ids.append(record_id)             # 同键重复（极端情况下创建重试落了两次），自愈删旧的
             continue
-        by_key[key] = {"record_id": record_id, "count": count, "cost": cost}
+        by_key[key] = {"record_id": record_id, "count": count, "cost": cost,
+                       "person": text_value(fields.get(names["person"]))}
     return by_key, empty_ids, dup_ids
 
 
-def sync_rows(fs: Feishu, names: dict, rows: dict) -> dict:
+def sync_rows(fs: Feishu, names: dict, rows: dict, persons: dict[str, str] | None = None) -> dict:
+    persons = persons or {}
     by_key, empty_ids, dup_ids = scan_existing(fs, names)
     creates: list[dict] = []
     updates: list[dict] = []
@@ -532,13 +564,15 @@ def sync_rows(fs: Feishu, names: dict, rows: dict) -> dict:
     for iso in sorted(rows):
         for owner in sorted(rows[iso]):
             cell = rows[iso][owner]
-            desired = make_fields(names, iso, owner, cell["count"], cell["cost"])
+            person = str(persons.get(owner) or "")
+            desired = make_fields(names, iso, owner, cell["count"], cell["cost"], person)
             key = f"{iso}|{owner}"
             current = by_key.get(key)
             if current is None:
                 creates.append(desired)
             elif (current["count"] == cell["count"]
-                  and round(current["cost"] or 0.0, 2) == round(cell["cost"], 2)):
+                  and round(current["cost"] or 0.0, 2) == round(cell["cost"], 2)
+                  and (not person or (current.get("person") or "") == person)):
                 skipped += 1
             else:
                 updates.append({"record_id": current["record_id"], "fields": desired})
@@ -567,11 +601,24 @@ def summarize(rows: dict[str, dict[str, dict]]) -> dict[str, dict]:
     return sums
 
 
-def ensure_summary_table(fs: Feishu, name: str) -> tuple[str, str]:
-    """按名字找汇总表，没有就建（自愈）；返回 (table_id, 说明或空串)。"""
-    for table in fs.list_tables():
+def _find_table(fs: Feishu, name: str, table_id: str = "") -> str:
+    """先按 table_id 找（改名/重命名都稳），找不到再按名字。"""
+    tables = fs.list_tables()
+    if table_id:
+        for table in tables:
+            if str(table.get("table_id") or "") == table_id:
+                return table_id
+    for table in tables:
         if str(table.get("name") or "") == name:
-            return str(table.get("table_id") or ""), ""
+            return str(table.get("table_id") or "")
+    return ""
+
+
+def ensure_summary_table(fs: Feishu, name: str, table_id: str = "") -> tuple[str, str]:
+    """按 table_id/名字找汇总表，没有就建（自愈）；返回 (table_id, 说明或空串)。"""
+    found = _find_table(fs, name, table_id)
+    if found:
+        return found, ""
     fields = [
         {"field_name": SUMMARY_FIELD_NAMES["date"], "type": 5,
          "property": {"date_formatter": "yyyy/MM/dd"}},
@@ -645,28 +692,31 @@ def sync_summary(fs: Feishu, table_id: str, sums: dict[str, dict]) -> dict:
 # 质量统计表：脚本只填「当日生产的视频总数」，「可用视频数量」留给人工
 # ---------------------------------------------------------------------------
 
-def ensure_daily_table(fs: Feishu, name: str) -> tuple[str, str]:
-    """按名字找统计表，没有就建（自愈）；返回 (table_id, 说明或空串)。"""
-    for table in fs.list_tables():
-        if str(table.get("name") or "") == name:
-            return str(table.get("table_id") or ""), ""
+def ensure_daily_table(fs: Feishu, name: str, names: dict | None = None,
+                       table_id: str = "") -> tuple[str, str]:
+    """按 table_id/名字找统计表，没有就建（自愈）；返回 (table_id, 说明或空串)。"""
+    names = names or DAILY_FIELD_NAMES
+    found = _find_table(fs, name, table_id)
+    if found:
+        return found, ""
     fields = [
-        {"field_name": DAILY_FIELD_NAMES["date"], "type": 5,
+        {"field_name": names["date"], "type": 5,
          "property": {"date_formatter": "yyyy/MM/dd"}},
-        {"field_name": DAILY_FIELD_NAMES["count"], "type": 2, "property": {"formatter": "0"}},
-        {"field_name": DAILY_FIELD_NAMES["available"], "type": 2, "property": {"formatter": "0"}},
+        {"field_name": names["count"], "type": 2, "property": {"formatter": "0"}},
+        {"field_name": names["available"], "type": 2, "property": {"formatter": "0"}},
     ]
     return fs.create_table(name, fields), f"新建统计表「{name}」"
 
 
-def sync_daily(fs: Feishu, table_id: str, sums: dict[str, dict]) -> dict:
+def sync_daily(fs: Feishu, table_id: str, sums: dict[str, dict],
+               names: dict | None = None) -> dict:
     """统计表 upsert（键 = 日期）：只写「日期 + 当日生产的视频总数」。
 
     「可用视频数量」是人工列——更新时只发自己这两个字段（飞书是部分更新），
     绝不覆盖；删除也极其保守：只删整行全空的占位行，带日期的行一律保留，
     重复日期也不删（可能挂着人工数据）。
     """
-    names = DAILY_FIELD_NAMES
+    names = names or DAILY_FIELD_NAMES
     by_date: dict[str, dict] = {}
     empty_ids: list[str] = []
     for item in fs.search_records(table_id):
@@ -819,6 +869,7 @@ def main(argv: list[str] | None = None) -> int:
                 for iso, day in rows.items()}
 
     # ---- 聚合结果先亮出来（dry-run 到此为止）----
+    persons = dict(DEFAULT_PERSONS)
     total_count = sum(cell["count"] for day in rows.values() for cell in day.values())
     total_cost = round(sum(cell["cost"] for day in rows.values() for cell in day.values()), 2)
     emit(args, f"[聚合] {start} ~ {end}（含端点） 账户数={len(users)} "
@@ -826,7 +877,8 @@ def main(argv: list[str] | None = None) -> int:
     for iso in sorted(rows):
         for owner in sorted(rows[iso]):
             cell = rows[iso][owner]
-            emit(args, f"  {iso}  {owner:<14} 生产={cell['count']:<4} 消费={cell['cost']:.2f} 元 (任务 {cell['jobs']})")
+            emit(args, f"  {iso}  {owner:<14} 人员={persons.get(owner) or '-':<2} "
+                       f"生产={cell['count']:<4} 消费={cell['cost']:.2f} 元 (任务 {cell['jobs']})")
     sums = summarize(rows)
     for iso in sorted(sums):
         s = sums[iso]
@@ -849,6 +901,16 @@ def main(argv: list[str] | None = None) -> int:
                 names[key] = str(value).strip()
     summary_name = str(cfg.get("summary_table_name") or "").strip() or SUMMARY_TABLE_NAME
     daily_name = str(cfg.get("daily_table_name") or "").strip() or DAILY_TABLE_NAME
+    daily_fields = dict(DAILY_FIELD_NAMES)
+    if isinstance(cfg.get("daily_fields"), dict):   # 表里列名被人工改过时用配置对齐
+        for key, value in cfg["daily_fields"].items():
+            if key in daily_fields and str(value or "").strip():
+                daily_fields[key] = str(value).strip()
+    summary_id = str(cfg.get("summary_table_id") or "").strip()
+    daily_id = str(cfg.get("daily_table_id") or "").strip()
+    if isinstance(cfg.get("persons"), dict):   # 允许本地配置覆盖/追加账户→姓名
+        for key, value in cfg["persons"].items():
+            persons[str(key)] = str(value or "").strip()
 
     if not acquire_lock(args):
         emit(args, "[锁] 已有实例在跑，本次跳过（默认回补三天，明天会自动补上）")
@@ -866,36 +928,36 @@ def main(argv: list[str] | None = None) -> int:
                 deleted = fs.batch_delete(empty_ids + dup_ids) if (empty_ids or dup_ids) else 0
                 emit(args, f"[setup] 建字段完成，清理空占位/重复行 {deleted} 条")
                 if not args.no_summary:
-                    summary_id, note = ensure_summary_table(fs, summary_name)
+                    table_id, note = ensure_summary_table(fs, summary_name, summary_id)
                     if note:
-                        emit(args, f"[汇总] {note}（{summary_id}）")
+                        emit(args, f"[汇总] {note}（{table_id}）")
                 if not args.no_daily:
-                    daily_id, note = ensure_daily_table(fs, daily_name)
+                    table_id, note = ensure_daily_table(fs, daily_name, daily_fields, daily_id)
                     if note:
-                        emit(args, f"[统计] {note}（{daily_id}）")
+                        emit(args, f"[统计] {note}（{table_id}）")
                 return 0
-            result = sync_rows(fs, names, rows)
+            result = sync_rows(fs, names, rows, persons)
             emit(args, f"[同步] 新建 {result['created']} / 更新 {result['updated']} / "
                        f"无变化 {result['skipped']} / 清空行 {result['deleted']}")
             sums = summarize(rows)
             if not args.no_summary:
-                summary_id, note = ensure_summary_table(fs, summary_name)
-                if not summary_id:
+                table_id, note = ensure_summary_table(fs, summary_name, summary_id)
+                if not table_id:
                     emit(args, "[汇总] 汇总表创建失败（table_id 为空），本次跳过")
                 else:
                     if note:
-                        emit(args, f"[汇总] {note}（{summary_id}）")
-                    sresult = sync_summary(fs, summary_id, sums)
+                        emit(args, f"[汇总] {note}（{table_id}）")
+                    sresult = sync_summary(fs, table_id, sums)
                     emit(args, f"[汇总] 新建 {sresult['created']} / 更新 {sresult['updated']} / "
                                f"无变化 {sresult['skipped']} / 清空行 {sresult['deleted']}")
             if not args.no_daily:
-                daily_id, note = ensure_daily_table(fs, daily_name)
-                if not daily_id:
+                table_id, note = ensure_daily_table(fs, daily_name, daily_fields, daily_id)
+                if not table_id:
                     emit(args, "[统计] 统计表创建失败（table_id 为空），本次跳过")
                 else:
                     if note:
-                        emit(args, f"[统计] {note}（{daily_id}）")
-                    dresult = sync_daily(fs, daily_id, sums)
+                        emit(args, f"[统计] {note}（{table_id}）")
+                    dresult = sync_daily(fs, table_id, sums, daily_fields)
                     emit(args, f"[统计] 新建 {dresult['created']} / 更新 {dresult['updated']} / "
                                f"无变化 {dresult['skipped']} / 清空行 {dresult['deleted']}")
             return 0
