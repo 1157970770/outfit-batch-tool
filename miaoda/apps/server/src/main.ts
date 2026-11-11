@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { AppModule } from './app.module';
+import { acquireInstanceLock } from './common/instance-lock';
 import { AppConfigService } from './config/app-config.service';
 import { createSecurityMiddleware } from './security/security.middleware';
 
@@ -22,6 +23,19 @@ async function bootstrap(): Promise<void> {
 
   const config = app.get(AppConfigService);
   const logger = new Logger('Bootstrap');
+
+  // 数据目录单实例锁：与 Python 版同口径（端口层面挡不住第二个进程，
+  // 两个实例会同时写 jobs/batches 并互相抢带 Cookie 的请求）。
+  const lock = acquireInstanceLock(config.dataDir);
+  if (!lock) {
+    logger.error(`已有一个服务在运行（同一数据目录）：${config.dataDir}`);
+    logger.error('请先关闭它再启动；若上次是异常退出，删掉 server.lock.d 后重试。');
+    await app.close();
+    process.exit(2);
+  }
+  // 进程怎么退（正常关闭 / 崩溃 / Ctrl+C）都要把锁带走；Nest 的 shutdown hook
+  // 只处理优雅关闭，`exit` 事件对两者都生效，且不会和它抢信号处理。
+  process.on('exit', () => lock.release());
 
   // 标签页上传视频走原始字节流：必须在 json 解析之前挂，否则 50MB 会被当 JSON 读进内存。
   // 只对这一个路径生效，其余请求仍走下面的 json/urlencoded。
@@ -55,6 +69,7 @@ async function bootstrap(): Promise<void> {
   logger.log(`妙搭后端已启动：http://${config.host}:${config.port}`);
   logger.log(`  配置目录 ${config.serverDir}`);
   logger.log(`  数据目录 ${config.dataDir}`);
+  logger.log(`  实例锁 ${lock.dir}`);
   if (config.devMode) logger.log('  当前为【开发版】');
 }
 

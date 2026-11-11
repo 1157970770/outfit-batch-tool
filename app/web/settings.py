@@ -63,6 +63,29 @@ class WebSettings:
         return users if isinstance(users, dict) else {}
 
     @property
+    def cors_origins(self) -> tuple[str, ...]:
+        """跨域套壳白名单（web.json 的 `cors_origins`）。
+
+        默认空 = 关闭：只接受同源请求，Host/Origin 双重校验与历史行为一致。
+        填了之后，这些来源可以跨域调用 API（用于「前端部署在飞书妙搭、
+        后端仍跑本机」的套壳部署）：响应会回显 `Access-Control-Allow-Origin`，
+        登录响应额外下发 `token`，前端用 `Authorization: Bearer` 维持会话
+        （跨站 Cookie 会被浏览器丢弃，光靠 Cookie 不可用）。
+
+        注意：跨域是 HTTPS 页面 → HTTP 服务时会被浏览器按「混合内容」拦掉，
+        所以套壳部署要求本机服务也有 HTTPS 入口（反向代理/Tunnel）。
+        """
+        raw = self.web.get("cors_origins")
+        if not isinstance(raw, list):
+            return ()
+        origins: list[str] = []
+        for item in raw:
+            text = str(item or "").strip().rstrip("/").lower()
+            if text.startswith("http://") or text.startswith("https://"):
+                origins.append(text)
+        return tuple(dict.fromkeys(origins))
+
+    @property
     def max_active_jobs(self) -> int:
         return max(1, min(MAX_ACTIVE_JOBS_CAP, int(self.web.get("max_active_jobs", 2))))
 

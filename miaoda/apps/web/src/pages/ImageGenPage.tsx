@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, apiUrl, errorText } from '@/api';
+import { api, mediaUrl, errorText } from '@/api';
 import { useVisiblePolling } from '@/lib/useVisiblePolling';
 import { toast, toastError } from '@/ui/toast';
 
@@ -411,12 +411,12 @@ export function ImageGenPage() {
                   <div className="ig-images">
                     {task.images.map((image) => (
                       <figure key={image.index}>
-                        <a href={apiUrl(image.url)} target="_blank" rel="noreferrer">
-                          <img src={apiUrl(image.url)} alt={image.name} loading="lazy" />
+                        <a href={mediaUrl(image.url)} target="_blank" rel="noreferrer">
+                          <img src={mediaUrl(image.url)} alt={image.name} loading="lazy" />
                         </a>
                         <figcaption>
                           {image.width && image.height ? `${image.width}×${image.height}` : ''}
-                          <a className="link-button" href={apiUrl(image.download_url)}>下载</a>
+                          <a className="link-button" href={mediaUrl(image.download_url)}>下载</a>
                         </figcaption>
                       </figure>
                     ))}

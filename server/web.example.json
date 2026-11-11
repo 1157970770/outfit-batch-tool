@@ -1,5 +1,5 @@
 {
-  "_说明": "网页服务运行配置示例。首次运行 run_web.py --init 自动创建 web.json 和管理员账号。",
+  "_说明": "网页服务运行配置示例。首次运行 run_web.py --init 自动创建 web.json 和管理员账号。cors_origins 只在「前端部署在飞书妙搭、后端仍跑本机」的套壳模式下填，例如 [\"https://xxx.feishu.cn\"]；留空数组表示只接受同源请求。",
   "host": "0.0.0.0",
   "port": 8765,
   "session_secret": "由初始化命令自动生成",
@@ -11,5 +11,6 @@
   "max_upload_mb": 20,
   "data_root": "web-data",
   "retention_days": 0,
+  "cors_origins": [],
   "users": {}
 }

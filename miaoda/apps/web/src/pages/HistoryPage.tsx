@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { api, apiUrl, errorText } from '@/api';
+import { api, errorText, mediaUrl } from '@/api';
 import { useSession, isAdmin } from '@/session';
 import { toastError } from '@/ui/toast';
 import type {
@@ -332,7 +332,7 @@ export function HistoryPage() {
                   <tr key={`${row.job_id}-${row.template_id}`}>
                     <td>
                       {row.image_url ? (
-                        <img className="history-thumb" src={apiUrl(row.image_url)} alt="定妆图" />
+                        <img className="history-thumb" src={mediaUrl(row.image_url)} alt="定妆图" />
                       ) : (
                         <span className="muted">—</span>
                       )}
@@ -365,7 +365,7 @@ export function HistoryPage() {
                     <td>{row.seconds ? `${row.seconds.toFixed(0)}s` : '—'}</td>
                     <td className="history-actions">
                       {row.download_url ? (
-                        <a className="link-button" href={apiUrl(row.download_url)}>
+                        <a className="link-button" href={mediaUrl(row.download_url)}>
                           下载
                         </a>
                       ) : null}
@@ -447,15 +447,15 @@ function CompareOverlay({ row, onClose }: { row: HistoryRow; onClose: () => void
         <div className="compare-body">
           <figure className="compare-col">
             <figcaption>定妆图</figcaption>
-            {row.image_url ? <img src={apiUrl(row.image_url)} alt="定妆图" /> : <p className="muted">无</p>}
+            {row.image_url ? <img src={mediaUrl(row.image_url)} alt="定妆图" /> : <p className="muted">无</p>}
           </figure>
           <figure className="compare-col">
             <figcaption>生成的视频</figcaption>
-            <video src={apiUrl(row.download_url)} controls playsInline preload="metadata" />
+            <video src={mediaUrl(row.download_url)} controls playsInline preload="metadata" />
           </figure>
           <figure className="compare-col">
             <figcaption>模板视频</figcaption>
-            <video src={apiUrl(`/api/templates/${encodeURIComponent(row.template_id)}/preview`)} controls playsInline preload="metadata" />
+            <video src={mediaUrl(`/api/templates/${encodeURIComponent(row.template_id)}/preview`)} controls playsInline preload="metadata" />
           </figure>
         </div>
       </div>

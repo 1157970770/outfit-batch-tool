@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { api, apiUrl, errorText } from '@/api';
+import { api, mediaUrl, errorText } from '@/api';
 import { toastError } from '@/ui/toast';
 
 interface DepurpleResult {
@@ -141,7 +141,7 @@ export function PsPage() {
             {busy ? '处理中…' : '开始去紫'}
           </button>
           {result && (
-            <a className="quiet btn-sm" href={apiUrl(result.download_url)}>下载 PNG</a>
+            <a className="quiet btn-sm" href={mediaUrl(result.download_url)}>下载 PNG</a>
           )}
         </div>
 
@@ -159,7 +159,7 @@ export function PsPage() {
               去紫后{result ? `（强度 ${result.strength}）` : ''}
               {result?.cached ? <span className="tag-hint"> · 命中缓存</span> : null}
             </figcaption>
-            {result ? <img src={apiUrl(result.url)} alt="去紫结果" /> : <p className="tag-empty">点「开始去紫」生成</p>}
+            {result ? <img src={mediaUrl(result.url)} alt="去紫结果" /> : <p className="tag-empty">点「开始去紫」生成</p>}
           </figure>
         </section>
       )}

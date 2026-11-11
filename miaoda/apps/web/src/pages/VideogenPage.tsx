@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiUrl, authHeaders, errorText, IS_REMOTE } from '@/api';
+import { api, apiUrl, authHeaders, errorText, IS_REMOTE, mediaUrl } from '@/api';
 import { useSession } from '@/session';
 import { toast } from '@/ui/toast';
 import { ImageSlotGrid } from '@/pages/create/ImageSlotGrid';
@@ -598,8 +598,8 @@ export function VideogenPage() {
                     </div>
                     {shot.url ? (
                       <>
-                        <video src={apiUrl(shot.url)} controls preload="metadata" className="vg-shot-video" />
-                        <a className="quiet btn-sm" href={apiUrl(shot.download_url)}>
+                        <video src={mediaUrl(shot.url)} controls preload="metadata" className="vg-shot-video" />
+                        <a className="quiet btn-sm" href={mediaUrl(shot.download_url)}>
                           下载
                         </a>
                       </>

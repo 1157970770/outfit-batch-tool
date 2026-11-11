@@ -339,6 +339,8 @@ def _safe_user_name(username: str) -> bool:
 def make_handler(app: WebApplication):
     static_root = Path(__file__).resolve().parent / "static"
     allowed_hosts = _local_hosts()
+    # 跨域套壳白名单（web.json → cors_origins）：空元组表示关闭，行为与历史一致。
+    cors_origins = tuple(getattr(app.settings, "cors_origins", ()) or ())
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -396,6 +398,11 @@ def make_handler(app: WebApplication):
             if extra:
                 for key, value in extra.items():
                     self.send_header(key, value)
+            origin = (self.headers.get("Origin") or "").strip().rstrip("/").lower()
+            if origin and origin in cors_origins:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Credentials", "true")
+                self.send_header("Vary", "Origin")
             self.end_headers()
 
         def _json(self, obj, status=200, extra=None):
@@ -441,6 +448,9 @@ def make_handler(app: WebApplication):
             origin = self.headers.get("Origin")
             if not origin:
                 return True
+            # 跨域套壳：白名单里的来源与 Host 不同源，属于预期情况。
+            if origin.strip().rstrip("/").lower() in cors_origins:
+                return True
             try:
                 parsed = urllib.parse.urlsplit(origin)
                 origin_host = (parsed.hostname or "").lower()
@@ -453,9 +463,24 @@ def make_handler(app: WebApplication):
             cookie = SimpleCookie()
             try:
                 cookie.load(self.headers.get("Cookie", ""))
-                return cookie.get("outfit_sid").value if cookie.get("outfit_sid") else ""
+                value = cookie.get("outfit_sid").value if cookie.get("outfit_sid") else ""
             except Exception:
-                return ""
+                value = ""
+            if value:
+                return value
+            # 跨域套壳模式下浏览器不一定带得上 Cookie，退回到 Authorization。
+            auth = (self.headers.get("Authorization") or "").strip()
+            if auth.lower().startswith("bearer "):
+                return auth[7:].strip()
+            # <img>/<video>/<a download> 发不了请求头：允许把令牌放查询串（仅套壳模式会生成）。
+            try:
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                value = (query.get("access_token") or [""])[0].strip()
+                if value:
+                    return value
+            except (ValueError, UnicodeDecodeError):
+                pass
+            return ""
 
         def _user(self, admin=False):
             user = app.user_for_token(self._token())
@@ -482,6 +507,21 @@ def make_handler(app: WebApplication):
 
         def do_HEAD(self):
             return self.do_GET()
+
+        def do_OPTIONS(self):
+            """CORS 预检：只对白名单来源回 204，其它一律 403（默认关闭时全部拒绝）。"""
+            if not self._host_ok():
+                return self._error("访问地址无效。", 421)
+            origin = (self.headers.get("Origin") or "").strip().rstrip("/").lower()
+            if not origin or origin not in cors_origins:
+                return self._error("请求来源无效，请刷新页面后重试。", 403)
+            return self._headers(status=204, extra={
+                "Access-Control-Allow-Methods": "GET, HEAD, POST, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": (
+                    "Authorization, Content-Type, X-File-Name, X-Tags, X-Auto-Number, X-Kind"
+                ),
+                "Access-Control-Max-Age": "600",
+            })
 
         def do_GET(self):
             if not self._host_ok():
@@ -992,7 +1032,12 @@ def make_handler(app: WebApplication):
             app.limiter.succeeded(user_key)
             token = app.signer.issue(username, record)
             extra = {"Set-Cookie": f"outfit_sid={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={app.signer.hours * 3600}"}
-            return self._json({"ok": True, "user": {"username": username, "role": record.get("role", "user")}}, extra=extra)
+            body = {"ok": True, "user": {"username": username, "role": record.get("role", "user")}}
+            origin = (self.headers.get("Origin") or "").strip().rstrip("/").lower()
+            if origin and origin in cors_origins:
+                # 跨站 Cookie 基本带不上，套壳前端改用 Bearer 令牌维持会话。
+                body["token"] = token
+            return self._json(body, extra=extra)
 
         def _upload_template(self, user):
             """接收单个视频（原始字节流）：暂存 → 校验 → 传 COS → 登记清单。"""

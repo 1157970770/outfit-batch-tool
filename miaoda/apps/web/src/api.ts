@@ -82,6 +82,21 @@ export function apiUrl(path: string): string {
   return value.startsWith('/') ? `${API_BASE}${value}` : `${API_BASE}/${value}`;
 }
 
+/**
+ * 媒体地址（`<img>` / `<video>` / `<a download>` 用）。
+ *
+ * 这些标签发不了 `Authorization` 头，跨域时也带不上 Cookie，
+ * 所以套壳模式下把令牌挂在查询串上（`?access_token=`），后端 `_token()` 认这个参数。
+ * 同源模式原样返回，不改变任何既有行为。
+ */
+export function mediaUrl(path: string): string {
+  const url = apiUrl(path);
+  // 只给自己的接口加令牌；COS 签名链接这类站外地址原样返回。
+  if (!IS_REMOTE || !token || !url.startsWith(API_BASE)) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}access_token=${encodeURIComponent(token)}`;
+}
+
 export interface RequestOptions {
   method?: string;
   body?: unknown;

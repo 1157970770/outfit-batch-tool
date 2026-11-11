@@ -1,15 +1,28 @@
 # miaoda · 换装批量生产器的妙搭版
 
-React 19 + Vite 6 + TypeScript 前端，NestJS 10 后端，读现有 `server/*.json` 与 `web-data*/*.json`（格式不变、历史数据零迁移）。
+> **2026-11-11 方向调整**：主线改为「**前端套壳**」——只把 React 前端部署到飞书妙搭，
+> 后端仍是本机 Python 服务（`python run_web.py`）。见 [docs/妙搭套壳部署.md](docs/妙搭套壳部署.md)。
+> 原「NestJS 全量重写」实现（P0–P4 已完成、冒烟全绿）保留在 `apps/server/`，作为可选/回退路径，不再是主线。
 
-> 方案总览：[../docs/妙搭迁移方案.md](../docs/妙搭迁移方案.md) · 部署细节：[docs/妙搭部署.md](docs/妙搭部署.md) · 一致性清单：[docs/parity-checklist.md](docs/parity-checklist.md)
+React 19 + Vite 6 + TypeScript 前端；读现有 `server/*.json` 与 `web-data*/*.json`（格式不变、历史数据零迁移）。
+
+> 方案总览：[../docs/妙搭迁移方案.md](../docs/妙搭迁移方案.md) · 套壳部署：[docs/妙搭套壳部署.md](docs/妙搭套壳部署.md) · 一致性清单：[docs/parity-checklist.md](docs/parity-checklist.md)
 
 ## 快速开始
 
 ```powershell
 npm install --ignore-scripts
-npm run dev          # 后端 3001 + 前端 5173（http://localhost:5173）
+npm run dev:web      # 只起前端 5173，接口代理到本机 Python 服务（默认 127.0.0.1:8766）
+# 或起「前端 + NestJS 后端」：npm run dev
 ```
+
+打妙搭静态包：
+
+```powershell
+npm run build:shell -- https://你的后端入口
+# 产物 miaoda/dist-miaoda/，上传到妙搭静态站点即可
+```
+
 
 ## 目录
 

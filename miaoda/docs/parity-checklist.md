@@ -96,3 +96,19 @@
 - [ ] Toast 单例、3200ms、后到覆盖
 - [ ] 轮询统一：仅「页面激活 + 文档可见 + 有在飞」时轮询
 - [ ] 妙搭环境：构建/启动/端口/健康检查/持久卷跑通；`parity.mjs` 在线上全绿
+
+## 套壳模式（2026-11-11 方向调整：前端进妙搭、后端仍在本机）
+
+- [x] `web.json` 的 `cors_origins` 白名单生效：命中才回 `Access-Control-Allow-Origin` + `Allow-Credentials` + `Vary: Origin`
+- [x] `OPTIONS` 预检 204，`Allow-Headers` 含 `Authorization`；非白名单来源 403
+- [x] 跨域登录响应额外下发 `token`；同源登录响应形状不变（后端字段不出现）
+- [x] `Authorization: Bearer` 可访问全部接口（Cookie 带不上时的退路）
+- [x] `?access_token=` 可访问接口（`<img>/<video>/<a download>` 发不了请求头）
+- [x] 401 响应也带 CORS 头（否则前端只能看到网络错误）
+- [x] `mediaUrl()` 只给自己的接口加令牌，COS 签名链接原样返回
+- [x] 套壳包构建：`node scripts/build-shell.mjs <后端地址>` → `dist-miaoda/`，`index.html` 内为 `./assets/...` 相对路径
+- [x] 冒烟：`scripts/cors-smoke.mjs` **13/13**
+- [ ] 后端 HTTPS 入口（反向代理或隧道）——没有它，HTTPS 页面调 HTTP 接口会被浏览器按混合内容拦掉
+- [ ] 在妙搭控制台确认交付形态：静态包上传 / 「构建命令 + 产物目录」
+- [ ] 真机联调：妙搭页面登录 → 建任务 → 播放/下载视频（跨域 + Range + 令牌三件事一起验）
+- [ ] 素材检索 iframe 与画布 `canvas/` 静态包仍指向局域网地址时的表现（当前已知限制）

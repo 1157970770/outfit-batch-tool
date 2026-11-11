@@ -20,6 +20,7 @@
     "test:server": "npm run test -w @outfit/server",
     "test:web": "npm run test -w @outfit/web",
     "parity": "node scripts/parity.mjs",
+    "build:shell": "node scripts/build-shell.mjs",
     "pack": "node scripts/pack-miaoda.mjs",
     "typecheck": "npm run typecheck -w @outfit/shared && npm run typecheck -w @outfit/server && npm run typecheck -w @outfit/web"
   },
