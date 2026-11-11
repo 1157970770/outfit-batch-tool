@@ -238,6 +238,11 @@ export class AppConfigService {
     return clampInt(this.web.confirm_over_items, 5, 1, 100);
   }
 
+  /** 自由视频的并发任务数（与 Python `videogen_max_inflight` 同口径，钳 1..8）。 */
+  get videogenMaxInflight(): number {
+    return clampInt(this.web.videogen_max_inflight, 2, 1, 8);
+  }
+
   get wan() {
     return this.app.wan ?? {};
   }

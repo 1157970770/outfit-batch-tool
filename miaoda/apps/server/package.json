@@ -18,7 +18,8 @@
     "dotenv": "16.4.7",
     "express": "4.21.2",
     "reflect-metadata": "0.2.2",
-    "rxjs": "7.8.1"
+    "rxjs": "7.8.1",
+    "sharp": "^0.33.5"
   },
   "devDependencies": {
     "@nestjs/cli": "10.4.9",

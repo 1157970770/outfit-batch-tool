@@ -1,4 +1,12 @@
-/** 与 Python `_error()` 同构的错误体：前端只认 `error` 字段。 */
+/**
+ * 与 Python 后端通信的唯一入口。
+ *
+ * 两种运行形态：
+ *   1) 同源（默认）：前端由本机 `python run_web.py` 的静态目录托管，走 Cookie 会话；
+ *   2) 跨域套壳（`VITE_API_BASE` / `window.__OUTFIT_API_BASE__` 指向本机服务）：
+ *      前端部署在飞书妙搭，后端仍跑本机。跨站 Cookie 会被浏览器丢弃，
+ *      所以登录响应会额外下发 `token`，这里用 `Authorization: Bearer` 带上。
+ */
 export interface ApiErrorBody {
   ok: false;
   error: string;
@@ -22,6 +30,58 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
   onUnauthorized = handler;
 }
 
+const TOKEN_KEY = 'outfit.api_token';
+
+function runtimeBase(): string {
+  if (typeof window === 'undefined') return '';
+  const injected = (window as unknown as { __OUTFIT_API_BASE__?: unknown }).__OUTFIT_API_BASE__;
+  if (typeof injected === 'string' && injected.trim()) return injected.trim();
+  try {
+    return window.localStorage.getItem('outfit.api_base') || '';
+  } catch {
+    return '';
+  }
+}
+
+/** 后端根地址，空串表示同源。末尾斜杠会被去掉。 */
+export const API_BASE = String(runtimeBase() || import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
+
+/** true = 前端与后端不同源（妙搭套壳模式）。 */
+export const IS_REMOTE = API_BASE !== '';
+
+/** 站外登录令牌：同源模式下后端不下发，保持空串。 */
+let token = '';
+try {
+  token = (typeof localStorage !== 'undefined' && localStorage.getItem(TOKEN_KEY)) || '';
+} catch {
+  token = '';
+}
+
+export function getToken(): string {
+  return token;
+}
+
+export function setToken(value: string | null): void {
+  token = value || '';
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // 隐私模式下写不了 localStorage，内存态仍然可用
+  }
+}
+
+/**
+ * 把后端返回的相对地址（`/api/uploads/...`、`/api/jobs/.../download/...`）
+ * 拼成可放进 `src` / `href` 的绝对地址；已经是绝对地址的原样返回。
+ */
+export function apiUrl(path: string): string {
+  const value = String(path || '');
+  if (!value || !API_BASE) return value;
+  if (/^(https?:|data:|blob:)/i.test(value)) return value;
+  return value.startsWith('/') ? `${API_BASE}${value}` : `${API_BASE}/${value}`;
+}
+
 export interface RequestOptions {
   method?: string;
   body?: unknown;
@@ -38,10 +98,11 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   const { method = 'GET', body, signal, skipUnauthorized, raw, headers } = options;
   const init: RequestInit = {
     method,
-    credentials: 'same-origin',
+    credentials: IS_REMOTE ? 'include' : 'same-origin',
     signal,
     headers: { Accept: 'application/json', ...(headers || {}) },
   };
+  if (token) init.headers = { ...init.headers, Authorization: `Bearer ${token}` };
   if (raw !== undefined) {
     init.body = raw;
   } else if (body !== undefined) {
@@ -49,7 +110,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     init.body = JSON.stringify(body);
   }
 
-  const res = await fetch(path, init);
+  const res = await fetch(apiUrl(path), init);
   let payload: unknown = null;
   const text = await res.text();
   if (text) {
@@ -68,6 +129,11 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     throw new ApiError(message, res.status);
   }
   return payload as T;
+}
+
+/** 给 XHR（需要上传进度）用的请求头：跨域时带上令牌。 */
+export function authHeaders(): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export function errorText(err: unknown): string {

@@ -17,7 +17,7 @@ npm run dev          # 后端 3001 + 前端 5173（http://localhost:5173）
 miaoda/
 ├─ packages/shared/      两端共用：状态机常量、上限、DTO
 ├─ apps/server/          NestJS：配置/鉴权/安全中间件/标签真源/接口
-├─ apps/web/             React：外壳 + 10 个视图（P0 为占位页）
+├─ apps/web/             React：外壳 + 11 个视图（含自由视频）
 └─ scripts/
    ├─ dev.mjs            先编 shared，再并发起 nest watch 与 vite
    └─ parity.mjs         离线一致性冒烟（状态码/文案/Cookie/安全头/bootstrap）
@@ -50,11 +50,14 @@ PORT=3001
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 骨架、配置、登录/会话、bootstrap、安全头、静态托管、parity | ✅ |
-| P1 | 小批量试跑（图片槽位 insert 交互、提交与轮询） | ⏳ |
-| P2 | 批次向导、历史分组、ZIP | ⏳ |
-| P3 | 视频库打标、管理端 | ⏳ |
-| P4 | 生图、PS 助手、素材检索 | ⏳ |
-| P5 | 前端全量还原、画布、妙搭上线 | ⏳ |
+| P1 | 小批量试跑（图片槽位 insert 交互、提交与轮询、复查） | ✅ |
+| P2 | 批次向导、历史分组、ZIP、三栏对比 | ✅ |
+| P3 | 视频库打标、管理端 | ✅ |
+| P4 | 生图、PS 助手、素材检索 | ✅ |
+| P6 | 自由视频（提示词/参考素材/分镜/取消） | ✅ |
+| P5 | 视觉回归、画布、妙搭上线 | ⏳ |
+
+阶段验收脚本：`scripts/parity.mjs`、`p1-smoke.mjs`、`p2-smoke.mjs`、`p3-smoke.mjs`、`p4-smoke.mjs`、`p4-imagegen-smoke.mjs`、`p6-smoke.mjs`（都需要 mock 百炼 + 隔离实例，见各脚本头部注释）。
 
 ## 注意
 

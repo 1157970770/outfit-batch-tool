@@ -6,7 +6,7 @@
 import { useSyncExternalStore } from 'react';
 
 import type { BootstrapResponse, PromptItem, ServiceInfo, User } from '@outfit/shared';
-import { ApiError, api, setUnauthorizedHandler } from '@/api';
+import { ApiError, api, setToken, setUnauthorizedHandler } from '@/api';
 
 export type SessionStatus = 'boot' | 'anon' | 'ready';
 
@@ -58,7 +58,13 @@ export async function bootstrap(): Promise<void> {
 }
 
 export async function login(username: string, password: string): Promise<void> {
-  await api('/api/login', { method: 'POST', body: { username, password }, skipUnauthorized: true });
+  const data = await api<{ ok: true; user: User; token?: string }>('/api/login', {
+    method: 'POST',
+    body: { username, password },
+    skipUnauthorized: true,
+  });
+  // 跨域套壳模式下后端会额外下发 token（跨站 Cookie 不可用），同源模式没有这个字段。
+  if (data && data.token) setToken(data.token);
   await bootstrap();
 }
 
@@ -66,6 +72,7 @@ export async function logout(): Promise<void> {
   try {
     await api('/api/logout', { method: 'POST', skipUnauthorized: true });
   } finally {
+    setToken(null);
     setState({ status: 'anon', user: null, service: null, prompts: [], error: '' });
   }
 }

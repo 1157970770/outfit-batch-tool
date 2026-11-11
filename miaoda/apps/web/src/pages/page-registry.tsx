@@ -14,12 +14,23 @@ export const VIEWS = [
   { key: 'material', label: '素材检索', admin: false },
   { key: 'ps', label: 'PS 助手', admin: false },
   { key: 'imagegen', label: '生图', admin: false },
+  { key: 'videogen', label: '自由视频', admin: false },
   { key: 'canvas', label: '画布', admin: false },
 ] as const;
 
 export type ViewKey = (typeof VIEWS)[number]['key'];
 
-const RESTORE_VIEWS: ViewKey[] = ['create', 'history', 'admin', 'tag', 'material', 'ps', 'imagegen', 'canvas'];
+const RESTORE_VIEWS: ViewKey[] = [
+  'create',
+  'history',
+  'admin',
+  'tag',
+  'material',
+  'ps',
+  'imagegen',
+  'videogen',
+  'canvas',
+];
 
 export function useView(defaultKey: ViewKey = 'create'): [ViewKey, (key: ViewKey) => void] {
   const [view, setView] = useState<ViewKey>(() => {

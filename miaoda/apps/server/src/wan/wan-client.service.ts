@@ -233,6 +233,108 @@ export class WanClientService {
     return errors;
   }
 
+  /**
+   * 自由视频的内部体 → 官方请求体（对应 `to_wire_body` 的通用分支）。
+   * 与 `wireBody()` 的差别：支持反向提示词、参考音频、seed、audio/promptExtend/watermark。
+   */
+  wireFreeBody(task: {
+    prompt: string;
+    negativePrompt?: string;
+    mode: string;
+    resolution: string;
+    aspectRatio: string;
+    duration: number;
+    audio: boolean;
+    promptExtend: boolean;
+    watermark: boolean;
+    seed?: number | null;
+    imageUrls: string[];
+    videoUrls: string[];
+    audioUrls: string[];
+  }): Record<string, unknown> {
+    const media: Array<{ type: string; url: string }> = [];
+    if (task.mode === 'edit') {
+      for (const url of task.videoUrls) media.push({ type: 'reference_video', url });
+      for (const url of task.imageUrls) media.push({ type: 'reference_image', url });
+    } else {
+      for (const url of task.imageUrls) media.push({ type: 'reference_image', url });
+      for (const url of task.videoUrls) media.push({ type: 'reference_video', url });
+    }
+    for (const url of task.audioUrls) media.push({ type: 'reference_audio', url });
+
+    const input: Record<string, unknown> = { prompt: task.prompt };
+    if (task.negativePrompt) input.negative_prompt = task.negativePrompt;
+    if (media.length > 0) input.media = media;
+
+    const parameters: Record<string, unknown> = {
+      resolution: task.resolution,
+      ratio: task.aspectRatio,
+      duration: task.duration,
+      audio: Boolean(task.audio),
+      prompt_extend: Boolean(task.promptExtend),
+      watermark: Boolean(task.watermark),
+    };
+    if (task.seed !== null && task.seed !== undefined) parameters.seed = task.seed;
+
+    return { model: this.config.model, input, parameters };
+  }
+
+  /**
+   * 轮询到终态（对应 `WanClient.wait_task`）：
+   * 分段睡眠让 `shouldStop`（取消）能在 ~0.5s 内生效，网络抖动 5 次以上才判超时。
+   */
+  async waitTask(
+    taskId: string,
+    opts: { shouldStop?: () => boolean; timeoutMs?: number; intervalMs?: number } = {},
+  ): Promise<TaskResult> {
+    const timeoutMs = opts.timeoutMs ?? this.config.pollTimeoutMs;
+    const intervalMs = opts.intervalMs ?? this.config.pollIntervalMs;
+    const deadline = Date.now() + timeoutMs;
+    let networkFailures = 0;
+
+    const stopped = (): boolean => {
+      try {
+        return Boolean(opts.shouldStop?.());
+      } catch {
+        return false;
+      }
+    };
+
+    while (Date.now() < deadline) {
+      if (stopped()) throw new WaitStopped(taskId);
+      const nap = Math.max(50, intervalMs * (0.8 + Math.random() * 0.4));
+      let slept = 0;
+      while (slept < nap) {
+        if (stopped()) throw new WaitStopped(taskId);
+        const step = Math.min(500, nap - slept);
+        await new Promise((resolve) => setTimeout(resolve, step));
+        slept += step;
+      }
+      let result: TaskResult;
+      try {
+        result = await this.getTask(taskId);
+      } catch (err) {
+        const category = err instanceof WanError ? err.category : '';
+        if (category === 'network' || category === 'server' || category === 'rate') {
+          if (category === 'rate') this.queryLimiter.penalize(5);
+          networkFailures += 1;
+          if (networkFailures >= 5) {
+            throw new WaitTimeout(taskId, Math.round(timeoutMs / 1000));
+          }
+          continue;
+        }
+        throw err;
+      }
+      networkFailures = 0;
+      if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'canceled') {
+        return result;
+      }
+      if (result.status === 'unknown') return result;
+      if (stopped()) throw new WaitStopped(taskId);
+    }
+    throw new WaitTimeout(taskId, Math.round(timeoutMs / 1000));
+  }
+
   async submit(body: Record<string, unknown>): Promise<SubmitResult> {
     await this.submitLimiter.acquire();
     const url = join(this.config.wanBaseUrl, SUBMIT_SUFFIX);

@@ -26,6 +26,8 @@ async function bootstrap(): Promise<void> {
   // 标签页上传视频走原始字节流：必须在 json 解析之前挂，否则 50MB 会被当 JSON 读进内存。
   // 只对这一个路径生效，其余请求仍走下面的 json/urlencoded。
   app.use('/api/tags/videos/upload', express.raw({ type: () => true, limit: '52mb' }));
+  // 自由视频的参考视频/音频同理（上限 100MB，留 1MB 余量）。
+  app.use('/api/videogen/upload', express.raw({ type: () => true, limit: '101mb' }));
   // 与 Python 一致：只认 Content-Length，不接受 chunked（安全中间件里已拦 411）。
   app.use(express.json({ limit: '32mb' }));
   app.use(express.urlencoded({ extended: false, limit: '2mb' }));

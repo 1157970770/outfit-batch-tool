@@ -2,8 +2,10 @@ import { Controller, Get } from '@nestjs/common';
 
 import { CurrentUser, AuthedUser } from '../auth/decorators';
 import { AppConfigService } from '../config/app-config.service';
+import { ImagegenManagerService } from '../imagegen/imagegen-manager.service';
 import { PromptsService } from '../templates/prompts.service';
 import { TemplateCatalogService } from '../templates/template-catalog.service';
+import { VideogenManagerService } from '../videogen/videogen-manager.service';
 
 @Controller('api')
 export class BootstrapController {
@@ -11,11 +13,14 @@ export class BootstrapController {
     private readonly config: AppConfigService,
     private readonly catalog: TemplateCatalogService,
     private readonly prompts: PromptsService,
+    private readonly imagegen: ImagegenManagerService,
+    private readonly videogen: VideogenManagerService,
   ) {}
 
   /**
    * GET /api/bootstrap：字段与 Python 版一致，前端只读这一份就能渲染外壳与上限。
-   * 注意 `imagegen` 目前是「未配置」占位，P4 迁移生图模块后替换成真实 options。
+   * `imagegen` / `videogen` 直接下发各自的 `options()`（与 Python 同字段），
+   * 未配置时也是正常返回 configured:false + reason。
    */
   @Get('bootstrap')
   async bootstrap(@CurrentUser() user: AuthedUser) {
@@ -47,17 +52,8 @@ export class BootstrapController {
         unlisted_files: info.unlisted_files ?? null,
         manifest_warning: String(info.manifest_warning ?? ''),
         notice: this.config.notice,
-        imagegen: {
-          configured: false,
-          reason: '生图模块尚未迁移（P4）',
-          models: [],
-          default_model: '',
-          default_quality: '',
-          max_count: 0,
-          max_references: 0,
-          price: '',
-          prompt_limit: 0,
-        },
+        imagegen: this.imagegen.options(),
+        videogen: this.videogen.options(),
       },
       prompts: this.prompts.list(),
     };

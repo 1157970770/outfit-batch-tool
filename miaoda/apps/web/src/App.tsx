@@ -10,6 +10,7 @@ import { AdminPage } from '@/pages/AdminPage';
 import { MaterialPage } from '@/pages/MaterialPage';
 import { PsPage } from '@/pages/PsPage';
 import { ImageGenPage } from '@/pages/ImageGenPage';
+import { VideogenPage } from '@/pages/VideogenPage';
 import { CanvasPage } from '@/pages/CanvasPage';
 import {
   VIEWS,
@@ -29,6 +30,7 @@ const PAGES: Record<string, ComponentType> = {
   material: MaterialPage,
   ps: PsPage,
   imagegen: ImageGenPage,
+  videogen: VideogenPage,
   canvas: CanvasPage,
 };
 

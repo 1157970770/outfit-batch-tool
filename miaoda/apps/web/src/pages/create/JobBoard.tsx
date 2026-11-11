@@ -3,6 +3,7 @@
  * 详情里的下载走 `/api/jobs/<id>/download/<tid>`，播放用 `X-Playback` 的 inline 变体。
  */
 import { useEffect, useState } from 'react';
+import { apiUrl } from '@/api';
 import type { JobView } from '../../lib/types';
 
 export const JOB_STATUS_TEXT: Record<string, string> = {
@@ -105,7 +106,7 @@ export function JobBoard({ jobs, selected, onSelect, onCancel, onRetry, onRechec
             {selected.image_urls?.length > 0 && (
               <div className="job-images">
                 {selected.image_urls.map((url, index) => (
-                  <img key={url} src={url} alt={`图${index + 1}`} title={`图${index + 1}`} />
+                  <img key={url} src={apiUrl(url)} alt={`图${index + 1}`} title={`图${index + 1}`} />
                 ))}
               </div>
             )}
@@ -176,7 +177,7 @@ export function JobBoard({ jobs, selected, onSelect, onCancel, onRetry, onRechec
                     <td>{record.seconds ? `${Math.round(record.seconds)}s` : '—'}</td>
                     <td>
                       {record.download_url ? (
-                        <a href={`${record.download_url}?play=1`} target="_blank" rel="noreferrer">
+                        <a href={`${apiUrl(record.download_url)}?play=1`} target="_blank" rel="noreferrer">
                           预览
                         </a>
                       ) : null}

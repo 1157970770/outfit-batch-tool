@@ -13,6 +13,7 @@ import '@/styles/admin.css';
 import '@/styles/material.css';
 import '@/styles/ps.css';
 import '@/styles/imagegen.css';
+import '@/styles/videogen.css';
 import '@/styles/canvas-host.css';
 
 const host = document.getElementById('root');

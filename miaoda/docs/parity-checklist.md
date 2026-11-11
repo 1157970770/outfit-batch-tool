@@ -63,16 +63,34 @@
 
 ## P4 · 生图 / PS / 素材
 
-- [ ] 生图：`provider=images` 用像素尺寸、`provider=gemini` 用「比例@档位」，两套不混用
-- [ ] 生图 HTTP 200 但无图视为失败且**不自动重试**（会计费）
-- [ ] 参考图建任务时拷贝到 `files/<id>/refN.<ext>`，uploads 删了也能复现
-- [ ] 生图任务 2500ms 轮询，仅在有进行中任务时跑；删除任务同步删文件
-- [ ] PS 去紫：强度 1–100、LAB 中性带内降饱和、结果 `ps/<upload_id>_s<强度>.png` + `.json`；缺 numpy 返回 503
-- [ ] 素材检索 iframe：懒挂载、切走不卸载、CSP 放行
+- [x] 生图：`provider=images` 用像素尺寸、`provider=gemini` 用「比例@档位」，两套不混用（`p4-imagegen-smoke` 验了 6 个型号的尺寸/质量档）
+- [x] 生图 HTTP 200 但无图视为失败且**不自动重试**（会计费）
+- [x] 参考图建任务时拷贝到 `files/<id>/refN.<ext>`，uploads 删了也能复现
+- [x] 生图任务 2500ms 轮询，仅在有进行中任务时跑；删除任务同步删文件
+- [x] PS 去紫：强度 1–100、LAB 中性带内降饱和、结果 `ps/<upload_id>_s<强度>.png` + `.json`（与 Python 逐位一致，`checksum` 相同）
+- [x] 素材检索 iframe：懒挂载、切走不卸载、CSP 放行
+- [ ] 生图真实出图（老张 API）：只做了选项/校验/权限的离线与冒烟，**未真的生成一张图**（会产生费用，等用户手动验）
+
+## P6 · 自由视频（2026-11-11 新增）
+
+- [x] 选项与限制下发：`configured/reason/model/provider/cos_enabled/modes/resolutions/ratios/durations/defaults/limits/modes_engine` 与 Python `models.options()` 同字段同顺序
+- [x] 参数校验顺序与文案逐字一致（空提示词 / 超 20000 字 / 生成方式 / 视频编辑必须有参考视频 / 分辨率 / 参考生视频不许 adaptive / 时长 / 数量 1–4 / 种子 / 参考图 10、视频 5、音频 5 / 总时长 15s 与 30s 两条上限）
+- [x] 状态机：`排队中 / 生成中 / 已完成 / 部分完成 / 生成失败 / 已取消`；分镜 `排队中 / 生成中 / 已完成 / 生成失败 / 已取消`
+- [x] 重启恢复：进行中的任务落「生成失败」+「服务重启，进行中的任务已中止；云端可能已出片并计费，请到百炼控制台确认。」
+- [x] 参考素材上传走原始字节流（`X-Kind` / `X-File-Name`），100MB / 15MB 上限 413；后缀错误文案一致
+- [x] 参考图复用 `/api/uploads`（`upload_ids`），参考视频/音频未启用 COS 时直接报错（不静默丢素材）
+- [x] 并发：`web.json.videogen_max_inflight`（默认 2，钳 1..8）；同一任务多分镜顺序跑，占快速通道在飞池
+- [x] 取消是协作式的：排队中直接取消、生成中保留 `cancel_requested` 并让当前分镜停下；已结束再取消 409「这个任务已经结束，不能取消。」
+- [x] 删除：活动中 409「任务还在跑，先取消再删除。」；删除连 `tasks/<id>.json` 与 `files/<id>/` 一起清
+- [x] 下载：成片 `/videos/<index>`、参考素材 `/refs/<kind>/<index>`，默认 inline、`?download=1` 附件（`filename*=UTF-8''`）
+- [ ] 参考视频/音频真的送云端（需要 COS）：当前未启用 COS 时按 Python 口径直接失败，启用后要补 `reference_video` / `reference_audio` 的 URL
+- [ ] `ffprobe` 路径：默认找 `FFPROBE_PATH` → `D:\ffmpeg\...\ffprobe.exe` → PATH；妙搭容器里必须预装 ffmpeg
+
+实测：`scripts/p6-smoke.mjs` **26/26 通过**（登录 → bootstrap 下发选项 → 6 类参数校验 → 建任务 → mock 出片 → 下载 mp4 / 附件 / 参考图回读 → 已结束取消 409 → 删除 200 → 再查 404）；单测 server 144 项（含 videogen 16）。
 
 ## P5 · 前端全量与上线
 
-- [ ] 10 个视图视觉回归通过（与 `app/web/static` 版逐页对照）
+- [ ] 10 个视图视觉回归通过（与 `app/web/static` 版逐页对照；现为 11 个视图，含自由视频）
 - [ ] `active-view` 类名与 id 保持，画布 2500ms 轮询可读
 - [ ] 画布复用单 root（`CanvasUI.enter/leave`），不二次 `createRoot`
 - [ ] Toast 单例、3200ms、后到覆盖

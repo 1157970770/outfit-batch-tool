@@ -604,7 +604,7 @@ describe('admin archive', () => {
     });
   });
 
-  it('空款号 400、超长 400；账本没命中时按 COS 未配置 503（不伪造结果）', async () => {
+  it('空款号 400、超长 400；账本没命中返回 200 + 空列表（不伪造云端结果）', async () => {
     const harness = makeHarness();
     expect(await fails(() => harness.service.archiveSearch({}))).toEqual({
       status: 400,
@@ -614,10 +614,15 @@ describe('admin archive', () => {
       status: 400,
       error: '款号过长。',
     });
-    expect(await fails(() => harness.service.archiveSearch({ style: 'ZZ-99' }))).toEqual({
-      status: 503,
-      error: ARCHIVE_DISABLED_TEXT,
-    });
+    // Python 到这一步会去列 COS 前缀，未接入时同样得到空列表 → 200 + entries: []
+    const empty = (await harness.service.archiveSearch({ style: 'ZZ-99' })) as {
+      ok: boolean;
+      entries: unknown[];
+      total: number;
+    };
+    expect(empty.ok).toBe(true);
+    expect(empty.entries).toEqual([]);
+    expect(empty.total).toBe(0);
   });
 
   it('archive-sign：缺 keys 400、路径不可用 400、其余统一 503', async () => {

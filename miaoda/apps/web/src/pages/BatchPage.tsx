@@ -10,7 +10,7 @@
  * 轮询：只在「有在跑的任务」或「复查进行中」时按 4000ms 拉详情，页面隐藏时暂停。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, errorText } from '@/api';
+import { api, apiUrl, errorText } from '@/api';
 import { useSession } from '@/session';
 import { toast, toastError } from '@/ui/toast';
 import { useVisiblePolling } from '@/lib/useVisiblePolling';
@@ -433,7 +433,7 @@ export function BatchPage() {
         toast('暂时没有可下载的视频。', 'error');
         return;
       }
-      window.location.href = probe.download_url;
+      window.location.href = apiUrl(probe.download_url);
     } catch (err) {
       toastError(errorText(err));
     }
@@ -856,7 +856,7 @@ export function BatchPage() {
                             {item.state === 'failed' && item.error ? (
                               <span className="error">{item.error}</span>
                             ) : item.state === 'done' ? (
-                              <a href={`/api/jobs/${item.job_id}/download/${item.template_id}`}>下载</a>
+                              <a href={apiUrl(`/api/jobs/${item.job_id}/download/${item.template_id}`)}>下载</a>
                             ) : (
                               <span className="muted">—</span>
                             )}

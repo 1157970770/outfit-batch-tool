@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { api, errorText } from '@/api';
+import { api, apiUrl, errorText } from '@/api';
 import type {
   AdminStatus,
   AdminUserRow,
@@ -127,7 +127,7 @@ export function AdminPage() {
           <div className="panel-head">
             <h3>{work.owner} 的工作明细（{work.data.total} 条）</h3>
             <div className="admin-inline">
-              <a className="quiet btn-sm" href={`/api/admin/accounts/${encodeURIComponent(work.owner)}/work.csv`}>导出 CSV</a>
+              <a className="quiet btn-sm" href={apiUrl(`/api/admin/accounts/${encodeURIComponent(work.owner)}/work.csv`)}>导出 CSV</a>
               <button className="link-button" onClick={() => setWork(null)}>关闭</button>
             </div>
           </div>
@@ -404,7 +404,7 @@ function ArchivePanel() {
           <ul>
             {links.links.map((link) => (
               <li key={link.key}>
-                <a href={link.url} target="_blank" rel="noreferrer">{link.key}</a>
+                <a href={apiUrl(link.url)} target="_blank" rel="noreferrer">{link.key}</a>
               </li>
             ))}
           </ul>

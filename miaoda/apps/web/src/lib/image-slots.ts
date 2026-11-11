@@ -10,6 +10,8 @@
  */
 import { useCallback, useRef, useState } from 'react';
 
+import { apiUrl, authHeaders } from '@/api';
+
 export const SLOT_MAX = 10;
 const MAX_FILE_MB = 20;
 const TYPE_RE = /\.(jpe?g|png|webp|bmp)$/i;
@@ -201,8 +203,9 @@ function uploadOne(item: SlotItem): Promise<string> {
     (dataUrl) =>
       new Promise<string>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/uploads', true);
+        xhr.open('POST', apiUrl('/api/uploads'), true);
         xhr.setRequestHeader('Content-Type', 'application/json');
+        for (const [key, value] of Object.entries(authHeaders())) xhr.setRequestHeader(key, value);
         xhr.withCredentials = true;
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) item.progress = Math.round((event.loaded / event.total) * 100);

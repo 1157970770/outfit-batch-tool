@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { api, errorText } from '@/api';
+import { api, apiUrl, errorText } from '@/api';
 import { TagFilterPanel } from '@/components/TagFilterPanel';
 import { useSession } from '@/session';
 import type {
@@ -392,7 +392,7 @@ export function TagPage() {
               {previewRow.ready ? (
                 <video
                   key={previewRow.id}
-                  src={`/api/templates/${encodeURIComponent(previewRow.id)}/preview`}
+                  src={apiUrl(`/api/templates/${encodeURIComponent(previewRow.id)}/preview`)}
                   controls
                   playsInline
                   preload="metadata"

@@ -50,6 +50,7 @@ export interface ServiceInfo {
   manifest_warning: string;
   notice: string;
   imagegen: Record<string, unknown> | null;
+  videogen: Record<string, unknown> | null;
 }
 
 export interface PromptItem {
