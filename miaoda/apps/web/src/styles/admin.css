@@ -6,6 +6,16 @@
   gap: 14px;
 }
 
+/* components.css 的 `.panel-head > div` 是「纵向 + flex:1」，
+   会把管理端放在右侧的这组输入框排成居中的竖列；这里改回横排、靠右。 */
+.panel-head > .admin-inline {
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
 .admin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

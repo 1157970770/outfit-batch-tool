@@ -1,9 +1,24 @@
 /* 画布：整页交给 canvas 包自己的 root，这里只管容器尺寸。 */
 
+/* canvas.css 在宽屏下把 #canvas-view.active-view 设成 display:flex，
+   所以本容器必须是能撑满的 flex item（否则会被收缩到内容宽度，
+   #canvas-root 的 width:100% 就只剩 2px 边框）。 */
 .canvas-page {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
   min-height: 72vh;
+}
+
+.canvas-page > #canvas-root {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
 }
 
 .canvas-root {
