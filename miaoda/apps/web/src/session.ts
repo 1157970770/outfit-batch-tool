@@ -6,7 +6,7 @@
 import { useSyncExternalStore } from 'react';
 
 import type { BootstrapResponse, PromptItem, ServiceInfo, User } from '@outfit/shared';
-import { ApiError, api, setToken, setUnauthorizedHandler } from '@/api';
+import { ApiError, API_BASE, MIXED_CONTENT, api, setToken, setUnauthorizedHandler } from '@/api';
 
 export type SessionStatus = 'boot' | 'anon' | 'ready';
 
@@ -45,6 +45,16 @@ setUnauthorizedHandler(() => {
 
 /** 启动时探活：404/401 都当作未登录，避免首屏报错。 */
 export async function bootstrap(): Promise<void> {
+  if (MIXED_CONTENT) {
+    setState({
+      status: 'anon',
+      user: null,
+      service: null,
+      prompts: [],
+      error: `后端地址是 ${API_BASE}，但本页面走 HTTPS：浏览器会按「混合内容」直接拦掉请求。请给后端配一个 HTTPS 入口（反向代理/内网穿透），再用 npm run build:shell -- https://你的后端 重新打包。`,
+    });
+    return;
+  }
   try {
     const data = await api<BootstrapResponse>('/api/bootstrap', { skipUnauthorized: true });
     setState({ status: 'ready', user: data.user, service: data.service, prompts: data.prompts || [], error: '' });

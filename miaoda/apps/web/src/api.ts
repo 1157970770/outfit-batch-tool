@@ -83,6 +83,17 @@ export function apiUrl(path: string): string {
 }
 
 /**
+ * 混合内容预警：HTTPS 页面调 `http://` 后端会被浏览器直接拦掉（连请求都发不出去）。
+ * 本机/局域网地址尤其容易踩，启动时先给出人话提示，别让用户对着空白页猜。
+ */
+export const MIXED_CONTENT =
+  typeof window !== 'undefined' &&
+  window.location.protocol === 'https:' &&
+  IS_REMOTE &&
+  /^http:\/\//i.test(API_BASE) &&
+  !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(API_BASE);
+
+/**
  * 媒体地址（`<img>` / `<video>` / `<a download>` 用）。
  *
  * 这些标签发不了 `Authorization` 头，跨域时也带不上 Cookie，
