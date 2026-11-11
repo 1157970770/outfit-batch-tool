@@ -6,6 +6,7 @@ import { AppConfigService } from '../config/app-config.service';
 import { UploadsService } from '../uploads/uploads.service';
 import { TemplateCatalogService } from '../templates/template-catalog.service';
 import { WanClientService } from '../wan/wan-client.service';
+import { StorageService } from '../storage/storage.service';
 import { JobRunner, needsRecheck, type JobRecord, type RunnerJob } from './job-runner';
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'canceled' | 'interrupted';
@@ -100,6 +101,7 @@ export class JobManagerService implements OnModuleInit, OnModuleDestroy {
     private readonly uploads: UploadsService,
     private readonly catalog: TemplateCatalogService,
     private readonly wan: WanClientService,
+    private readonly storage: StorageService,
   ) {}
 
   get jobsDir(): string {
@@ -330,6 +332,7 @@ export class JobManagerService implements OnModuleInit, OnModuleDestroy {
         onLog: (message) => this.appendLog(job, message),
         stopped: () => false,
       },
+      this.storage,
     );
     try {
       await runner.recheck(targets, (rec) => {
@@ -521,6 +524,8 @@ export class JobManagerService implements OnModuleInit, OnModuleDestroy {
       aspect_ratio: undefined,
       out_dir: job.out_dir,
       batch_id: job.batch_id,
+      tags: job.tags as Record<string, string> | undefined,
+      style_no: job.style_no,
     };
     const runner = new JobRunner(runnerJob, this.wan, this.config, {
       onRecord: (record) => {
@@ -533,7 +538,7 @@ export class JobManagerService implements OnModuleInit, OnModuleDestroy {
       },
       onLog: (message) => this.appendLog(job, message),
       stopped: () => stopFlag || this.stopped,
-    });
+    }, this.storage);
 
     void runner
       .run()

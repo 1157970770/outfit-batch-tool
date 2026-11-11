@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { AppConfigService } from '../config/app-config.service';
+import { StorageService } from '../storage/storage.service';
 import {
   MAX_IMAGES,
   SubmitUnknown,
@@ -53,9 +54,10 @@ export interface JobRecord {
   resumed?: boolean;
   verify?: Record<string, unknown>;
   verify_error?: string;
-  /** 归档到 COS 后的对象 Key（P2 接存储适配后填）。 */
+  /** 归档到 COS 后的对象 Key（启用 COS 时填）。 */
   cos_key?: string;
   cos_url?: string;
+  archive_error?: string;
   /** 复查（只查询、不重新提交）时记下的云端状态与时间。 */
   checked_at?: string;
   cloud_status?: string;
@@ -79,6 +81,9 @@ export interface RunnerJob {
   aspect_ratio?: string;
   out_dir: string;
   batch_id: string;
+  /** 归档路径里的款号段取「上衣」，老数据退回 style_no。 */
+  tags?: Record<string, string>;
+  style_no?: string;
 }
 
 export interface JobRunnerHooks {
@@ -101,6 +106,7 @@ export class JobRunner {
     private readonly wan: WanClientService,
     private readonly config: AppConfigService,
     private readonly hooks: JobRunnerHooks,
+    private readonly storage?: StorageService,
   ) {}
 
   async run(): Promise<void> {
@@ -253,6 +259,7 @@ export class JobRunner {
         await this.wan.download(final.videoUrl, outFile);
         record.status = 'success';
         record.verify = await verifyFile(outFile, tpl.duration);
+        await this.archive(record, outFile);
       } catch (err) {
         // 记账已在下载之前完成：下载失败仍然计费，这里只标记并保留金额。
         record.status = 'failed';
@@ -264,6 +271,33 @@ export class JobRunner {
       record = applyError(record, err);
     }
     return record;
+  }
+
+  /**
+   * 归档到 COS：`{prefix}/output/{日期}[/{款号}]/{批次}/{文件名}-{指纹8}.{ext}`。
+   *
+   * 归档失败**不算任务失败**——视频已经在本机了，记 `archive_error`，下轮补传即可
+   * （与 Python `BatchRunner._archive` 同口径）。
+   */
+  private async archive(record: JobRecord, file: string): Promise<void> {
+    const storage = this.storage;
+    if (!storage || !storage.enabled) return;
+    const tags = (this.job.tags || {}) as Record<string, string>;
+    const style = String(tags.top || this.job.style_no || '').trim();
+    try {
+      const key = storage.objectKey('output', path.basename(file), {
+        batch: this.job.batch_id,
+        prefix: storage.cleanPrefix,
+        digest: storage.fingerprint(file),
+        style,
+      });
+      await storage.putFile(file, key, 'video/mp4');
+      record.cos_key = key;
+      record.cos_url = storage.signUrl(key, 7 * 24 * 3600);
+    } catch (err) {
+      record.archive_error = `${(err as Error).name}: ${(err as Error).message}`.slice(0, 200);
+      this.hooks.onLog(`归档失败（不影响成片）：${record.archive_error}`);
+    }
   }
 
   /**

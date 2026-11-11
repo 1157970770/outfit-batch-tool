@@ -97,6 +97,19 @@
 - [ ] 轮询统一：仅「页面激活 + 文档可见 + 有在飞」时轮询
 - [ ] 妙搭环境：构建/启动/端口/健康检查/持久卷跑通；`parity.mjs` 在线上全绿
 
+### P5 · 服务端收尾（NestJS 全栈）
+
+- [x] 数据目录单实例锁：`server.lock.d` 原子目录锁 + 心跳；重复启动 `EXIT=2` 并给出中文提示（`__tests__/instance-lock.test.ts` 5 项）
+- [x] 权限隔离端到端：普通账号 `?scope=all` 403、读/取消别人的任务 403、管理端接口 403（`scripts/p5-roles-smoke.mjs` 23/23）
+- [x] COS 适配器：手写 v5 签名（PUT/GET 含 Range/HEAD/DELETE/按前缀列举/预签名 URL），Key 规则与 Python `object_key()` 同口径（`__tests__/storage.test.ts` 7 项）
+- [x] 模板预览在「只有 key（私有桶）」时也能代理播放：`/api/templates/<id>/preview` 走服务端取对象并透传 Range
+- [x] 视频库上传：登记成功后传 `input/tpl/<文件名>` 并写 `manifest_overlay.json`，失败只回 `warning`（不回滚登记）
+- [x] 任务归档：成片成功下载后 `put` 到 `{prefix}/output/<日期>[/款号]/<批次>/<名>-<指纹>.mp4`，记 `cos_key`/`cos_url`；失败记 `archive_error` 且不算任务失败
+- [x] 自由视频参考视频/音频：先传 `videogen/ref/<任务>/<文件名>`，再给 7 天预签名 URL 提交
+- [ ] COS 真连一次（会产生对象与费用，需用户点头）：上传→预览→归档→预签名下载
+- [ ] 双额度压测（250 RPM / 15 RPS / 在飞 100+12）：代码已复刻，未在真 Key 上跑
+- [ ] 视觉回归：本机没有浏览器截图工具，目前只能靠 DOM/接口断言与产物包含性检查
+
 ## 套壳模式（2026-11-11 方向调整：前端进妙搭、后端仍在本机）
 
 - [x] `web.json` 的 `cors_origins` 白名单生效：命中才回 `Access-Control-Allow-Origin` + `Allow-Credentials` + `Vary: Origin`

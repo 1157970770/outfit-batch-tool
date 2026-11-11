@@ -14,6 +14,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { AppConfigService } from '../config/app-config.service';
+import { StorageService } from '../storage/storage.service';
 import { readJsonFile, writeJsonAtomic } from '../common/fs-json';
 import {
   TaskCanceled,
@@ -144,6 +145,7 @@ export class VideogenManagerService implements OnModuleInit {
   constructor(
     private readonly config: AppConfigService,
     private readonly wan: WanClientService,
+    private readonly storage: StorageService,
   ) {
     this.root = path.join(config.dataDir, 'videogen');
     this.tasksDir = path.join(this.root, 'tasks');
@@ -585,6 +587,17 @@ export class VideogenManagerService implements OnModuleInit {
     }
   }
 
+  /** 参考视频/音频先传 COS，再给 7 天有效的预签名地址（官方只收 URL，不收 Base64）。 */
+  private async uploadRefs(record: VgRecord, files: string[]): Promise<string[]> {
+    const urls: string[] = [];
+    for (const file of files) {
+      const key = `videogen/ref/${record.id}/${path.basename(file)}`;
+      await this.storage.putFile(file, key, this.storage.contentType(file));
+      urls.push(this.storage.signUrl(key, 7 * 24 * 3600));
+    }
+    return urls;
+  }
+
   private async runTask(taskId: string): Promise<void> {
     const record = this.records.get(taskId);
     if (!record) return;
@@ -632,6 +645,20 @@ export class VideogenManagerService implements OnModuleInit {
         return;
       }
 
+      // 视频/音频官方只收 URL：先传到 COS，再给 7 天有效的预签名地址
+      // （单条任务最长跑 30 分钟，1 小时签名太紧）。
+      let videoUrls: string[] = [];
+      let audioUrls: string[] = [];
+      if (videoFiles.length || audioFiles.length) {
+        try {
+          videoUrls = await this.uploadRefs(record, videoFiles);
+          audioUrls = await this.uploadRefs(record, audioFiles);
+        } catch (err) {
+          this.failAll(record, `参考素材上传云端失败：${(err as Error).message}`);
+          return;
+        }
+      }
+
       const wire = this.wan.wireFreeBody({
         prompt: record.prompt,
         negativePrompt: record.negative_prompt,
@@ -644,9 +671,8 @@ export class VideogenManagerService implements OnModuleInit {
         watermark: record.watermark,
         seed: record.seed,
         imageUrls,
-        // COS 未接入：视频/音频到不了这一步（上面已拦），保持空数组即可。
-        videoUrls: [],
-        audioUrls: [],
+        videoUrls,
+        audioUrls,
       });
 
       for (const shot of record.shots) {

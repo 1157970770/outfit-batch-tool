@@ -17,6 +17,8 @@ import type { AuthedUser } from '../auth/decorators';
 import { AppConfigService } from '../config/app-config.service';
 import { ManifestService } from '../templates/manifest.service';
 import { TemplateCatalogService } from '../templates/template-catalog.service';
+import { appendOverlay } from '../templates/overlay';
+import { StorageService } from '../storage/storage.service';
 import {
   AUTO_KEEP,
   PINNED_KEEP,
@@ -82,6 +84,7 @@ export class TagsService {
     private readonly stores: TemplateStoreService,
     private readonly catalog: TemplateCatalogService,
     private readonly manifest: ManifestService,
+    private readonly storage: StorageService,
   ) {}
 
   // ------------------------------------------------------------------ 工具
@@ -512,12 +515,6 @@ export class TagsService {
       throw this.fail('云端模板库未启用（COS 未配置），无法上传视频', 503);
     }
 
-    // 本地暂存：COS 适配器待 P4 接入，当前只登记清单，文件留在 tmp/ 以便后续补传
-    const folder = join(this.config.dataDir, 'tmp');
-    fs.mkdirSync(folder, { recursive: true });
-    const staged = join(folder, `${randomUUID().replace(/-/g, '')}${suffix}`);
-    fs.writeFileSync(staged, data);
-
     let result: MutationResult;
     try {
       result = await store.addVideo({
@@ -533,20 +530,38 @@ export class TagsService {
         user: user.username,
       });
     } catch (err) {
-      // 登记失败就把暂存文件删掉（Python 会删刚传上去的 COS 对象，避免桶里留孤儿）
-      try {
-        fs.rmSync(staged, { force: true });
-      } catch {
-        /* 删不掉也不影响错误返回 */
-      }
       throw this.rethrow(err);
     }
 
+    // 登记成功后按最终文件名传到 COS，再写 overlay 补 url/key（与 Python 同一套 Key：
+    // `input/tpl/<文件名>`）。上传失败不回滚登记：视频行会显示「待上传」，可重传。
+    const row = (result.row ?? {}) as Record<string, unknown>;
+    const finalName = String(row.name || fileName);
+    const key = `input/tpl/${finalName}`;
+    let warning = '';
+    try {
+      await this.storage.putBuffer(data, key, this.storage.contentType(finalName));
+      appendOverlay(this.config.dataDir, {
+        id: String(row.id || ''),
+        name: finalName,
+        filename: finalName,
+        relative_path: String(row.relative_path || finalName),
+        key,
+        size_mb: Math.round((data.length / 1024 / 1024) * 1000) / 1000,
+        tags: labels,
+        duration: null,
+        uploaded: true,
+      });
+    } catch (err) {
+      this.logger.warn(`视频已登记但上传云端失败：${(err as Error).message}`);
+      warning = `视频已登记，但上传到云端失败：${(err as Error).message}`;
+    }
+
     const payload = await this.afterWrite(store, result);
-    payload.row = result.row ?? {};
+    payload.row = row;
     payload.renamed = Boolean(result.renamed);
     payload.auto_number = Boolean(input.autoNumber);
-    payload.warning = '视频已登记，但尚未上传到云端模板库（COS 未接入）。';
+    if (warning) payload.warning = warning;
     return payload;
   }
 }
