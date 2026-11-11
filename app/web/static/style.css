@@ -779,6 +779,22 @@ textarea {
 .detail-head h3 { margin: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
 .detail-head .muted { margin: 3px 0 0; font-size: 12px; }
 
+/* 任务详情里的成片播放器。详情栏最窄只有 380px，<video> 若不约束尺寸，浏览器会按
+   素材固有尺寸（竖屏 1080×1920）撑开 → 横向溢出，只能看到画面中间一条。
+   这里同时给 max-width 与 max-height，replaced element 会等比缩到两者之内；
+   width/height:auto + object-fit:contain 保证竖屏、横屏都整幅可见、不裁画面。 */
+.detail-card .preview-video {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(58vh, 460px);
+  margin: 10px auto 0;
+  background: #111;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
+
 /* 任务详情里的提示词：默认折叠（长正文不占屏），展开后可一键复制 */
 .detail-prompt { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); }
 .detail-prompt > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); }
