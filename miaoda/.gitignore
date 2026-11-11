@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-miaoda/
+dist-templates/
 .tmp/
 .env
 .env.local
