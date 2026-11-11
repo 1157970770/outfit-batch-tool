@@ -110,6 +110,9 @@
 - [x] COS 真连一次：上传 → 建任务（mock 出片）→ 自动归档 `{prefix}/output/...` → 账本检索 → 预签名下载 200 → Range 206（`scripts/p5-cos-smoke.mjs` 12/12；测试对象写在隔离前缀 `miaoda-selftest/` 并已清空）
 - [ ] 双额度压测（250 RPM / 15 RPS / 在飞 100+12）：代码已复刻，未在真 Key 上跑
 - [ ] 视觉回归：本机没有浏览器截图工具，目前只能靠 DOM/接口断言与产物包含性检查
+- [x] 本地素材补齐：136 条「网页上传」模板视频已从 COS 拉回 `D:\星伙素材\磊哥外拍视频（总）`（1.61 GB，目录内 1479 个视频，逐条与真源 `size_mb` 对账通过；脚本 `scripts/pull-web-uploads.mjs`）
+- [x] 按前缀列举自动翻页：COS 单页上限 1000，原来传 `limit=5000` 也只回 1000（归档检索会被静默截断），现在按 `<IsTruncated>` + `marker` 续取（`__tests__/storage.test.ts` +2 项）
+- [ ] **已知限制**：Key 含中文等非 ASCII 字符时，COS 对路径的签名规范化与 JS 端不一致，`getObject`/预签名一律 `403 SignatureDoesNotMatch`（ASCII Key 正常）。绕法：`CosClient.copyObject()` 先复制成 ASCII Key 再取，用完删除（拉这 4 条时用过）。Python 侧用官方 SDK，没有这个问题。
 
 ## 跨域套壳（Python 侧支持；前端工程在 `../miaoda-shell/`）
 

@@ -171,8 +171,7 @@ export class CosClient {
     return res;
   }
 
-  async stat(key: string): Promise<{ size: number } | null> {
-    if (!this.enabled) return null;
+  async stat(key: string): Promise<{ size: number } | null> {    if (!this.enabled) return null;
     const res = await fetch(this.url(key), {
       method: 'HEAD',
       headers: { Authorization: this.authHeader('head', key, {}, { host: this.host() }) },
@@ -191,23 +190,58 @@ export class CosClient {
     if (!res.ok && res.status !== 404) await this.fail(res, '删除');
   }
 
-  /** 按前缀列举（最多 1000 条，够本项目用）。 */
+  /**
+   * 服务端复制对象（PUT Object Copy）。`x-cos-copy-source` 里的源 Key 需要 URL 编码。
+   *
+   * 用途：源 Key 含中文等非 ASCII 字符时，COS 对路径签名的规范化与 JS 端不一致
+   * （实测 `SignatureDoesNotMatch`，2026-11-11），先复制成 ASCII Key 再取。
+   */
+  async copyObject(sourceKey: string, targetKey: string): Promise<void> {
+    if (!this.enabled) throw new CosError('云端存储未启用（COS 未配置）');
+    const source = `${this.host()}/${encodeKeyPath(sourceKey).replace(/^\//, '')}`;
+    const headers = { host: this.host(), 'x-cos-copy-source': source };
+    const res = await fetch(this.url(targetKey), {
+      method: 'PUT',
+      headers: { Authorization: this.authHeader('put', targetKey, {}, headers), 'x-cos-copy-source': source },
+    });
+    if (!res.ok) await this.fail(res, '复制');
+  }
+
+  /**
+   * 按前缀列举，**自动翻页**直到取够 `limit`（COS 单页上限 1000）。
+   *
+   * 之前只发一次请求、`max-keys` 还被 `min(1000, …)` 压住，所以传 5000 也只回 1000 条：
+   * 归档检索的 `listPrefix(…, 5000)` 就是这么被静默截断的。
+   */
   async listPrefix(prefix: string, limit = 1000): Promise<{ key: string; size: number }[]> {
     if (!this.enabled) throw new CosError('云端存储未启用（COS 未配置）');
-    const query = { prefix, 'max-keys': String(Math.min(1000, Math.max(1, limit))) };
-    const res = await fetch(this.url('', query), {
-      method: 'GET',
-      headers: { Authorization: this.authHeader('get', '', query, { host: this.host() }) },
-    });
-    if (!res.ok) await this.fail(res, '列举');
-    const xml = await res.text();
+    const want = Math.max(1, limit);
     const items: { key: string; size: number }[] = [];
-    const re = /<Contents>([\s\S]*?)<\/Contents>/g;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(xml))) {
-      const key = /<Key>([\s\S]*?)<\/Key>/.exec(match[1])?.[1];
-      const size = /<Size>(\d+)<\/Size>/.exec(match[1])?.[1];
-      if (key) items.push({ key: decodeXml(key), size: Number(size || 0) });
+    let marker = '';
+    while (items.length < want) {
+      const query: Record<string, string> = {
+        prefix,
+        'max-keys': String(Math.min(1000, want - items.length)),
+        ...(marker ? { marker } : {}),
+      };
+      const res = await fetch(this.url('', query), {
+        method: 'GET',
+        headers: { Authorization: this.authHeader('get', '', query, { host: this.host() }) },
+      });
+      if (!res.ok) await this.fail(res, '列举');
+      const xml = await res.text();
+      const page: { key: string; size: number }[] = [];
+      const re = /<Contents>([\s\S]*?)<\/Contents>/g;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(xml))) {
+        const key = /<Key>([\s\S]*?)<\/Key>/.exec(match[1])?.[1];
+        const size = /<Size>(\d+)<\/Size>/.exec(match[1])?.[1];
+        if (key) page.push({ key: decodeXml(key), size: Number(size || 0) });
+      }
+      items.push(...page);
+      const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+      if (!truncated || page.length === 0) break;
+      marker = page[page.length - 1].key;
     }
     return items;
   }

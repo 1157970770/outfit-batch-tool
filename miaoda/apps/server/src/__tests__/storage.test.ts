@@ -59,6 +59,54 @@ describe('COS v5 签名', () => {
   });
 });
 
+describe('COS 列举翻页（单页上限 1000）', () => {
+  const xmlPage = (keys: string[], truncated: boolean) =>
+    `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${truncated ? '<IsTruncated>true</IsTruncated>' : '<IsTruncated>false</IsTruncated>'}${keys
+      .map((k) => `<Contents><Key>${k}</Key><Size>${k.length}</Size></Contents>`)
+      .join('')}</ListBucketResult>`;
+
+  it('超过一页时按 marker 继续取，直到取够 limit', async () => {
+    const client = new CosClient(cfg);
+    const pages = [xmlPage(['a1.mp4', 'a2.mp4'], true), xmlPage(['b1.mp4'], false)];
+    const markers: string[] = [];
+    const original = globalThis.fetch;
+    let call = 0;
+    // @ts-expect-error 测试桩只实现用到的部分
+    globalThis.fetch = async (url: string) => {
+      const marker = new URL(String(url)).searchParams.get('marker') || '';
+      markers.push(marker);
+      return new Response(pages[call++] ?? xmlPage([], false), { status: 200 });
+    };
+    try {
+      const items = await client.listPrefix('input/tpl/', 5000);
+      expect(items.map((i) => i.key)).toEqual(['a1.mp4', 'a2.mp4', 'b1.mp4']);
+      expect(markers).toEqual(['', 'a2.mp4']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('copyObject 把源 Key 编进 x-cos-copy-source 并对目标 Key 签名', async () => {
+    const client = new CosClient(cfg);
+    const original = globalThis.fetch;
+    let seen: { url: string; init: RequestInit } | null = null;
+    // @ts-expect-error 测试桩只实现用到的部分
+    globalThis.fetch = async (url: string, init: RequestInit) => {
+      seen = { url: String(url), init };
+      return new Response('<CopyObjectResult/>', { status: 200 });
+    };
+    try {
+      await client.copyObject('input/tpl/哈尔滨-7.mp4', 'input/tpl/_ascii.mp4');
+      expect(seen!.url).toContain('/input/tpl/_ascii.mp4');
+      const headers = seen!.init.headers as Record<string, string>;
+      expect(headers['x-cos-copy-source']).toContain(encodeURIComponent('哈尔滨-7.mp4'));
+      expect(headers.Authorization).toContain('q-sign-algorithm=sha1');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
 describe('文件指纹', () => {
   it('同内容稳定、不同内容不同', async () => {
     const { StorageService } = await import('../storage/storage.service');
