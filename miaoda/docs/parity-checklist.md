@@ -110,7 +110,10 @@
 - [ ] 双额度压测（250 RPM / 15 RPS / 在飞 100+12）：代码已复刻，未在真 Key 上跑
 - [ ] 视觉回归：本机没有浏览器截图工具，目前只能靠 DOM/接口断言与产物包含性检查
 
-## 套壳模式（2026-11-11 方向调整：前端进妙搭、后端仍在本机）
+## 跨域套壳（Python 侧支持；前端工程在 `../miaoda-shell/`）
+
+> 这一段是 **Python 后端**为「前端部署在妙搭、后端仍在本机」做的支持，属于另一条路线（`miaoda-shell/`）。
+> 本工程（NestJS 全栈）不依赖它；两者共用同一份前端源码，但产物与文档分开。
 
 - [x] `web.json` 的 `cors_origins` 白名单生效：命中才回 `Access-Control-Allow-Origin` + `Allow-Credentials` + `Vary: Origin`
 - [x] `OPTIONS` 预检 204，`Allow-Headers` 含 `Authorization`；非白名单来源 403

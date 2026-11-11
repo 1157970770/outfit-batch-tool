@@ -1,27 +1,29 @@
-# miaoda · 换装批量生产器的妙搭版
+# miaoda · 换装批量生产器的妙搭版（NestJS 全栈）
 
-> **2026-11-11 方向调整**：主线改为「**前端套壳**」——只把 React 前端部署到飞书妙搭，
-> 后端仍是本机 Python 服务（`python run_web.py`）。见 [docs/妙搭套壳部署.md](docs/妙搭套壳部署.md)。
-> 原「NestJS 全量重写」实现（P0–P4 已完成、冒烟全绿）保留在 `apps/server/`，作为可选/回退路径，不再是主线。
+> 本工程是**全栈路线**：React 前端 + NestJS 后端，一起部署到飞书妙搭（目标态，11 个视图全量）。
+> 「只把前端搬到妙搭、后端仍跑本机 Python」是**另一条独立路线**，代码在 [`../miaoda-shell/`](../miaoda-shell)，
+> 与本工程分开存放、各用自己的产物与文档，互不覆盖。
 
 React 19 + Vite 6 + TypeScript 前端；读现有 `server/*.json` 与 `web-data*/*.json`（格式不变、历史数据零迁移）。
 
-> 方案总览：[../docs/妙搭迁移方案.md](../docs/妙搭迁移方案.md) · 套壳部署：[docs/妙搭套壳部署.md](docs/妙搭套壳部署.md) · 一致性清单：[docs/parity-checklist.md](docs/parity-checklist.md)
+> 方案总览：[../docs/妙搭迁移方案.md](../docs/妙搭迁移方案.md) · 全栈部署：[docs/妙搭部署.md](docs/妙搭部署.md) · 一致性清单：[docs/parity-checklist.md](docs/parity-checklist.md)
 
 ## 快速开始
 
 ```powershell
 npm install --ignore-scripts
-npm run dev:web      # 只起前端 5173，接口代理到本机 Python 服务（默认 127.0.0.1:8766）
-# 或起「前端 + NestJS 后端」：npm run dev
+npm run dev          # 前端 5173 + NestJS 3001
+# 只看前端（接口代理到本机 Python 8766）：npm run dev:web
 ```
 
-打妙搭静态包：
+全栈产物：
 
 ```powershell
-npm run build:shell -- https://你的后端入口
-# 产物 miaoda/dist-miaoda/，上传到妙搭静态站点即可
+npm run build        # shared → server → web
+node apps/server/dist/main.js
 ```
+
+> 需要「前端静态包 + 本机 Python 后端」的套壳形态，请去 `../miaoda-shell/`（`node scripts/build.mjs <后端地址>`）。
 
 
 ## 目录

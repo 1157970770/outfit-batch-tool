@@ -1,0 +1,11 @@
+# 构建产物（上传妙搭的就是 dist/ 里的内容）
+dist/
+release/
+
+# 构建临时目录
+.tmp/
+
+# 依赖（本工程不装依赖，vite 用 ../miaoda/node_modules）
+node_modules/
+
+*.log
