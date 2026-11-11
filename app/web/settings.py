@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,6 +85,38 @@ class WebSettings:
             if text.startswith("http://") or text.startswith("https://"):
                 origins.append(text)
         return tuple(dict.fromkeys(origins))
+
+    @property
+    def extra_hosts(self) -> tuple[str, ...]:
+        """额外允许的 Host（web.json 的 `allowed_hosts`）。
+
+        默认空 = 只认本机地址（localhost / 127.0.0.1 / 网卡 IP / 主机名），与历史一致。
+        当本机服务前面挂了一层 HTTPS 入口（反向代理、Cloudflare Tunnel、内网穿透）时，
+        浏览器地址栏里的 Host 会变成隧道/代理的域名，Host 白名单会把它挡成 421
+        「访问地址无效。」——把那个域名填进来即可。
+
+        只填 hostname（`abc.trycloudflare.com`），不要带 `https://` 和端口；
+        端口已经在 Host 头里，比较时只比 hostname。
+        """
+        raw = self.web.get("allowed_hosts")
+        if not isinstance(raw, list):
+            return ()
+        hosts: list[str] = []
+        for item in raw:
+            text = str(item or "").strip().lower()
+            if not text:
+                continue
+            if "://" in text:
+                text = urllib.parse.urlsplit(text).hostname or ""
+            elif text.startswith("["):
+                text = text[1:].split("]", 1)[0]
+            elif text.count(":") == 1:
+                # 只有一段冒号才当 host:port；IPv6 字面量本身带多个冒号。
+                text = text.split(":", 1)[0]
+            text = text.strip()
+            if text:
+                hosts.append(text)
+        return tuple(dict.fromkeys(hosts))
 
     @property
     def max_active_jobs(self) -> int:

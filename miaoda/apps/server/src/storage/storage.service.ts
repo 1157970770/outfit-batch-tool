@@ -46,7 +46,7 @@ export class StorageService {
   readonly cfg: Required<Pick<CosConfig, 'enabled' | 'bucket' | 'region'>> & { prefix: string; domain: string };
 
   constructor(private readonly config: AppConfigService) {
-    const raw = (config.cos || {}) as Record<string, unknown>;
+    const raw = (config.cosConfig || {}) as Record<string, unknown>;
     const cosConfig: CosConfig = {
       enabled: Boolean(raw.enabled),
       bucket: String(raw.bucket || ''),

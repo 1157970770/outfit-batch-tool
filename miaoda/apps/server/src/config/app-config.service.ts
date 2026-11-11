@@ -309,6 +309,11 @@ export class AppConfigService {
     return enabled === true || enabled === 'true' || enabled === 1 || enabled === '1';
   }
 
+  /** 原始 `cos` 配置块（存储服务自己解析 bucket/region/密钥）。 */
+  get cosConfig(): Record<string, unknown> {
+    return (this.app.cos ?? {}) as Record<string, unknown>;
+  }
+
   /** 云端模板索引地址（config.json → wan.manifest_url 或顶层 manifest_url）。 */
   get manifestUrl(): string {
     return String(this.wan.manifest_url || this.app.manifest_url || '');

@@ -8,10 +8,14 @@ import { Readable } from 'node:stream';
 import { Controller, Get, Param, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { TemplateCatalogService, TemplateError } from './template-catalog.service';
+import { StorageService } from '../storage/storage.service';
 
 @Controller('api/templates')
 export class TemplatesController {
-  constructor(private readonly catalog: TemplateCatalogService) {}
+  constructor(
+    private readonly catalog: TemplateCatalogService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Get()
   async list() {
@@ -55,6 +59,20 @@ export class TemplatesController {
       throw err;
     }
     const url = String(item.url || '');
+    const key = String(item.key || '');
+    // 没有公有 url 但有 key（私有桶）：自己用 COS 签名取，别让浏览器拿裸 key。
+    if (!url && key && this.storage.enabled) {
+      let upstream: globalThis.Response;
+      const range = String(res.req.headers.range || '');
+      try {
+        upstream = await this.storage.getObject(key, range || undefined);
+      } catch (err) {
+        res.status(502).json({ ok: false, error: `视频代理失败：${(err as Error).message}` });
+        return;
+      }
+      this.pipe(res, upstream, item, attachment, id);
+      return;
+    }
     if (!url) {
       const message = item.key ? (attachment ? '下载暂不可用。' : '模板预览暂不可用。') : (attachment ? '该视频尚未上传到云端，无法下载。' : '该视频尚未上传到云端，暂无预览。');
       res.status(item.key ? 503 : 404).json({ ok: false, error: message });
@@ -70,6 +88,17 @@ export class TemplatesController {
       res.status(502).json({ ok: false, error: `视频代理失败：${(err as Error).message}` });
       return;
     }
+    this.pipe(res, upstream, item, attachment, id);
+  }
+
+  /** 把上游响应（COS 或公有 URL）按 Range 语义透传给浏览器。 */
+  private pipe(
+    res: Response,
+    upstream: globalThis.Response,
+    item: { name?: string; relative_path?: string },
+    attachment: boolean,
+    id: string,
+  ): void {
     res.status(upstream.status);
     res.setHeader('Content-Type', upstream.headers.get('content-type') || 'video/mp4');
     for (const name of ['content-length', 'content-range', 'accept-ranges']) {

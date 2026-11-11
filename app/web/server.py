@@ -338,7 +338,8 @@ def _safe_user_name(username: str) -> bool:
 
 def make_handler(app: WebApplication):
     static_root = Path(__file__).resolve().parent / "static"
-    allowed_hosts = _local_hosts()
+    # 本机地址 + web.json → allowed_hosts（HTTPS 入口/隧道域名，默认空）。
+    allowed_hosts = _local_hosts() | set(getattr(app.settings, "extra_hosts", ()) or ())
     # 跨域套壳白名单（web.json → cors_origins）：空元组表示关闭，行为与历史一致。
     cors_origins = tuple(getattr(app.settings, "cors_origins", ()) or ())
 

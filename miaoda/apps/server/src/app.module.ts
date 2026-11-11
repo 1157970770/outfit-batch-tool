@@ -4,6 +4,7 @@ import { AuthModule } from './auth/auth.module';
 import { TagsModule } from './tags/tags.module';
 import { TemplatesModule } from './templates/templates.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { StorageModule } from './storage/storage.module';
 import { WanModule } from './wan/wan.module';
 import { JobsModule } from './jobs/jobs.module';
 import { BatchesModule } from './batches/batches.module';
@@ -23,6 +24,7 @@ import { APP_FILTER, APP_GUARD } from '@nestjs/core';
     TagsModule,
     TemplatesModule,
     UploadsModule,
+    StorageModule,
     WanModule,
     JobsModule,
     BatchesModule,

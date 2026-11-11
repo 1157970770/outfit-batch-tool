@@ -105,6 +105,15 @@ check(
 const badMedia = await call('GET', '/api/me?access_token=nope', { headers: { Origin: ORIGIN } });
 check('错误查询串令牌 401', badMedia.status === 401, `status=${badMedia.status}`);
 
+// HTTPS 入口/隧道域名：Host 换了名字也必须能进（否则线上 421「访问地址无效。」）。
+const TUNNEL = String(process.env.OUTFIT_TUNNEL_HOST || '').trim();
+if (TUNNEL) {
+  const viaTunnel = await call('GET', '/api/me', {
+    headers: { Host: TUNNEL, Origin: ORIGIN, Authorization: `Bearer ${token}` },
+  });
+  check(`隧道域名 ${TUNNEL} 可访问（allowed_hosts）`, viaTunnel.status === 200, `status=${viaTunnel.status}`);
+}
+
 const sameOrigin = await call('POST', '/api/login', {
   headers: { 'Content-Type': 'application/json' },
   body: { username: USER, password: PASS },
