@@ -40,6 +40,11 @@
     batches: [], listLoaded: false,
     current: null, items: [],
     candidates: [], selected: new Set(), candTotal: 0, candReady: 0,
+    // 生产清单：selected 是本地乐观集合，selectionNames 存 id→名称，服务端草稿是最终真源。
+    // 串行队列保证「连点多个 +」不会并发覆盖；seq 用来丢弃过期响应。
+    selectionNames: new Map(), selectionPending: 0, selectionSeq: 0,
+    selectionQueue: Promise.resolve(), selectionNeedsReload: false, pickedSig: '',
+    selectionActiveBatch: '',
     // 评分筛选 / 排序：candRatingMin=0 不过滤；candSort='' 默认顺序、'rating' 评分高→低
     candRatingMin: 0, candSort: '',
     // 隐藏已用：本款号在之前批次里生产过的模板不进候选（服务端按款号-模板账本筛）。
@@ -243,8 +248,7 @@
 
   /* ---------- 退出批次（界面导航，不动服务端数据） ----------
      草稿态：步骤 1 卡片上的「退出当前批次计划」——把界面退回批次列表，批次仍是 draft，
-     冻结的设置、定妆图、提示词都在；本页内存里的勾选会清空（跨页选中本来就是本地状态），
-     下次从列表点「继续筛选」重新筛一遍接着做。
+     冻结的设置、定妆图、提示词、生产清单都在服务端草稿里；下次从列表点「继续筛选」会恢复清单。
      已锁定/已关闭：步骤 3 / 4 卡片上的「退出批次」——同样是纯界面导航，清单和进度都保留。 */
   function updateExitButton() {
     const draftBtn = $('batch-exit-btn');
@@ -619,6 +623,11 @@
   function resetCandidates() {
     b.candidates = [];
     b.selected = new Set();
+    b.selectionNames = new Map();
+    b.selectionSeq += 1;              // 丢弃上一个批次还在飞的清单响应
+    b.selectionNeedsReload = false;
+    b.selectionActiveBatch = '';
+    b.pickedSig = '';
     b.candTagFilter.clear();
     b.onlySelected = false;
     b.candPage = 1;
@@ -631,6 +640,178 @@
     renderCandidates();
     $('batch-tag-summary').textContent = '';
     $('batch-cand-note').classList.add('hidden');
+  }
+
+  /* ---------- 生产清单（服务端草稿持久化） ----------
+     勾选不再是「本页内存状态」：每次加入/移出都串行 POST 到 /selection，
+     服务端草稿是最终真源。刷新标签只会重拉候选，不会动 selected。 */
+  function applyServerSelection(batch) {
+    const rows = Array.isArray(batch && batch.draft_selection) ? batch.draft_selection : [];
+    b.selected = new Set();
+    b.selectionNames = new Map();
+    for (const row of rows) {
+      const id = txt(row && (row.id || row.template_id));
+      if (!id) continue;
+      b.selected.add(id);
+      b.selectionNames.set(id, txt(row.name) || id);
+    }
+    b.pickedSig = '';
+    renderPickedTray();
+    paintSelection();
+  }
+
+  function selectionName(id) {
+    return b.selectionNames.get(id) || id;
+  }
+
+  function renderPickedTray() {
+    const root = $('batch-picked');
+    if (!root) return;
+    const ids = [...b.selected];
+    const wasHidden = root.classList.contains('hidden');
+    root.classList.toggle('hidden', !ids.length);
+    // 托盘出现/消失会改变候选网格高度，每页条数要重新实测，否则最后一页会多出一截滚动。
+    if (wasHidden !== !ids.length) queueCandLayout();
+    const sig = ids.map((id) => `${id}\u0001${selectionName(id)}`).join('\u0002');
+    if (b.pickedSig === sig) return;
+    b.pickedSig = sig;
+    const count = $('batch-picked-count');
+    if (count) count.textContent = ids.length ? `已加入 ${ids.length} 条` : '';
+    const list = $('batch-picked-list');
+    if (!list) return;
+    const fragment = document.createDocumentFragment();
+    for (const id of ids) {
+      const chip = el('span', 'batch-picked-item');
+      const name = el('span', 'batch-picked-name', selectionName(id));
+      name.title = `${selectionName(id)}（${id}）`;
+      const remove = el('button', 'batch-picked-remove', '×');
+      remove.type = 'button';
+      remove.title = `从清单移出 ${selectionName(id)}`;
+      remove.setAttribute('aria-label', `从清单移出 ${selectionName(id)}`);
+      remove.addEventListener('click', () => removeSelection([id]));
+      chip.append(name, remove);
+      fragment.append(chip);
+    }
+    list.replaceChildren(fragment);
+  }
+
+  function addToSelection(items) {
+    const max = serviceLimits().maxBatchItems;
+    const added = [];
+    let overflow = false;
+    for (const item of items) {
+      const id = txt(item && item.id);
+      if (!id || b.selected.has(id)) continue;
+      if (b.selected.size >= max) { overflow = true; break; }
+      b.selected.add(id);
+      b.selectionNames.set(id, txt(item.name) || id);
+      added.push(id);
+    }
+    if (overflow) {
+      toast(added.length
+        ? `单批最多 ${max} 条，超出部分没有加入清单。`
+        : `单批最多 ${max} 条，清单已经满了。`);
+    }
+    return added;
+  }
+
+  function paintSelection() {
+    document.querySelectorAll('#batch-cand-grid .batch-cand[data-id]').forEach((tile) => {
+      const id = txt(tile.dataset.id);
+      const on = b.selected.has(id);
+      const ready = tile.dataset.ready !== '0';
+      tile.classList.toggle('is-selected', on);
+      tile.setAttribute('aria-pressed', on ? 'true' : 'false');
+      const add = tile.querySelector('.batch-cand-add');
+      if (!add) return;
+      add.textContent = on ? '✓' : '+';
+      add.setAttribute('aria-pressed', on ? 'true' : 'false');
+      add.disabled = !ready && !on;
+      add.title = on ? '已在清单，点击移出' : (ready ? '加入生产清单' : '未上传云端，不能加入');
+      add.setAttribute('aria-label', on ? `从清单移出 ${selectionName(id)}` : `加入清单 ${selectionName(id)}`);
+    });
+    updateBatchCounts();
+  }
+
+  function queueSelection(op, ids) {
+    const batchId = txt(b.current && b.current.id);
+    if (!batchId) return Promise.resolve();
+    const seq = ++b.selectionSeq;
+    b.selectionActiveBatch = batchId;
+    const payload = { op };
+    if (op !== 'clear') payload.template_ids = [...new Set((ids || []).map(txt).filter(Boolean))];
+    if (op === 'add') {
+      payload.tag_filters = b.tagFilters;
+      payload.tag_excludes = b.tagExcludes;
+    }
+    b.selectionPending += 1;
+    b.selectionQueue = b.selectionQueue.then(async () => {
+      try {
+        const data = await api(`/api/batches/${encodeURIComponent(batchId)}/selection`, {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        if (seq === b.selectionSeq && data.batch && b.current && txt(b.current.id) === batchId) {
+          applyServerSelection(data.batch);
+        }
+      } catch (err) {
+        if (seq === b.selectionSeq) {
+          b.selectionNeedsReload = true;
+          toast(err.message);
+        }
+      } finally {
+        b.selectionPending = Math.max(0, b.selectionPending - 1);
+        // 即使这里已经切到别的批次，也要刷新计数，否则旧请求的 pending 会把新批次的
+        // 锁定按钮一直卡在 disabled。
+        updateBatchCounts();
+        if (seq === b.selectionSeq && b.selectionNeedsReload && b.selectionPending === 0) {
+          b.selectionNeedsReload = false;
+          loadBatchDetail(true).catch(() => {});
+        }
+      }
+    });
+    updateBatchCounts();
+    return b.selectionQueue;
+  }
+
+  function removeSelection(ids) {
+    const removed = [];
+    for (const id of ids || []) {
+      const key = txt(id);
+      if (key && b.selected.delete(key)) { b.selectionNames.delete(key); removed.push(key); }
+    }
+    if (!removed.length) return [];
+    paintSelection();
+    if (b.onlySelected) renderCandidates();
+    queueSelection('remove', removed);
+    return removed;
+  }
+
+  function addManyToSelection(items) {
+    const added = addToSelection(items || []);
+    if (!added.length) return [];
+    paintSelection();
+    queueSelection('add', added);
+    return added;
+  }
+
+  function clearSelection() {
+    if (!b.selected.size) return;
+    b.selected = new Set();
+    b.selectionNames = new Map();
+    b.pickedSig = '';
+    paintSelection();
+    queueSelection('clear');
+  }
+
+  function toggleSelection(item, tile) {
+    if (!item || !item.id) return;
+    if (b.selected.has(item.id)) { removeSelection([item.id]); return; }
+    if (!item.ready) { previewCandidate(item, tile); return; }
+    const added = addToSelection([item]);
+    if (!added.length) { previewCandidate(item, tile); return; }
+    paintSelection();
+    queueSelection('add', added);
   }
 
   async function refreshStyleUsed(batch) {
@@ -679,10 +860,8 @@
       b.usedSkipped = num(data.used_skipped);
       // 排除标签筛掉的条数：同样只用于提示，候选本身已经不含被排除的模板。
       b.excludeSkipped = num(data.exclude_skipped);
-      // 默认不选中任何项：分页后「已选 480」与第一页可见的 50 张极易混淆，
-      // 用户若误以为 480 是本页数量，锁定后连点几次「生产 100」会意外产生数千元费用。
-      // 想全做就点一次「全选全部 N 条」，多一步换来不会误操作。
-      b.selected = new Set();
+      // 生产清单保存在服务端草稿：刷新标签、翻页、隐藏已用只影响候选展示，
+      // 不会清空已加入的条目；要移出请点卡片上的 ✓ 或清单托盘里的 ×。
       b.candTagFilter.clear();
       b.onlySelected = false;
       $('batch-only-selected').checked = false;
@@ -715,7 +894,6 @@
       }
     } catch (err) {
       b.candidates = [];
-      b.selected = new Set();
       renderCandChips();
       renderCandidates();
       $('batch-tag-summary').textContent = err.message;
@@ -855,16 +1033,16 @@
     if (!pager) return;
     const empty = total === 0;
     pager.classList.toggle('hidden', empty);
-    // 「全选全部 N 条」的数字跟着筛选走，按钮文案就是点下去会覆盖的范围
+    // 「加入全部 N 条」的数字跟着筛选走，按钮文案就是点下去会加入的范围
     const matched = candidateMatched();
     const readyMatched = matched.filter((item) => item.ready).length;
     const allBtn = $('batch-select-all');
-    const label = `全选全部 ${matched.length} 条`;
+    const label = `加入全部 ${matched.length} 条`;
     if (allBtn.textContent !== label) allBtn.textContent = label;
-    allBtn.disabled = !matched.length;
+    allBtn.disabled = !readyMatched;
     allBtn.title = readyMatched < matched.length
-      ? `当前筛选共 ${matched.length} 条，其中 ${readyMatched} 条已上传云端可生产；未上传的 ${matched.length - readyMatched} 条选不了。`
-      : `选中当前筛选下的全部 ${matched.length} 条（跨 ${candPageCount(matched.length, size)} 页），已选数量继续累计。`;
+      ? `当前筛选共 ${matched.length} 条，其中 ${readyMatched} 条已上传云端可加入清单；未上传的 ${matched.length - readyMatched} 条加不了。`
+      : `把当前筛选下全部 ${matched.length} 条加入清单（跨 ${candPageCount(matched.length, size)} 页）；已加入的不会重复。`;
     if (empty) return;
     $('batch-page-prev').disabled = b.candPage <= 1;
     $('batch-page-next').disabled = b.candPage >= pageCount;
@@ -899,30 +1077,33 @@
     window.scrollTo(0, Math.min(maxScroll, Math.max(0, Math.round(top))));
   }
 
-  /* 密集候选行：一行勾选框 + 文件名，二行标签单行省略；整卡可点 = 选中 + 预览。
-     未上传的候选不能勾选（服务端锁定会拒），但仍然可以点开看，才知道为什么不能用。 */
+  /* 密集候选行：一行「加入清单」钮 + 文件名，二行标签单行省略；整卡可点 = 加入 + 预览。
+     未上传的候选不能加入清单（服务端锁定会拒），但仍然可以点开看，才知道为什么不能用。 */
   function candidateTile(item) {
     const selected = b.selected.has(item.id);
     const tile = el('div', `batch-cand${selected ? ' is-selected' : ''}${item.ready ? '' : ' is-unready'}`);
     tile.dataset.id = item.id;
+    tile.dataset.ready = item.ready ? '1' : '0';
     tile.tabIndex = 0;
     tile.setAttribute('role', 'button');
     tile.setAttribute('aria-pressed', selected ? 'true' : 'false');
     tile.setAttribute('aria-label', item.ready
-      ? `选中并预览 ${item.name}`
-      : `预览 ${item.name}（未上传云端，不能选中）`);
+      ? `加入清单并预览 ${item.name}`
+      : `预览 ${item.name}（未上传云端，不能加入清单）`);
     tile.title = item.ready
-      ? `${item.name}（${item.id}）\n点击在右侧预览并选中；取消选择点左侧勾选框`
-      : `${item.name}（${item.id}）\n还没有上传到云端，只能预览、不能选中`;
+      ? `${item.name}（${item.id}）\n点击加入生产清单并在右侧预览；点 + 加入，点 ✓ 移出`
+      : `${item.name}（${item.id}）\n还没有上传到云端，只能预览、不能加入清单`;
 
-    const pick = el('label', 'batch-cand-pick');
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.className = 'batch-cand-check';
-    checkbox.checked = selected;
-    checkbox.disabled = !item.ready;
-    checkbox.setAttribute('aria-label', `选择 ${item.name}`);
-    pick.append(checkbox);
+    const add = el('button', 'batch-cand-add', selected ? '✓' : '+');
+    add.type = 'button';
+    add.disabled = !item.ready && !selected;
+    add.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    add.setAttribute('aria-label', selected ? `从清单移出 ${item.name}` : `加入清单 ${item.name}`);
+    add.title = selected ? '已在清单，点击移出' : (item.ready ? '加入生产清单' : '未上传云端，不能加入');
+    add.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleSelection(item, tile);
+    });
 
     const line = el('span', 'batch-cand-line');
     const name = el('span', 'batch-cand-name', item.name);
@@ -944,31 +1125,17 @@
     if (tagCount > 12) meta.classList.add('is-tiny');
     else if (tagCount > 5) meta.classList.add('is-dense');
     meta.title = tagCount ? item.tags.join(' / ') : item.id;
-    tile.append(pick, line, meta);
-
-    const paint = () => {
-      const on = b.selected.has(item.id);
-      tile.classList.toggle('is-selected', on);
-      tile.setAttribute('aria-pressed', on ? 'true' : 'false');
-      checkbox.checked = on;
-    };
-    // 勾选框只负责选中/取消，不抢整卡的点击
-    pick.addEventListener('click', (event) => event.stopPropagation());
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) b.selected.add(item.id);
-      else b.selected.delete(item.id);
-      paint();
-      updateBatchCounts();
-      if (b.onlySelected) renderCandidates();
-    });
+    tile.append(add, line, meta);
 
     const activate = () => {
       if (item.ready && !b.selected.has(item.id)) {
-        // 点卡片是「选中」，不做反选：默认全选已就绪项时，预览一圈不该把候选悄悄取消掉
-        b.selected.add(item.id);
-        paint();
-        updateBatchCounts();
-        if (b.onlySelected) { renderCandidates(); return; }
+        // 点卡片是「加入」，不做反选：预览一圈不该把清单里的条目悄悄移出
+        const added = addToSelection([item]);
+        if (added.length) {
+          paintSelection();
+          queueSelection('add', added);
+          if (b.onlySelected) { renderCandidates(); return; }
+        }
       }
       previewCandidate(item, tile);
     };
@@ -1123,13 +1290,16 @@
   }
   function updateBatchCounts() {
     const chosen = b.selected.size;
-    $('batch-count-label').textContent = `已选 ${chosen} / 候选 ${b.candidates.length}`;
+    const syncing = b.selectionPending > 0
+      && b.selectionActiveBatch === txt(b.current && b.current.id);
+    $('batch-count-label').textContent = `清单 ${chosen} / 候选 ${b.candidates.length}`;
     // 锁定条在候选区底部，标题只说数量；完整提示跟在数量后面，窄屏可换行。
-    $('batch-lock-count').textContent = chosen ? `已选 ${chosen} 条` : '已选 0 条';
-    $('batch-lock-btn').disabled = !chosen || b.busy;
+    $('batch-lock-count').textContent = chosen ? `已加入清单 ${chosen} 条` : '清单还是空的';
+    $('batch-lock-btn').disabled = !chosen || b.busy || syncing;
     $('batch-lock-hint').textContent = chosen
-      ? '锁定后清单不可更改，未勾选的候选不会生产。'
-      : '至少勾选一条才能锁定。';
+      ? (syncing ? '正在把清单同步到服务端…' : '筛选只影响候选展示，不会移出已加入的清单条目；锁定后清单不可更改。')
+      : '在候选卡片点 + 加入生产清单。';
+    renderPickedTray();
   }
   function renderCandChips() {
     const root = $('batch-cand-chips');
@@ -1157,22 +1327,28 @@
   async function lockBatch() {
     const batch = b.current;
     if (!batch || !batch.id || b.busy) return;
+    // 清单写服务端是串行的：等最后一次 add/remove 落盘，避免锁到旧快照。
+    await b.selectionQueue;
     const ids = [...b.selected];
-    if (!ids.length) { toast('至少勾选一条候选。'); return; }
-    // 同款号防重（软拦截）：勾了该款号已用过的模板，弹确认让使用者自己定夺。
+    if (!ids.length) { toast('清单还是空的，先在候选卡片点 + 加入。'); return; }
+    // 同款号防重（软拦截）：清单里有该款号已用过的模板，弹确认让使用者自己定夺。
     const reused = ids.filter((id) => b.styleUsed[id]);
-    if (reused.length && !confirm(`当前款号有 ${reused.length} 条候选在之前的批次里用过。\n\n确定要重复使用吗？（历史记录只为防重提醒，不影响归档）`)) return;
-    if (!confirm(`锁定 ${ids.length} 条为待生产清单？\n\n锁定后不能再增删条目，也不能换定妆图；要改只能新建批次。`)) return;
+    if (reused.length && !confirm(`当前款号有 ${reused.length} 条清单条目在之前的批次里用过。\n\n确定要重复使用吗？（历史记录只为防重提醒，不影响归档）`)) return;
+    if (!confirm(`锁定清单中的 ${ids.length} 条为待生产清单？\n\n锁定后不能再增删条目，也不能换定妆图；要改只能新建批次。`)) return;
     const btn = $('batch-lock-btn');
     b.busy = true; btn.disabled = true; btn.textContent = '正在锁定…';
     $('batch-lock-error').classList.add('hidden');
     try {
       await api(`/api/batches/${encodeURIComponent(batch.id)}/lock`, {
         method: 'POST',
+        // 不传 template_ids：服务端按草稿里的生产清单锁定；显式传仍兼容旧调用。
         body: JSON.stringify({
-          template_ids: ids, tag_filters: b.tagFilters, tag_excludes: b.tagExcludes, confirmed: true,
+          tag_filters: b.tagFilters, tag_excludes: b.tagExcludes, confirmed: true,
         }),
       });
+      b.selected = new Set();
+      b.selectionNames = new Map();
+      b.pickedSig = '';
       toast(`已锁定 ${ids.length} 条清单，可以开始分批生产。`);
       await refreshBatch(false);
     } catch (err) {
@@ -1858,7 +2034,16 @@
     if (!batch || !batch.id) return;
     try {
       const data = await api(`/api/batches/${encodeURIComponent(batch.id)}`);
-      if (data.batch) b.current = data.batch;
+      if (data.batch) {
+        b.current = data.batch;
+        // 草稿详情带 draft_selection：服务端才是清单真源，刷新页面/退出再进都能恢复。
+        // 只有「当前批次自己的清单请求」还在飞时才先不覆盖；切到别的批次要立刻用它自己的清单。
+        const pendingHere = b.selectionPending > 0
+          && b.selectionActiveBatch === txt(b.current.id);
+        if (!pendingHere && (txt(b.current.state) || 'draft') === 'draft') {
+          applyServerSelection(b.current);
+        }
+      }
       b.items = Array.isArray(data.items) ? data.items : [];
       renderBatch();
       maybePoll();
@@ -1953,6 +2138,7 @@
     title.append(el('span', `status ${running ? 'batch-producing' : `batch-${state}`}`, running ? '生产中' : (BATCH_STATE_TEXT[state] || state)));
     main.append(title);
     const meta = [fmtTime(batch.created_at), `已结束 ${done + failed} / ${total}`, `待生产 ${pending}`];
+    if (state === 'draft' && num(batch.selection_count) > 0) meta.push(`草稿清单 ${num(batch.selection_count)} 条`);
     if (failed) meta.push(`失败 ${failed}`);
     if (App.state.user && App.state.user.role === 'admin' && txt(batch.owner)) meta.push(txt(batch.owner));
     main.append(el('div', 'job-meta', meta.join(' · ')));
@@ -2654,26 +2840,21 @@
       b.excludeSkipped = 0;
       scheduleCandidatesRefresh();
     });
-    // 三个全选按钮 —— 已选集合跨页累计，「本页」的改动绝不碰其它页。
-    // 全选本页：只加当前页的已就绪候选
+    // 清单按钮 —— 清单跨页累计，「本页」的改动绝不碰其它页。
+    // 加入本页：只加当前页的已就绪候选
     $('batch-select-page').addEventListener('click', () => {
-      for (const item of b.candPageItems) if (item.ready) b.selected.add(item.id);
-      renderCandidates();
+      addManyToSelection(b.candPageItems.filter((item) => item.ready));
     });
-    // 反选本页：只反转当前页（未就绪的本来就不能选，跳过）
+    // 移出本页：只移当前页里已在清单的条目
     $('batch-invert').addEventListener('click', () => {
-      for (const item of b.candPageItems) {
-        if (!item.ready) continue;
-        if (b.selected.has(item.id)) b.selected.delete(item.id);
-        else b.selected.add(item.id);
-      }
-      renderCandidates();
+      const ids = b.candPageItems.filter((item) => item.ready && b.selected.has(item.id)).map((item) => item.id);
+      if (ids.length) removeSelection(ids);
     });
-    // 全选全部 N 条：N 是当前筛选命中总数，跨所有页
+    // 加入全部 N 条：N 是当前筛选命中总数，跨所有页；已加入不重复
     $('batch-select-all').addEventListener('click', () => {
-      for (const item of candidateMatched()) if (item.ready) b.selected.add(item.id);
-      renderCandidates();
+      addManyToSelection(candidateMatched().filter((item) => item.ready));
     });
+    $('batch-picked-clear').addEventListener('click', clearSelection);
     $('batch-only-selected').addEventListener('change', (event) => {
       const on = event.target.checked;
       // 打开「只看已选」从第 1 页看起；关掉时回到打开前的页码（页数变了，renderCandidates 会夹住）
@@ -2692,7 +2873,7 @@
       fetchCandidates().catch(() => {});
     });
     // 隐藏已用：服务端按款号-模板账本筛掉本款号生产过的模板，和评分/排序一样重拉。
-    // fetchCandidates 本来就会清空已选，所以不会留下「看不见却仍被锁定」的已用条目。
+    // 清单独立保存，筛掉看不见的条目仍留在清单里（托盘里可移除），不会悄悄丢掉。
     $('batch-hide-used').addEventListener('change', (event) => {
       b.hideUsed = !!event.target.checked;
       fetchCandidates().catch(() => {});

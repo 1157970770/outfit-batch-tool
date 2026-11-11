@@ -37,7 +37,7 @@ python run_web.py
 | `app/web/cli.py` | 190 | 命令行：初始化、增删账号、自检、启动 | `main()` |
 | `app/web/server.py` | 1696 | 路由、鉴权、静态文件、CSV/ZIP/视频下载 | `WebApplication`、`make_handler`、`serve` |
 | `app/web/jobs.py` | 800 | 任务队列、调度、事件回写、用量统计 | `JobManager.create/_dispatch/_run_job` |
-| `app/web/batches.py` | 959 | 批次生命周期、候选筛选、锁定、多轮生产、历史分组 | `BatchManager.create/candidates/lock/produce` |
+| `app/web/batches.py` | 1637 | 批次生命周期、候选筛选、草稿清单、锁定、多轮生产、历史分组 | `BatchManager.create/candidates/selection/lock/produce` |
 | `app/web/templates.py` | 557 | 模板目录：标签工作簿 + 云端 manifest 交叉索引 | `TemplateCatalog` |
 | `app/web/settings.py` | 234 | 配置读取与上限裁剪、单价兜底 | `load_settings`、`WebSettings` |
 | `app/web/auth.py` | 95 | 密码哈希、HMAC 会话、登录限流 | `SessionSigner`、`LoginLimiter` |
@@ -98,9 +98,12 @@ _run_job                    BatchRunner.run()：提交 → 轮询 → 下载
 POST /api/batches                 建草稿（批次号唯一、绑图、提示词、画质、时长）
 POST /api/batches/<id>/image       草稿态整组重设（换定妆图/重新选 1+9 张）
 POST /api/batches/<id>/images      op=add 追加细节图 / op=remove 删细节图（锁定后仍可用；主图不可删）
-POST /api/batches/<id>/candidates 按标签筛选 → 命中清单（写入 items，状态 pending）
+POST /api/batches/<id>/candidates 只读筛选：按标签返回命中的候选（不写 items）
                                    body: tag_filters（包含）/ tag_excludes（排除）/ hide_used / rating_min / sort
+POST /api/batches/<id>/selection  草稿清单：op=add 加入 / op=remove 移出 / op=clear 清空；
+                                   清单存服务端草稿，刷新标签、翻页、退出再进都不会丢
 POST /api/batches/<id>/lock       锁定这批清单；之后可反复生产
+                                   （带 template_ids 仍兼容旧调用；不带则锁服务端草稿清单）
 POST /api/batches/<id>/produce    取前 N 条 pending → JobManager.create(batch_ref=...)
                                   一个批次可以跑多轮，直到 pending 耗尽
 POST /api/batches/<id>/prompt     改提示词（分批生产阶段就地改）：运行中也能改，
@@ -203,6 +206,8 @@ while not stop:
 | `tags` | 6 栏位标签，建批次时填，冻结后不改（旧批次只有 `style_no`） |
 | `style_no` | 旧款号字段（v0.9.0），仅老批次存在 |
 | `items[]` | 条目：`template_id / name / tags / state(pending/producing/done/failed) / job_id` |
+| `draft_selection[]` | 草稿态的生产清单：`[{template_id,name}]`；加入/移出/清空即时落盘，锁定后清空 |
+| `selection_count` | 对外字段：草稿清单条数（列表也返回；`draft_selection` 正文只在详情返回） |
 | `runs[]` | 每轮生产记录：`job_id / count / at` |
 | `active_job_id` | 当前跑的那一轮（同批次同时只允许一轮） |
 
@@ -287,7 +292,7 @@ web-data/
 | GET | `/api/jobs/<id>` `/api/jobs/<id>/files/...` | 登录（限本人） | 详情 / 成片、报告 CSV、ZIP |
 | POST | `/api/jobs/<id>/cancel` `/retry` | 登录（限本人） | 取消 / 只重试失败项 |
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
-| GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、lock、produce、retry-failed、close |
+| GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、selection（草稿清单）、lock、produce、retry-failed、close |
 | GET | `/api/batches/<id>/files.zip[?probe=1]` | 登录（限本人） | 整批打包下载，**仅大批量且非试跑的批次**；按 runs 收集每一轮成功视频、按场景去重保留最新。`?probe=1` 只回 `{count,batch_no,download_url}` 不落盘，供前端先确认再触发原生下载 |
 | GET | `/api/history/groups[/<key>]` | 登录 | 历史分组 / 组内条目；`group_by=batch\|owner\|day`，`lane=small\|big` 按通道过滤；明细带 `scope` 保证与列表同口径 |
 | GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |

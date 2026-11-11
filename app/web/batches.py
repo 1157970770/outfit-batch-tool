@@ -166,6 +166,10 @@ class BatchManager:
             batch["id"] = batch_id
             if batch.get("state") not in BATCH_STATES:
                 batch["state"] = "draft"
+            # 草稿生产清单：老批次没有这个字段，按空清单处理；锁定/关闭后不再保留。
+            batch["draft_selection"] = self._clean_selection(batch.get("draft_selection"))
+            if batch.get("state") != "draft":
+                batch["draft_selection"] = []
             if not isinstance(batch.get("items"), list):
                 batch["items"] = []
             if not isinstance(batch.get("runs"), list):
@@ -215,6 +219,32 @@ class BatchManager:
         return {"id": str(item.get("id")), "name": str(item.get("name") or ""),
                 "url": str(item.get("url") or ""), "key": str(item.get("key") or ""),
                 "duration": item.get("duration")}
+
+    @staticmethod
+    def _clean_selection(raw) -> list[dict]:
+        """规范化草稿生产清单：去重保序，只留 {template_id,name}。
+
+        兼容老数据里可能出现的字符串或 {"id": ...} 形状；脏数据直接跳过，
+        不让一条坏记录阻断整个批次加载。
+        """
+        if not isinstance(raw, list):
+            return []
+        seen: set[str] = set()
+        cleaned: list[dict] = []
+        for entry in raw:
+            if isinstance(entry, dict):
+                template_id = str(entry.get("template_id") or entry.get("id") or "").strip()
+                name = str(entry.get("name") or "").strip()
+            elif isinstance(entry, str):
+                template_id = entry.strip()
+                name = ""
+            else:
+                continue
+            if not template_id or template_id in seen:
+                continue
+            seen.add(template_id)
+            cleaned.append({"template_id": template_id, "name": name})
+        return cleaned
 
     def _refresh(self, batch: dict) -> None:
         items = batch.get("items") or []
@@ -541,7 +571,7 @@ class BatchManager:
                 skipped.append({"job_id": job_id, "reason": str(exc)})
         return {"jobs": started, "skipped": skipped, "total_jobs": len(jobs)}
 
-    def public(self, batch: dict) -> dict:
+    def public(self, batch: dict, include_selection: bool = False) -> dict:
         with self.mutex:
             data = {key: batch.get(key) for key in (
                 "id", "batch_no", "title", "owner", "state", "image_upload_id", "image_name",
@@ -549,6 +579,15 @@ class BatchManager:
                 "style_no", "tags",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
                 "created_at", "updated_at", "locked_at", "closed_at")}
+            selection = batch.get("draft_selection") or []
+            # 列表页只要数字；完整清单只在详情里下发，避免列表接口背最多 500 条 ID。
+            data["selection_count"] = len(selection)
+            if include_selection:
+                data["draft_selection"] = [
+                    {"id": str(entry.get("template_id") or ""),
+                     "name": str(entry.get("name") or "")}
+                    for entry in selection if isinstance(entry, dict) and entry.get("template_id")
+                ]
             # image_url 语义固定为「主图（定妆图）」，老前端/历史对比层靠它，不能改。
             data["image_url"] = (f"/api/uploads/{data['image_upload_id']}"
                                  if data.get("image_upload_id") else "")
@@ -675,6 +714,8 @@ class BatchManager:
                 "resolution": resolution, "duration": duration,
                 "tag_filters": {}, "tag_excludes": {},
                 "items": [], "runs": [],
+                # 草稿期的「生产清单」：筛选时只改候选展示，不改这里；锁定后清空。
+                "draft_selection": [],
                 "active_job_id": "",
                 "total_items": 0, "done": 0, "failed": 0, "pending": 0, "producing": 0,
                 "created_at": now, "updated_at": now, "locked_at": None, "closed_at": None,
@@ -821,11 +862,78 @@ class BatchManager:
             "cost_estimate": self._money_view(user, self.estimate(matched[:limit], resolution, out_seconds)),
         }
 
+    # ------------------------------------------------------------------ #3b 草稿生产清单
+    def selection(self, batch_id: str, user: dict, data: dict) -> dict:
+        """草稿期的生产清单增删（不产生任何任务、不扣费）。
+
+        与 candidates 的分工：candidates 只回答「筛出来哪些候选」，这里只维护
+        「用户决定要生产哪些」。筛选条件变化不会动清单，锁定才把清单固化成 items。
+        """
+        op = str(data.get("op") or "").strip().lower()
+        if op not in ("add", "remove", "clear"):
+            raise BatchError("op 只能是 add、remove 或 clear。")
+        filters = data.get("tag_filters")
+        excludes = data.get("tag_excludes")
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            if batch.get("state") != "draft":
+                raise BatchError("清单已锁定，不能再改。", 409)
+            current = self._clean_selection(batch.get("draft_selection"))
+            existing = {entry["template_id"] for entry in current}
+            if op == "clear":
+                current = []
+            elif op == "add":
+                raw_ids = data.get("template_ids")
+                if not isinstance(raw_ids, (list, tuple)) or not raw_ids:
+                    raise BatchError("请选择要加入清单的模板。")
+                incoming: list[str] = []
+                seen: set[str] = set()
+                for value in raw_ids:
+                    template_id = str(value or "").strip()
+                    if not template_id or template_id in seen or template_id in existing:
+                        continue
+                    seen.add(template_id)
+                    incoming.append(template_id)
+                if not incoming:
+                    return {"batch": self.public(batch, include_selection=True)}
+                if len(current) + len(incoming) > self.settings.max_batch_items:
+                    raise BatchError(f"清单最多 {self.settings.max_batch_items} 条。", 409)
+                catalog = self._catalog()
+                try:
+                    templates = catalog.pick_by_ids(
+                        incoming, max_items=self.settings.max_batch_items)
+                except TemplateError as exc:
+                    raise BatchError(str(exc)) from None
+                names = {str(item.get("id")): str(item.get("name") or "")
+                         for item in templates}
+                for template_id in incoming:
+                    if template_id in names:
+                        current.append({"template_id": template_id,
+                                        "name": names[template_id]})
+            else:  # remove：不存在的 ID 静默忽略，前端重复点 × 不会报错
+                raw_ids = data.get("template_ids")
+                if not isinstance(raw_ids, (list, tuple)) or not raw_ids:
+                    raise BatchError("请选择要移出清单的模板。")
+                drop = {str(value or "").strip() for value in raw_ids}
+                current = [entry for entry in current
+                           if entry["template_id"] not in drop]
+            batch["draft_selection"] = current
+            # 顺手同步筛选快照：下次「继续筛选」回来时标签条件和清单处于同一状态。
+            if isinstance(filters, dict):
+                batch["tag_filters"] = dict(filters)
+            if isinstance(excludes, dict):
+                batch["tag_excludes"] = dict(excludes)
+            batch["updated_at"] = time.time()
+            self._save(batch)
+            return {"batch": self.public(batch, include_selection=True)}
+
     # ------------------------------------------------------------------ #4 锁定清单
     def lock(self, batch_id: str, user: dict, data: dict) -> dict:
         template_ids = data.get("template_ids")
-        if not isinstance(template_ids, (list, tuple)) or not template_ids:
-            raise BatchError("锁定清单不能为空。")
+        # 兼容两条入口：老调用显式传 template_ids；新前端不传，锁草稿里持久化的清单。
+        if template_ids is not None:
+            if not isinstance(template_ids, (list, tuple)) or not template_ids:
+                raise BatchError("锁定清单不能为空。")
         if data.get("confirmed") is not True:
             raise BatchError("请二次确认后再锁定清单。")
         catalog = self._catalog()
@@ -833,6 +941,11 @@ class BatchManager:
             batch = self._authorized(batch_id, user)
             if batch.get("state") != "draft":
                 raise BatchError("清单已锁定，不能再改。", 409)
+            if template_ids is None:
+                template_ids = [entry["template_id"] for entry
+                                in self._clean_selection(batch.get("draft_selection"))]
+            if not template_ids:
+                raise BatchError("清单还是空的，请先在候选卡片加入要生产的模板。")
             if not self._image_slots(batch):
                 raise BatchError("请先绑定定妆图再锁定清单。", 409)
             if len(template_ids) > self.settings.max_batch_items:
@@ -848,6 +961,8 @@ class BatchManager:
                 "tags": list(item.get("tags") or []),
                 "state": "pending", "job_id": "", "error": "",
             } for item in templates]
+            # 清单已经固化成 items，草稿清单清空，避免锁定后还显示一份不再生效的选择。
+            batch["draft_selection"] = []
             batch["tag_filters"] = dict(data.get("tag_filters") or {}) if isinstance(
                 data.get("tag_filters"), dict) else {}
             # 排除标签也进快照：锁定后回看批次时要知道这份清单是按什么黑名单筛出来的。
@@ -1132,7 +1247,7 @@ class BatchManager:
         with self.mutex:
             batch = self._authorized(batch_id, user)
             self._reconcile(batch)
-            data = self.public(batch)
+            data = self.public(batch, include_selection=True)
             # 详情页要能直接显示「再生产这批大概多少钱」，不必先拉候选。
             data["cost_estimate"] = self._money_view(user, self.estimate_for_pending(batch))
             return data, self.public_items(batch, item_state)

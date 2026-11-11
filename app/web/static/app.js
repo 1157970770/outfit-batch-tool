@@ -311,7 +311,7 @@
   document.querySelectorAll('input[name="selection"]').forEach(r => r.addEventListener('change', () => {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
     $('template-wrap').classList.toggle('hidden', !selected); $('count-wrap').classList.toggle('hidden', selected);
-    $('template-preview').classList.toggle('hidden', !selected); updateTemplatePreview(); updateSummary();
+    updateTemplatePreview(); updateSummary();
   }));
   ['count-select','resolution','duration'].forEach(id => $(id).addEventListener('change', updateSummary));
   // 数量用小分段控件代替下拉：值仍写进隐藏的 #count-select，
@@ -336,26 +336,64 @@
   $('prompt-body').addEventListener('input', () => { updatePromptCount(); updateSummary(); });
   document.querySelectorAll('#style-tags input[data-tag-slot]').forEach(input => input.addEventListener('input', () => { updateSummary(); scheduleStyleUsed(); }));
   function updatePromptCount() { $('prompt-length').textContent = `${$('prompt-body').value.length} / 4000`; }
+  function templateLabel(id) {
+    const template = state.templates.find(item => String(item.id) === id);
+    return template ? template.name : id;
+  }
+  /* 「我来挑选」最多 3 个场景，每个都要在左栏看到画面。
+     复用已有 cell：增删一个场景时其它视频不重建、不重新加载，也不会跳回开头。 */
   function updateTemplatePreview() {
     const selected = document.querySelector('input[name="selection"]:checked').value === 'selected';
-    const video = $('template-preview');
     const wrap = $('image-preview-wrap');
-    const first = [...state.picked][0] || '';
-    if (!selected || !first) {
-      video.pause(); video.removeAttribute('src'); video.classList.add('hidden');
-      if (wrap) wrap.classList.add('hidden');
+    const root = $('template-preview-list');
+    if (!wrap || !root) return;
+    const ids = selected ? [...state.picked] : [];
+    if (!ids.length) {
+      for (const cell of root.querySelectorAll('.template-preview-cell')) {
+        const video = cell.querySelector('video');
+        if (video) { video.pause(); video.removeAttribute('src'); if (video.load) video.load(); }
+        cell.remove();
+      }
+      wrap.classList.add('hidden');
       return;
     }
-    video.src = `/api/templates/${encodeURIComponent(first)}/preview`;
-    video.classList.remove('hidden');
-    if (wrap) wrap.classList.remove('hidden');
-    video.title = first ? '预览第一个选中场景' : '';
-    // 选中场景即自动播放 + 循环：muted 是浏览器允许自动播放的前提（模板视频本身无音轨）。
-    video.loop = true;
-    video.muted = true;
-    // 被浏览器策略拦下时不报错，控制条仍在，用户手点一次即可。
-    const started = video.play();
-    if (started && typeof started.catch === 'function') started.catch(() => {});
+    wrap.classList.remove('hidden');
+    const keep = new Set(ids);
+    for (const cell of [...root.querySelectorAll('.template-preview-cell')]) {
+      if (keep.has(cell.dataset.id)) continue;
+      const video = cell.querySelector('video');
+      if (video) { video.pause(); video.removeAttribute('src'); if (video.load) video.load(); }
+      cell.remove();
+    }
+    ids.forEach((id, index) => {
+      let cell = [...root.querySelectorAll('.template-preview-cell')].find(node => node.dataset.id === id);
+      if (!cell) {
+        cell = document.createElement('figure');
+        cell.className = 'template-preview-cell';
+        cell.dataset.id = id;
+        cell.setAttribute('role', 'listitem');
+        const video = document.createElement('video');
+        video.className = 'template-preview';
+        video.controls = true;
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.src = `/api/templates/${encodeURIComponent(id)}/preview`;
+        // 选中场景即自动播放 + 循环：muted 是浏览器允许自动播放的前提（模板视频本身无音轨）。
+        // 被浏览器策略拦下时不报错，控制条仍在，用户手点一次即可。
+        const started = video.play();
+        if (started && typeof started.catch === 'function') started.catch(() => {});
+        const caption = document.createElement('figcaption');
+        caption.className = 'template-preview-caption';
+        cell.append(video, caption);
+      }
+      const caption = cell.querySelector('.template-preview-caption');
+      const name = templateLabel(id);
+      caption.textContent = `场景 ${index + 1} · ${name}`;
+      caption.title = `${name}（${id}）`;
+      if (root.children[index] !== cell) root.insertBefore(cell, root.children[index] || null);
+    });
   }
   function selectedCount() {
     return document.querySelector('input[name="selection"]:checked').value === 'selected'
