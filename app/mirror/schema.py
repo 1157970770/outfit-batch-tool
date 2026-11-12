@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXPORTER_VERSION = "1"
 
 # 每次连接都要设的 pragma：WAL 让「只读查询」与「同步线程写入」不互斥；
@@ -181,7 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_records_cos    ON records(cos_key);
 
 -- 扁平视图：一行一条成片，报表/LLM 最常用，省得每次手写 JOIN。
 CREATE VIEW IF NOT EXISTS v_production AS
-SELECT r.record_id, r.job_id, j.owner, j.day, j.created_local, j.category,
+SELECT r.record_id, r.seq, r.job_id, j.owner, j.day, j.created_local, j.category,
        j.batch_id, j.batch_ref, r.template_id, r.template_name, r.status,
        r.file, r.file_exists, r.path_external, r.cos_key, r.cos_url,
        r.billable_seconds, r.estimated_cost, r.cost_source, r.error
