@@ -43,6 +43,7 @@ REQUIRED = [
     "test_resume",
     "test_timeout_recheck",
     "test_billing",
+    "test_data_mirror",
     "test_web_hardening",
     "test_batch5",
     "test_web_tags",

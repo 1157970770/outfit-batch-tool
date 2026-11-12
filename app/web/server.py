@@ -31,6 +31,7 @@ from app import traffic
 from app.imggen import ImageGenError, ImageGenManager
 from app.videogen import VideoGenError, VideoGenManager
 from app.media import MediaError, validate_image
+from app.mirror import start_mirror
 from app.prompts import PromptLibrary
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, configure_globals, global_limits
@@ -2388,6 +2389,16 @@ def serve(host: str | None = None, port: int | None = None) -> int:
     for address in addresses:
         print(f"局域网访问：http://{address}:{bind_port}")
     print("客户端只需浏览器；按 Ctrl+C 停止服务。")
+    # 生产数据镜像：把 jobs/batches/uploads 的 JSON 增量同步成一份只读 SQLite，
+    # 给外部程序（报表、Excel/Power BI、LLM agent）查，别让它们各自解析 JSON。
+    # 失败不影响服务本身，只打印提示——镜像永远是可选的派生品。
+    mirror = None
+    try:
+        mirror = start_mirror(settings)
+        if mirror is not None:
+            print(f"生产数据镜像：{mirror.db_path}（只读，外部程序可连）")
+    except Exception as exc:
+        print(f"（数据镜像启动失败，不影响服务运行：{exc}）")
     address_file = settings.data_dir / "访问地址.txt"
     try:
         address_file.write_text(
@@ -2404,6 +2415,11 @@ def serve(host: str | None = None, port: int | None = None) -> int:
     finally:
         server.shutdown()
         server.server_close()
+        if mirror is not None:
+            try:
+                mirror.stop()
+            except Exception:
+                pass
         app.jobs.shutdown()
         lock.close()
     return 0

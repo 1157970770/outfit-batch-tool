@@ -11,6 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
+from app import billing
 from app import config as appconfig
 from app.core import TAG_SLOTS, BatchRunner, BatchSpec, status_counts, unique_batch_dir
 from app.media import base64_budget_error
@@ -141,8 +142,8 @@ def clean_style_no(value) -> str:
 
 
 # 任务分类的兜底名：老任务、试跑任务（没有批次）没有分类字段，统计时归到这里，
-# 绝不能把它们的消耗从报表里丢掉。
-UNCATEGORIZED = "未分类"
+# 绝不能把它们的消耗从报表里丢掉。口径定义在 app/billing.py，这里只做别名。
+UNCATEGORIZED = billing.UNCATEGORIZED
 
 
 def clean_category(value) -> str:
@@ -188,8 +189,8 @@ def retry_blocked_download_failed(job: dict) -> list[dict]:
 # 统计口径里的「失败侧」：非成功终态全部计入，保证 items = success + failed + unfinished。
 # unknown（提交结果未知/停止等待）云端可能已建任务并计费，必须算失败侧而非静默消失；
 # skipped 与 timeout 一样在重试白名单里，同属失败侧。
-_FAILED_RECORD_STATES = frozenset(
-    {"failed", "invalid", "expired", "canceled", "unknown", "timeout", "skipped"})
+# 定义在 app/billing.py：数据镜像与外部报表要同一套口径，不能各存一份。
+_FAILED_RECORD_STATES = billing.FAILED_RECORD_STATES
 
 # P1-5：金额相关字段只下发给管理员。普通用户可反推 wan.price_per_second，
 # 违反硬约束 5（金额统一走 /api/admin/usage 与 /api/admin/accounts/<owner>/work）。
@@ -985,24 +986,10 @@ class JobManager:
     def _record_cost(self, rec: dict, job: dict) -> tuple[float, str]:
         """单条记录的费用：优先用生成时落下的金额，否则按当前单价回算。
 
-        历史任务（单价还是 null 时生成的）记录里 estimated_cost 是 None；不回算的话，
-        管理端的"花了多少钱"对老数据全是空白。回算只发生在读取时，不改任务文件，
-        并标记 cost_source=derived，便于区分"实测落账"与"事后估算"。
+        实现已下沉到 ``app/billing.py::record_cost``——数据镜像、外部报表与网页端
+        必须用同一套口径，这里只是兼容旧调用点的薄委托。
         """
-        raw = rec.get("estimated_cost")
-        if raw not in (None, ""):
-            try:
-                return float(raw), "record"
-            except (TypeError, ValueError):
-                pass
-        try:
-            seconds = float(rec.get("billable_seconds") or 0)
-        except (TypeError, ValueError):
-            seconds = 0.0
-        price, _source = self.settings.unit_price(str(job.get("resolution") or ""))
-        if seconds > 0 and price:
-            return seconds * float(price), "derived"
-        return 0.0, "missing"
+        return billing.record_cost(rec, job, self.settings.unit_price)
 
     def videos_used(self, owner: str) -> int:
         """账户已占用的生成额度（条），供按账户的生成上限使用。
