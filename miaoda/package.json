@@ -24,6 +24,7 @@
     "typecheck": "npm run typecheck -w @outfit/shared && npm run typecheck -w @outfit/server && npm run typecheck -w @outfit/web"
   },
   "devDependencies": {
+    "playwright-core": "^1.49.1",
     "typescript": "5.7.3"
   }
 }
