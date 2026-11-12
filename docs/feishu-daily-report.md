@@ -93,7 +93,7 @@ record: id / template / status / billable_seconds / estimated_cost / usage / cos
 ```text
 18:00 计划任务启动（pythonw --quiet，stdout 无控制台 → 全部写日志）
  │
- ├─ 1. 取文件锁 data_root/logs/feishu_report.lock（>6h 视为过期锁，自动接管）
+ ├─ 1. 取文件锁 data_root/logs/.feishu_report.lock（>6h 或持锁 pid 已死 → 视为过期锁，自动接管）
  ├─ 2. 读 server/web.json 拿 enabled 账户；读 server/config.json 拿单价
  ├─ 3. 扫 jobs/*.json，按「日期 → 账户」聚合（窗口默认 D-3..今天）
  ├─ 4. 先把聚合结果打进日志（每天每账户一行 + 每天合计一行）
@@ -231,7 +231,7 @@ Get-Content "D:\批量视频任务运行区\web-data\logs\feishu_report.log" -Ta
 | 表里某些列对不上 | 列名被人工改过 | `fields` / `daily_fields` 里写当前列名 |
 | `PermissionError errno=13 winerror=None`（子进程写日志失败） | DSH 沙箱对 python 子进程的跨区写拦截（合成错误） | 交互跑加 `--state-dir` 指向工作区内目录；计划任务不受影响 |
 | token 接口返回里找不到 token | token 在响应**顶层**，不在 `data` | 脚本用 `_request()` 拿完整 JSON、业务接口才用 `_data()` |
-| 日志 `[锁] 已有实例在跑` | 上一次还没结束 / 残留锁 | 正常等下一次；确认无进程后删 `logs/feishu_report.lock` |
+| 日志 `[锁] 已有实例在跑` | 上一次还没结束 / 残留锁 | 先看锁文件里的 pid：进程已死时新版本会自动接管；老版本可手动删 `logs/.feishu_report.lock` |
 | 当天数字第二天变了 | 快照语义（§3.1） | 正常现象，次日回补自动修正 |
 
 ---

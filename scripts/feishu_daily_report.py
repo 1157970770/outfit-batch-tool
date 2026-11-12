@@ -775,6 +775,35 @@ def lock_path(args: argparse.Namespace) -> Path:
     return state_dir(args) / ".feishu_report.lock"
 
 
+def _pid_alive(pid: int) -> bool:
+    """判断 pid 是否还活着（Windows 用 OpenProcess，POSIX 用 kill(pid, 0)）。
+
+    查不了（权限不够/异常）时返回 True——宁可保守地认为它活着，也不要抢正在跑的锁。
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            kernel32.CloseHandle(handle)
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def acquire_lock(args: argparse.Namespace) -> bool:
     path = lock_path(args)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -783,7 +812,12 @@ def acquire_lock(args: argparse.Namespace) -> bool:
             age = time.time() - path.stat().st_mtime
         except OSError:
             age = 0
-        if age > LOCK_STALE_SECONDS:
+        try:
+            holder = int(path.read_text(encoding="ascii").strip() or "0")
+        except (OSError, ValueError):
+            holder = 0
+        # 过期锁或持锁进程已死 → 直接接管（崩溃/被杀后不必等满 6 小时）
+        if age > LOCK_STALE_SECONDS or not _pid_alive(holder):
             path.unlink(missing_ok=True)
         else:
             return False
