@@ -153,6 +153,11 @@ app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守�
 → 调度线程 `_dispatch` → `_run_job` → `BatchRunner.run()` → 事件回写 `records/done`
 → 前端每 3.5 秒轮询 `/api/jobs` → 完成后 `GET /api/jobs/<id>/files/...` 下载。
 
+另有一条**只读旁路**：服务启动时 `app/mirror/` 起一个守护线程，每 5 秒比对 `jobs/`、`batches/`、
+`uploads/meta/` 的 `(mtime, size)`，把变化增量写进 `web-data/mirror/production.sqlite`（WAL），
+供外部程序查询；金额口径来自 `app/billing.py`（与 `usage_for()` 同源）。
+JSON 仍是唯一真源，镜像可删可重建，见 [docs/production-data.md](docs/production-data.md)。
+
 ## 4. 七条硬约束（改代码前必须知道）
 
 1. **全站只有一把 API Key**：`server/config.json → wan.api_key`，所有账户共用。
@@ -192,6 +197,7 @@ app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守�
 | `web-data/ps/<upload_id>_s<强度>.png` + `.json` | PS 助手去紫结果（PNG + 统计侧车）；路径由原图 id 与强度派生，无登记表，可随时整目录删 | ❌ |
 | `web-data/imagegen/tasks/<id>.json` + `files/<id>/` | 生图任务记录、成品 `<n>.png` + `<n>.meta.json` 侧车、参考图副本 `ref<n>.<ext>`（创建任务时拷贝，uploads 删了也能复现） | ❌ |
 | `web-data/videogen/{tasks,files,uploads}/` | 自由视频任务记录（`tasks/<id>.json`）、参考素材副本与成品 `shot-<n>.mp4`、参考视频/音频上传元数据；删任务会连 `files/<id>/` 一起删，`uploads/` 不回收 | ❌ |
+| `web-data/mirror/production.sqlite` | **生产数据镜像**（只读副本）：jobs/records/batches/uploads/usage_daily + 三个视图，给外部程序（报表、Excel/Power BI、AI agent）读；服务进程内守护线程每 5 秒跟随 JSON 增量同步，**可随时删除自动重建**。见 [docs/production-data.md](docs/production-data.md) | ❌ |
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 
 **多图（v0.17.0）**：两页都支持 10 个槽位（槽位 1 定妆图必填，2–10 细节图可选），数组顺序即模型 `imageUrls` 顺序与 prompt 的「图N」。job / batch 以 `images[]` 为唯一真源，`image_path/image_name/image_url` 保留为**主图别名**（老数据零迁移）。`/api/jobs`、`/api/batches` 收 `upload_ids[]`（兼容旧 `upload_id`）；锁定后细节图走 `POST /api/batches/<id>/images` 的 `op=add/remove`，主图不可换。删除细节图后序号自动左移；**不改 prompt**，指代由用户自己写「图2…图10」。COS 关闭时 `app/media.py:base64_budget_error` 会按总量 40MB 兜底拒绝。uploads 目录目前**没有 GC**，10 倍图量会持续堆积，后续可加「按 job/batch 引用计数 + 7 天」的清理。
@@ -227,9 +233,10 @@ python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分
 python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格 / probe / HTTP zip
 python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / 取图下载 / 权限 / 重启恢复
 python tests/test_videogen.py    # 自由视频 tab：选项 / 文生·图生·视频编辑 / 校验 / 权限 / 取消 / 删除
+python tests/test_data_mirror.py # 生产数据镜像：行数/路径、与 usage_for() 口径对平、脱敏、增量、坏库重建
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口、批次、生图与自由视频端到端（30 套，含 `test_path_relocate`），全部离线运行。
+`tests/run_all.py` 覆盖引擎、存储、网页接口、批次、生图、自由视频与数据镜像端到端（31 套，含 `test_path_relocate`），全部离线运行。
 
 ## 7. 别动 / 小心
 
@@ -267,5 +274,6 @@ python tests/test_videogen.py    # 自由视频 tab：选项 / 文生·图生·�
 | [docs/ui-rollback.md](docs/ui-rollback.md) | 界面改版的基线与回滚步骤 |
 | [docs/ps-assistant.md](docs/ps-assistant.md) | PS 助手 tab（去紫）：算法口径、接口、像素上限与排障 |
 | [docs/free-video-tab.md](docs/free-video-tab.md) | 自由视频 tab（通用 wan3.0）：用法、接口、参数口径、数据落盘、并发计费与限制 |
+| [docs/production-data.md](docs/production-data.md) | **生产数据镜像**：SQLite 只读副本的表/视图字段、金额口径、外部程序（Python/LLM、Excel、Power BI）接法、新鲜度与排障 |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
 | [README.md](README.md) | 对外说明与快速开始 |

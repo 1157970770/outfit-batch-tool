@@ -13,5 +13,11 @@
   "retention_days": 0,
   "cors_origins": [],
   "allowed_hosts": [],
+  "data_mirror": {
+    "_说明": "生产数据镜像（web-data/mirror/production.sqlite）：给外部程序只读查询的派生副本。enabled=false 可一键关闭；poll_seconds 是同步间隔；csv_dir 非空时每轮变更额外导出 jobs/records/usage_daily 三个 CSV。详见 docs/production-data.md。",
+    "enabled": true,
+    "poll_seconds": 5,
+    "csv_dir": ""
+  },
   "users": {}
 }
