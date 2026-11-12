@@ -33,6 +33,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))   # 直接 `python scripts/xxx.py` 时也能 import app.*
 
 _ALLOWED = ("select", "with", "pragma", "explain", "values")
 

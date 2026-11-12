@@ -7,8 +7,10 @@
 - 库路径：`<data_root>/mirror/production.sqlite`（连同 `-wal` / `-shm` 两个旁挂文件）
   - 生产：`D:\批量视频任务运行区\web-data\mirror\production.sqlite`
   - 开发：`D:\批量视频任务设计区\web-data-dev\mirror\production.sqlite`
+- **让 AI / LLM agent 自己查数据**：把 [llm-data-access.md](llm-data-access.md) 丢给它就行
+  （那里只有「怎么查、字段什么口径、常见问题对应的 SQL」，没有运维细节）
 - 由网页服务进程内的守护线程同步（`app/mirror/core.py`），服务停机期间不更新
-- 结构版本见 `meta.schema_version`（当前 **1**）；版本不符会自动整库重建
+- 结构版本见 `meta.schema_version`（2026-11-12 为 **2**）；版本不符会自动整库重建
 
 ## 1. 为什么是「镜像」而不是「搬库」
 

@@ -275,5 +275,6 @@ python tests/test_data_mirror.py # 生产数据镜像：行数/路径、与 usag
 | [docs/ps-assistant.md](docs/ps-assistant.md) | PS 助手 tab（去紫）：算法口径、接口、像素上限与排障 |
 | [docs/free-video-tab.md](docs/free-video-tab.md) | 自由视频 tab（通用 wan3.0）：用法、接口、参数口径、数据落盘、并发计费与限制 |
 | [docs/production-data.md](docs/production-data.md) | **生产数据镜像**：SQLite 只读副本的表/视图字段、金额口径、外部程序（Python/LLM、Excel、Power BI）接法、新鲜度与排障 |
+| [docs/llm-data-access.md](docs/llm-data-access.md) | **给 LLM / Agent 的数据获取指南**：怎么连、有哪些表、自然语言→SQL 速查、字段口径与别做的事（要查数据先读这篇） |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |
 | [README.md](README.md) | 对外说明与快速开始 |
