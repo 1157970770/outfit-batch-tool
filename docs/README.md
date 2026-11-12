@@ -19,6 +19,7 @@
 | [free-video-tab.md](free-video-tab.md) | **自由视频 tab（通用 wan3.0）**：文生/图生/视频编辑、接口、参数口径、数据落盘、并发与计费、已知限制 | 2026-11-10 |
 | [production-data.md](production-data.md) | **生产数据镜像（SQLite 只读副本）**：表/视图字段、金额口径、Python/LLM·Excel·Power BI 接法、新鲜度与排障 | 2026-11-12 |
 | [llm-data-access.md](llm-data-access.md) | **给 LLM / Agent 的数据获取指南**：连接方式、schema 速查、自然语言→SQL、字段口径与坑 | 2026-11-12 |
+| [feishu-daily-report.md](feishu-daily-report.md) | **每日生产数据自动同步飞书**：三张表结构、统计口径、18:00 计划任务、幂等/自愈、配置与排障 | 2026-11-12 |
 | [web-tag-filter-handover.md](web-tag-filter-handover.md) | 标签筛选改造交接（含清单适配细节） | 2026-10-30 |
 
 ## 二、引擎 / 协议 / 存储
