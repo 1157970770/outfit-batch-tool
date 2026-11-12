@@ -7,7 +7,6 @@
 
 | 文档 | 内容 | 时效 |
 | --- | --- | --- |
-| [妙搭迁移方案.md](妙搭迁移方案.md) | **迁移到飞书妙搭（React + NestJS）**：为什么要重构、目标架构、兼容策略、P0–P5 分阶段与验收、P0 实测结果、风险对策；代码在 [miaoda/](../miaoda/) | 2026-11-10 |
 | [core-code-and-migration.md](core-code-and-migration.md) | **核心代码导读 + 迁移手册**：搬什么/不搬什么、配置与数据清单、八步迁移、必改的硬编码地址、验收清单、已知坑 | 2026-11-10 |
 | [core-code-and-migration.docx](core-code-and-migration.docx) | 同上手册的**排版版（Word，16 页）**，给不看仓库的人传阅用；由 [scripts/build_migration_docx.py](../scripts/build_migration_docx.py) 从 md 生成，改内容先改 md 再重跑脚本 | 2026-11-10 |
 | [architecture.md](architecture.md) | **代码架构**：分层、线程模型、请求/批次生命周期、额度闸门、数据模型、接口表、前端结构、排障 | 2026-11-02 |
