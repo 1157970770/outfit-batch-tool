@@ -365,6 +365,10 @@ class Storage:
     def sign_url(self, key: str, expires: int = DEFAULT_EXPIRES) -> str:
         raise NotImplementedError
 
+    def read_stream(self, key: str):
+        """以二进制流读回一个对象（服务端打包下载用）；调用方负责关闭。"""
+        raise NotImplementedError
+
     def delete(self, key: str) -> None:
         raise NotImplementedError
 
@@ -512,6 +516,18 @@ class CosStorage(Storage):
             raise StorageError(f"签名链接异常：{url!r}")
         return url
 
+    def read_stream(self, key: str):
+        """COS 对象的响应流：调用方按块读，读完必须关闭（网络流会占着连接）。"""
+        key = self._key(key)
+        resp = _with_retry(
+            lambda: self.client.get_object(Bucket=self.cfg.bucket, Key=key),
+            f"下载 {key}",
+        )
+        body = resp.get("Body") if isinstance(resp, dict) else getattr(resp, "Body", None)
+        if body is None or not hasattr(body, "read"):
+            raise StorageError(f"对象没有返回内容：{key}")
+        return body
+
     def public_url(self, key: str) -> str:
         """不走签名的直链：仅当桶是公有读，或 CDN 已配好回源鉴权时可用。"""
         key = self._key(key)
@@ -614,6 +630,12 @@ class LocalStorage(Storage):
 
     def sign_url(self, key: str, expires: int = DEFAULT_EXPIRES) -> str:
         return self._path(key).as_uri()
+
+    def read_stream(self, key: str):
+        path = self._path(key)
+        if not path.is_file():
+            raise StorageError(f"对象不存在：{key}")
+        return path.open("rb")
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)

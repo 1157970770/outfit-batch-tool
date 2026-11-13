@@ -1047,6 +1047,7 @@
     root.replaceChildren();
     $('archive-actions').classList.add('hidden');
     $('archive-copy-btn').classList.add('hidden');
+    $('archive-zip-note').textContent = '';
     state.archiveLinks = [];
     if (!state.archiveEntries.length) { result.textContent = `云端没有找到与「${data.style}」相关的归档视频。`; return; }
     const src = data.source === 'cos' ? '（按云端路径匹配）' : '';
@@ -1072,8 +1073,49 @@
   }
   $('archive-search-btn').addEventListener('click', searchArchive);
   $('archive-style').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); searchArchive(); } });
+  // 勾选的归档对象 key：表格每次重建，checkbox 也跟着换，所以每次现取。
+  function checkedArchiveKeys() {
+    return [...$('archive-table').querySelectorAll('input[type="checkbox"]:checked')].map(box => box.dataset.key);
+  }
+  function humanSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+    if (n >= 1024 ** 2) return `${Math.max(1, Math.round(n / 1024 ** 2))} MB`;
+    return `${Math.max(1, Math.round(n / 1024))} KB`;
+  }
+  // 打包好后交给浏览器自己的下载器（有进度、可续传），不把整包读进前端内存。
+  function triggerDownload(url) {
+    const a = document.createElement('a');
+    a.href = url; a.download = ''; a.style.display = 'none';
+    document.body.append(a); a.click(); a.remove();
+  }
+  // 打包在服务端后台跑：这里只轮询进度，打完再发一次 GET 下载。
+  $('archive-zip-btn').addEventListener('click', async () => {
+    const keys = checkedArchiveKeys();
+    if (!keys.length) return toast('请先勾选视频');
+    const btn = $('archive-zip-btn'); const note = $('archive-zip-note');
+    btn.disabled = true; btn.textContent = '正在打包…';
+    note.textContent = `${keys.length} 条排队中，从云端取回要一会儿…`;
+    try {
+      const started = await api('/api/admin/archive-zip', { method: 'POST', body: JSON.stringify({ keys, style: $('archive-style').value.trim() }) });
+      const token = started.token;
+      const deadline = Date.now() + 15 * 60 * 1000;
+      let info = started;
+      while (info.state === 'building' && Date.now() < deadline) {
+        note.textContent = `正在打包 ${info.done}/${info.total}${info.bytes ? ` · 已取回 ${humanSize(info.bytes)}` : ''}…`;
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        info = await api(`/api/admin/archive-zip/${encodeURIComponent(token)}/status`);
+      }
+      if (info.state !== 'ready') throw new Error(info.error || '打包超时，请稍后重试。');
+      triggerDownload(`/api/admin/archive-zip/${encodeURIComponent(token)}`);
+      const failed = (info.failed || []).length;
+      note.textContent = `已打包 ${info.done} 条 · ${humanSize(info.bytes)}`;
+      toast(failed ? `已打包 ${info.done} 条，${failed} 条取回失败（已跳过）。` : `已打包 ${info.done} 条，开始下载…`);
+    } catch (err) { toast(err.message); note.textContent = ''; }
+    finally { btn.disabled = false; btn.textContent = '打包下载 ZIP'; }
+  });
   $('archive-sign-btn').addEventListener('click', async () => {
-    const keys = [...$('archive-table').querySelectorAll('input[type="checkbox"]:checked')].map(box => box.dataset.key);
+    const keys = checkedArchiveKeys();
     if (!keys.length) return toast('请先勾选视频');
     const btn = $('archive-sign-btn');
     btn.disabled = true; btn.textContent = '正在生成…';

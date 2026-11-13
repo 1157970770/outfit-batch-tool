@@ -56,6 +56,7 @@ REQUIRED = [
     "test_batches",
     "test_history_admin",
     "test_batch_zip",
+    "test_archive_zip",
 ]
 OPTIONAL: list[str] = []
 PER_SUITE_TIMEOUT = 900                  # 单套 15 分钟

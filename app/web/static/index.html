@@ -752,7 +752,7 @@
         <div class="section-head"><div><h1>管理员</h1><p class="muted">服务状态、用户和模板由管理员维护。</p></div><button id="reload-templates" class="quiet">重新加载视频场景</button></div>
         <article class="card"><div id="admin-status" class="admin-status"></div></article>
         <article class="card admin-archive">
-          <div class="section-head"><div><h3>云端归档</h3><p class="muted">按款号搜索已归档到 COS 的视频，勾选后生成 7 天内有效的下载链接。</p></div></div>
+          <div class="section-head"><div><h3>云端归档</h3><p class="muted">按款号搜索已归档到 COS 的视频；勾选后可打包下载 ZIP，或生成 7 天内有效的下载链接。</p></div></div>
           <div class="archive-search-row">
             <input id="archive-style" maxlength="60" autocomplete="off" placeholder="输入款号，如 AX111">
             <button id="archive-search-btn" class="quiet" type="button">搜索</button>
@@ -760,8 +760,10 @@
           <div id="archive-result" class="muted"></div>
           <div id="archive-table" class="usage-table"></div>
           <div id="archive-actions" class="top-actions hidden">
-            <button id="archive-sign-btn" class="primary" type="button">生成下载链接（7 天有效）</button>
+            <button id="archive-zip-btn" class="primary" type="button">打包下载 ZIP</button>
+            <button id="archive-sign-btn" class="quiet" type="button">生成下载链接（7 天有效）</button>
             <button id="archive-copy-btn" class="quiet hidden" type="button">复制全部链接</button>
+            <span id="archive-zip-note" class="muted"></span>
           </div>
         </article>
         <article class="card admin-usage"><div class="section-head"><div><h3>账户用量</h3><p class="muted">条数与计费秒来自云端，金额为估算；点账户名看逐条明细。</p></div></div>

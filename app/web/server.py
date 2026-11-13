@@ -36,6 +36,7 @@ from app.prompts import PromptLibrary
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
+from app.web.archive_zip import ArchiveZipError, ArchiveZipManager
 from app.web.batches import (PRODUCE_CHOICES, PRODUCE_MIN, TASK_CATEGORIES,
                              BatchError, BatchManager)
 from app.web.jobs import (MAX_IMAGE_SLOTS, UNCATEGORIZED, JobManager, _redact, image_slots,
@@ -186,6 +187,8 @@ class WebApplication:
         # 生图 tab（老张 API）：任务落 web-data/imagegen/，与视频任务队列完全独立，
         # 互不抢在飞名额；配置来自 server/imagegen.json（缺失时该 tab 显示「未配置」）。
         self.imagegen = ImageGenManager(settings)
+        # 「云端归档 → 打包下载 ZIP」：后台线程逐条从成品桶拉流写 zip，前端轮询进度。
+        self.archive_zip = ArchiveZipManager(settings.data_dir)
         # 自由视频 tab（通用 wan3.0 生产）：独立的落盘目录与队列，不读模板清单、
         # 不占 job 槽位；参考素材（视频/音频）需要 COS，图片可走 Base64。
         self.videogen = VideoGenManager(settings)
@@ -786,6 +789,14 @@ def make_handler(app: WebApplication):
                     return
                 query = urllib.parse.parse_qs(parsed.query)
                 return self._admin_archive_search(query)
+            if path.startswith("/api/admin/archive-zip/"):
+                if not self._user(admin=True):
+                    return
+                parts = path.strip("/").split("/")
+                # /api/admin/archive-zip/<token>[/status]
+                if len(parts) not in (4, 5) or (len(parts) == 5 and parts[4] != "status"):
+                    return self._error("页面或接口不存在。", 404)
+                return self._admin_archive_zip_get(parts[3], status_only=len(parts) == 5)
             if path.startswith("/api/admin/accounts/"):
                 if not self._user(admin=True):
                     return
@@ -951,6 +962,10 @@ def make_handler(app: WebApplication):
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
                 return self._admin_archive_sign(data)
+            if path == "/api/admin/archive-zip":
+                if user.get("role") != "admin":
+                    return self._error("此操作需要管理员权限。", 403)
+                return self._admin_archive_zip_start(data)
             if path.startswith("/api/admin/users/"):
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
@@ -1833,6 +1848,38 @@ def make_handler(app: WebApplication):
             traffic.record("archive", 0, n=len(links), m="link")
             return self._json({"ok": True, "links": links, "failed": failed,
                                "expires_at": deadline})
+
+        def _admin_archive_zip_start(self, data):
+            """建一个「打包下载 ZIP」任务：后台线程逐条从成品桶拉流写包，前端轮询进度。
+
+            不在这里同步打包的原因见 app/web/archive_zip.py 顶部：几十秒到几分钟的
+            同步响应只会让浏览器一直转圈，和「点了没反应」没区别。
+            """
+            try:
+                store = app.output_store()
+            except Exception as exc:  # noqa: BLE001 - 凭证/配置问题都归到这里
+                return self._error(f"云端归档不可用：{exc}", 503)
+            try:
+                task = app.archive_zip.start(store, data.get("keys"), str(data.get("style") or ""))
+            except ArchiveZipError as exc:
+                return self._error(str(exc), exc.status)
+            return self._json({"ok": True, **task})
+
+        def _admin_archive_zip_get(self, token, status_only=False):
+            """轮询进度（/status）或下载成品 zip；还没打完时给 409，前端据此继续轮询。"""
+            task = app.archive_zip.status(token)
+            if task is None:
+                return self._error("打包任务不存在或已过期，请重新打包。", 404)
+            if status_only:
+                return self._json({"ok": True, **task})
+            if task["state"] != "ready":
+                message = task.get("error") or ("正在打包，请稍候。" if task["state"] == "building"
+                                                else "打包失败。")
+                return self._json({"ok": False, "error": message, **task}, 409)
+            path = app.archive_zip.path_of(token)
+            if path is None:
+                return self._error("打包文件已被清理，请重新打包。", 404)
+            return self._send_file(path, "application/zip", app.archive_zip.zip_name(token))
 
         def _account_work(self, owner, query, csv_mode=False):
             """某账户的逐条工作明细：哪个视频、什么时候、多少计费秒、多少钱。"""
