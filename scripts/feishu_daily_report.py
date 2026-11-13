@@ -96,7 +96,11 @@ DAILY_TABLE_NAME = "每日视频统计"
 DAILY_FIELD_NAMES = {"date": "日期", "count": "当日生产的视频总数",
                      "available": "可用视频数量"}
 DEFAULT_DAYS = 4          # 默认窗口 D-3..D0（含今天，当日快照次日修正）
-LOCK_STALE_SECONDS = 6 * 3600
+# 残留锁最多挡 30 分钟：进程被杀后不会留一条锁把整晚的定时任务挡掉。
+# 真正的「已有实例在跑」由 acquire_lock 里的 PID+进程映像名判定，不靠这个时长。
+LOCK_STALE_SECONDS = 30 * 60
+# 飞书偶发 4xx/5xx（如 1254302 角色权限抖动）时按这个间隔重试，累计约 2.5 分钟
+RETRY_BACKOFF_SECONDS = (5, 15, 45, 90)
 BATCH_CHUNK = 200         # 批量写每批条数上限（飞书单批上限 1000，留余量）
 
 
@@ -124,6 +128,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-daily", action="store_true",
                    help="不同步「每日视频统计」表（默认每次一起写）")
     p.add_argument("--dry-run", action="store_true", help="只打印聚合结果，不联网不写入")
+    p.add_argument("--force-unlock", action="store_true",
+                   help="先删掉残留锁再跑（定时任务被旧锁挡住时用）")
     p.add_argument("--quiet", action="store_true", help="只写日志不打印（计划任务用）")
     return p.parse_args(argv)
 
@@ -293,7 +299,8 @@ class Feishu:
         if query:
             url += "?" + "&".join(f"{k}={v}" for k, v in query.items())
         last_error = ""
-        for attempt in range(3):
+        attempts = len(RETRY_BACKOFF_SECONDS) + 1
+        for attempt in range(attempts):
             if auth and (not self._token or time.time() > self._token_expire):
                 self._fetch_token()
             headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -317,8 +324,8 @@ class Feishu:
                 last_error = f"{method} {path} HTTP {exc.code}: {detail}"
             except Exception as exc:  # 网络错误/解析失败都走重试
                 last_error = f"{method} {path} 网络错误：{exc}"
-            if attempt < 2:
-                time.sleep(1.0 + attempt * 1.5)
+            if attempt < attempts - 1:
+                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
         raise FeishuError(last_error)
 
     def _data(self, method: str, path: str, body: dict | None = None,
@@ -804,28 +811,79 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+def _pid_image(pid: int) -> str:
+    """取进程可执行文件名（小写）。取不到返回空串（当未知处理）。"""
+    if pid <= 0 or os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            ok = kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+            return os.path.basename(buf.value).lower() if ok else ""
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return ""
+
+
+def _lock_holder_is_running(path: Path, age: float) -> bool:
+    """锁里的进程是不是真的还在跑。
+
+    Windows 的 PID 会被复用：光看「这个 PID 还活着」会把残留锁误判成正在跑
+    （2026-11-12 就是这么让 18:00 的定时任务空转的）。所以再核一次进程映像，
+    必须是 python/pythonw 才认。
+    """
+    try:
+        info = json.loads(path.read_text(encoding="utf-8").strip() or "{}")
+    except (OSError, ValueError):
+        info = {}
+    if not isinstance(info, dict):
+        info = {}
+    pid = int(info.get("pid") or 0)
+    if pid <= 0 or age > LOCK_STALE_SECONDS:
+        return False
+    if not _pid_alive(pid):
+        return False
+    image = _pid_image(pid)
+    if image and not image.startswith("python"):
+        return False  # PID 被别的程序占了，锁是残留的
+    return True
+
+
 def acquire_lock(args: argparse.Namespace) -> bool:
     path = lock_path(args)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if getattr(args, "force_unlock", False) and path.exists():
+        path.unlink(missing_ok=True)
     if path.exists():
         try:
             age = time.time() - path.stat().st_mtime
         except OSError:
             age = 0
-        try:
-            holder = int(path.read_text(encoding="ascii").strip() or "0")
-        except (OSError, ValueError):
-            holder = 0
-        # 过期锁或持锁进程已死 → 直接接管（崩溃/被杀后不必等满 6 小时）
-        if age > LOCK_STALE_SECONDS or not _pid_alive(holder):
-            path.unlink(missing_ok=True)
-        else:
+        if _lock_holder_is_running(path, age):
             return False
+        # 持锁进程已死 / PID 被复用 / 超过 30 分钟 → 残留锁，直接接管
+        path.unlink(missing_ok=True)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
-    os.write(fd, str(os.getpid()).encode("ascii"))
+    payload = json.dumps(
+        {
+            "pid": os.getpid(),
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "image": os.path.basename(sys.executable).lower(),
+        },
+        ensure_ascii=False,
+    )
+    os.write(fd, payload.encode("utf-8"))
     os.close(fd)
     return True
 
@@ -954,9 +1012,14 @@ def main(argv: list[str] | None = None) -> int:
                 str(cfg["app_token"]), str(cfg["table_id"]))
     try:
         try:
-            actions = ensure_fields(fs, names)
-            for line in actions:
-                emit(args, f"[字段] {line}")
+            try:
+                actions = ensure_fields(fs, names)
+                for line in actions:
+                    emit(args, f"[字段] {line}")
+            except FeishuError as exc:
+                # 字段检查失败不挡住写数据：2026-11-12 就是 1254302 让整轮在写表前退出，
+                # 而当时记录接口是通的（18:13 照样写进去了）。
+                emit(args, f"[警告] 字段检查失败，跳过继续写数据：{exc}")
             if args.setup_fields:
                 _, empty_ids, dup_ids = scan_existing(fs, names)
                 deleted = fs.batch_delete(empty_ids + dup_ids) if (empty_ids or dup_ids) else 0
