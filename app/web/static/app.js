@@ -1,7 +1,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const state = { user: null, service: {}, prompts: [], templates: [], filteredTemplates: [], tagCategories: [], tagValues: {}, tagFilters: {}, upload: null, jobs: [], selectedJob: null, detailStatus: null, timer: null, detailTimer: null, picked: new Set(), showAll: false, submitting: false, rerunDupWarnOnce: false, ownerFilter: '', adminUsers: [], usageOwner: '', usageRows: [], usageTotal: 0, styleUsed: {}, styleUsedTop: '', styleUsedTimer: 0 };
-  const statusText = { queued: '排队中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', unknown: '结果未知', timeout: '等待超时', success: '成功' };
+  const statusText = { queued: '等待中', running: '正在生成', succeeded: '已完成', partial: '部分失败', failed: '未完成', canceled: '已取消', interrupted: '已中断', invalid: '无效', expired: '过期', unknown: '结果未知', timeout: '等待超时', success: '成功' };
   const esc = (s) => String(s ?? '');
   // 6 栏位款号标签：读取容器内 [data-tag-slot]，返回 {top:...} 形式（空值丢弃）。
   const TAG_LABELS = { top: '上衣', lining: '内衬', pants: '裤子', shoes: '鞋子', scene: '场景', note: '特殊备注' };
@@ -667,7 +667,27 @@
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled','unknown','timeout','skipped'].includes(r.status)).length;
     if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.title = dlCount ? `其中 ${dlCount} 条是「云端已出片、只是下载失败」：重试会二次计费，请先「复查补下载」` : timeoutCount ? '其中含等待超时的条目：建议先「复查补下载」，直接重试会二次计费' : ''; retry.addEventListener('click', async () => { const warn = timeoutCount ? `\n\n注意：其中 ${timeoutCount} 条是等待超时/下载失败——云端可能已出片并计费，直接重试会二次提交。\n建议先点「复查补下载」。` : ''; const skip = dlCount ? `\n其中 ${dlCount} 条「云端已出片、只是下载失败」会被跳过。` : ''; if (!confirm(`只重试失败的 ${failedCount} 条？${warn}${skip}`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); const skipped = Number(data.skipped_download_failed) || 0; toast(skipped ? `已重新排队；${skipped} 条「云端已出片、只是下载失败」已跳过（请点「复查补下载」）。` : '失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
     const list = document.createElement('div'); list.className = 'record-list';
-    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); if (rec.record_id) { const uid = document.createElement('small'); uid.className = 'record-id'; uid.textContent = `视频 ID ${rec.record_id}`; uid.title = '这条视频的唯一 ID，跨任务、跨批次不会重复'; info.append(uid); } const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); }); root.append(list);
+    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); if (rec.record_id) { const uid = document.createElement('small'); uid.className = 'record-id'; uid.textContent = `视频 ID ${rec.record_id}`; uid.title = '这条视频的唯一 ID，跨任务、跨批次不会重复'; info.append(uid); } const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); });
+    // 排队中的任务 records 还是空的：按提交时的模板清单补「等待中」行。否则详情面板里
+    // 这个任务一条都没有、只剩一句「任务日志将在这里显示」，看着像任务丢了。
+    if (!(job.records || []).length && job.status === 'queued') {
+      const tpls = Array.isArray(job.templates) && job.templates.length
+        ? job.templates
+        : (job.template_ids || []).map(tplId => ({ id: tplId, name: '' }));
+      tpls.forEach(tpl => {
+        const row = document.createElement('div'); row.className = 'record is-waiting';
+        const scene = document.createElement('b'); scene.textContent = `场景 ${tpl.id || ''}`;
+        const info = document.createElement('div');
+        const stateLine = document.createElement('span'); stateLine.textContent = statusText.queued || '等待中';
+        info.append(stateLine);
+        const hint = document.createElement('small');
+        hint.textContent = [tpl.name, job.queue_position ? `排队第 ${job.queue_position} 位` : '', '还没开始生成，开始前可取消'].filter(Boolean).join(' · ');
+        info.append(hint);
+        row.append(scene, info, document.createElement('span'));
+        list.append(row);
+      });
+    }
+    root.append(list);
     const logs = document.createElement('div'); logs.className = 'log-box'; logs.textContent = (job.log_tail || []).slice(-60).join('\n') || '任务日志将在这里显示。'; root.append(logs);
   }
 
