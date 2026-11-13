@@ -45,6 +45,8 @@ from http.server import ThreadingHTTPServer  # noqa: E402
 from openpyxl import Workbook  # noqa: E402
 from PIL import Image  # noqa: E402
 
+from app.core import (ADAPTIVE_CAP_SECONDS, ADAPTIVE_FLOOR_SECONDS, DURATION_MODE_ADAPTIVE,  # noqa: E402
+                      DURATION_MODE_FIXED, resolve_output_duration)
 from app.wan_api import (WanClient, WanConfig, _RateLimiter, global_inflight, global_limiter,  # noqa: E402
                          global_query_limiter, global_small_inflight)
 from app.web.auth import make_password  # noqa: E402
@@ -310,7 +312,7 @@ def main() -> int:
         batch_id = batch["id"]
         assert re.fullmatch(r"[a-f0-9]{12}", batch_id), batch_id
         assert batch["state"] == "draft" and batch["total_items"] == 0, batch
-        assert batch["duration"] == 7, batch["duration"]     # 输出固定 7 秒
+        assert batch["duration"] == 7 and batch["duration_mode"] == "fixed", batch   # 默认固定 7 秒
         code, _, dup = call(alice, base, "/api/batches", "POST", {
             "batch_no": "aw26-001", "prompt_id": prompt_id, "prompt": prompt_text,
             "resolution": "720P", "duration": 7, "tags": {"top": "AW26-001"}})
@@ -523,7 +525,8 @@ def main() -> int:
         assert produced["taken"] == 20, produced["taken"]
         assert produced["batch"]["active_job_id"] == produced["job"]["id"]
         assert produced["job"]["batch_ref"] == batch_id, produced["job"]
-        assert produced["job"]["duration"] == 7, produced["job"]["duration"]   # 输出固定 7 秒
+        assert produced["job"]["duration"] == 7 and produced["job"]["duration_mode"] == "fixed", \
+            produced["job"]   # 默认固定 7 秒（自适应要显式选）
         # 分类随生产快照进 job：批次后来被删，管理端仍能按分类统计这笔消耗
         assert produced["job"]["category"] == "服装换装", produced["job"]
         cost = produced["cost_estimate"]
@@ -1096,6 +1099,80 @@ def main() -> int:
         code, _, raw = call(alice, base2, f"/api/batches/{step_id}/produce", "POST", {"count": 5})
         assert code == 409, (code, raw)
         print("  ✓ 单次条数：4 条 400、7 条（非 5 倍数）201 取 7、剩 3 条只许全提、跑完再点 409")
+
+        # 6.8 输出时长「自适应」：≥7 秒按 7、4–7 秒跟随模板（下发 -1）、<4 秒抬到 4 秒地板
+        # 纯函数是引擎与预估共用的唯一入口，口径必须逐条钉死（现网实测 -1 = 精确等于源时长）。
+        cases = [
+            (DURATION_MODE_ADAPTIVE, 9.58, (7, 7.0)),      # 长模板 → 7 秒封顶
+            (DURATION_MODE_ADAPTIVE, 7.0, (7, 7.0)),       # 正好 7 秒 → 7
+            (DURATION_MODE_ADAPTIVE, 6.52, (-1, 6.52)),    # 4–7 秒 → -1 精确跟随源时长
+            (DURATION_MODE_ADAPTIVE, 4.0, (-1, 4.0)),      # 地板线上仍跟随
+            (DURATION_MODE_ADAPTIVE, 3.65, (4, 4.0)),      # 低于地板 → 抬到 4 秒
+            (DURATION_MODE_ADAPTIVE, 1.27, (4, 4.0)),
+            (DURATION_MODE_ADAPTIVE, None, (7, 7.0)),      # 时长未知 → 老实按 7 秒
+            (DURATION_MODE_FIXED, 3.65, (7, 7.0)),         # 固定档不看模板，恒 7
+            (DURATION_MODE_FIXED, None, (7, 7.0)),
+        ]
+        for mode, seconds, expected in cases:
+            got = resolve_output_duration(mode, seconds, 7)
+            assert got == expected, (mode, seconds, got, expected)
+        assert ADAPTIVE_CAP_SECONDS == 7 and ADAPTIVE_FLOOR_SECONDS == 4
+        assert resolve_output_duration(DURATION_MODE_FIXED, 5.0, None) == (None, None), \
+            "duration 为 None 时不下发 duration（交给 wan_api 的 mode 默认值）"
+        assert resolve_output_duration(DURATION_MODE_FIXED, 3.65, -1) == (-1, None), \
+            "老口径 duration=-1 原样下发，预期由调用方用模板时长兜底"
+        assert resolve_output_duration(DURATION_MODE_FIXED, 3.65, "-1") == (-1, None), \
+            "配置里把 duration 写成字符串 -1 也要能跑（test_core 就是这么造的）"
+        print("  ✓ 自适应解析：≥7→7、4–7→-1 跟随、<4→4 地板、未知→7；固定档恒 7 不受模板影响")
+
+        # 预估与引擎同源：3.65→4、5.0→5、9.0→7 ⇒ (3.65+4)+(5+5)+(9+7)
+        est_items = [{"duration": 3.65}, {"duration": 5.0}, {"duration": 9.0}]
+        est = app2.batches.estimate(est_items, "720P", 7, DURATION_MODE_ADAPTIVE)
+        assert abs(est["seconds"] - 33.65) < 1e-6, est
+        assert "自适应" in est["note"], est["note"]
+        # 固定档回归：output_seconds 传进来的是 float（5.0），老代码 int("5.0") 会静默变成 7
+        fixed_est = app2.batches.estimate(est_items, "720P", 5.0, DURATION_MODE_FIXED)
+        assert abs(fixed_est["seconds"] - (3.65 + 5 + 9 + 5 * 3)) < 1e-6, fixed_est
+        assert "自适应" not in fixed_est["note"], fixed_est["note"]
+        print("  ✓ 预估同源：自适应 33.65 计费秒；固定 5 秒批次不再被 float 坑成 7 秒口径")
+
+        code, _, raw = call(alice, base2, "/api/batches", "POST", {
+            "batch_no": "AW26-ADAPT-BAD", "prompt_id": prompt_id, "prompt": prompt_text,
+            "resolution": "720P", "duration": 7, "duration_mode": "auto", "tags": {"top": "AW26-ADAPT-BAD"}})
+        assert code == 400 and "自适应" in body(raw)["error"], (code, raw)
+        adaptive_id = make_batch("AW26-ADAPT", duration_mode="adaptive", upload_id=upload_id)
+        detail = body(call(alice, base2, f"/api/batches/{adaptive_id}")[2])["batch"]
+        # duration 仍是 7（老字段/镜像/历史页零迁移），策略单独存在 duration_mode 上
+        assert detail["duration"] == 7 and detail["duration_mode"] == "adaptive", detail
+        fixed_id = make_batch("AW26-FIXED")
+        assert body(call(alice, base2, f"/api/batches/{fixed_id}")[2])["batch"]["duration_mode"] == "fixed", \
+            "不传 duration_mode 的老调用方必须默认固定 7 秒"
+
+        code, _, raw = call(alice, base2, f"/api/batches/{adaptive_id}/lock", "POST",
+                            {"template_ids": ready_ids[:5], "confirmed": True})
+        assert code == 200, (code, raw)
+        with urllib.request.urlopen(f"{mock_base}/stats", timeout=5) as response:
+            before_sent = len(json.loads(response.read().decode("utf-8"))["durations"])
+        code, _, raw = call(alice, base2, f"/api/batches/{adaptive_id}/produce", "POST", {"count": 5})
+        assert code == 201, (code, raw)
+        adaptive_job_id = body(raw)["job"]["id"]
+        assert body(raw)["job"]["duration_mode"] == "adaptive", body(raw)["job"]
+        wait_job(alice, base2, adaptive_job_id)
+        with urllib.request.urlopen(f"{mock_base}/stats", timeout=5) as response:
+            sent = json.loads(response.read().decode("utf-8"))["durations"]
+        # 测试清单里的模板都是 1.5 秒 → 全部抬到 4 秒地板
+        assert sent[before_sent:before_sent + 5] == [4] * 5, sent[before_sent:]
+        inner = app2.jobs.jobs[adaptive_job_id]
+        assert all(rec.get("requested_duration") == 4 for rec in inner["records"]), inner["records"]
+        spec = app2.jobs._build_spec(inner, Path(inner["out_dir"]))
+        assert spec.duration_mode == "adaptive" and spec.duration == 7, (spec.duration_mode, spec.duration)
+        # 失败重试必须带着策略走，否则自适应会悄悄退回固定 7 秒（二次计费口径也一起变了）
+        inner["status"] = "partial"
+        inner["records"][0]["status"] = "failed"
+        retried = app2.jobs.retry_failed(adaptive_job_id, "alice")
+        assert retried["duration_mode"] == "adaptive", retried
+        app2.jobs.cancel(retried["id"])
+        print("  ✓ 自适应批次：创建/锁定/生产全程带 duration_mode，5 条全发 4 秒，失败重试仍为自适应")
 
         print("OK 批次创建 → 候选 → 锁定 → 分批生产 → 历史分组 → 重启恢复 → 删除批次 全部通过")
         return 0

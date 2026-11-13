@@ -264,6 +264,47 @@ def _as_seconds(value) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# 输出时长策略（批次页「输出时长」下拉）
+# ---------------------------------------------------------------------------
+# fixed    = 整批下发批次冻结的秒数（历史上恒为 7 秒，老批次默认口径）
+# adaptive = 逐条按模板时长解析（m00118）：
+#              ≥7s   → 按 7 秒出（7 是模型硬上限，传 8 也只出 7）
+#              4–7s  → 跟随模板（下发 -1，精确保持源时长，不四舍五入）
+#              <4s   → 抬到 4 秒地板（1–2 秒成片里换装动作做不完，画面会糊）
+DURATION_MODE_FIXED = "fixed"
+DURATION_MODE_ADAPTIVE = "adaptive"
+DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_ADAPTIVE)
+ADAPTIVE_CAP_SECONDS = 7
+ADAPTIVE_FLOOR_SECONDS = 4
+
+
+def resolve_output_duration(mode: str | None, template_seconds: float | None,
+                            fixed: int | None = None) -> tuple[int | None, float | None]:
+    """把「批次策略 + 模板时长」解析成 (下发给 API 的 duration, 预期输出秒数)。
+
+    fixed：原样下发固定秒数；`fixed=-1`（跟随素材）时输出等于源时长，预期由调用方
+    用模板时长兜底，这里返回 None。
+    adaptive：模板时长未知（老清单 / 探测失败）时按 7 秒处理，绝不因为缺字段报错。
+    """
+    if str(mode or "") != DURATION_MODE_ADAPTIVE:
+        if fixed is None:
+            return None, None
+        # 老口径允许 duration="-1"（字符串，跟随素材）：统一校正成 int 再下发。
+        try:
+            value = int(round(float(fixed)))
+        except (TypeError, ValueError):
+            return fixed, None
+        return value, (float(value) if value > 0 else None)
+    template = _as_seconds(template_seconds)
+    if template is None or template >= ADAPTIVE_CAP_SECONDS:
+        return ADAPTIVE_CAP_SECONDS, float(ADAPTIVE_CAP_SECONDS)
+    if template >= ADAPTIVE_FLOOR_SECONDS:
+        # -1 = 保持源时长。比 ceil 更准：4.37s 模板原样出 4.37s，不用凑整数。
+        return -1, round(template, 2)
+    return ADAPTIVE_FLOOR_SECONDS, float(ADAPTIVE_FLOOR_SECONDS)
+
+
+# ---------------------------------------------------------------------------
 # 批量执行
 # ---------------------------------------------------------------------------
 
@@ -322,6 +363,9 @@ class BatchSpec:
     #   status=running 且带 task_id → 不提交，接着等那个 taskId
     #   没有记录 / pending → 正常提交
     resume: dict = field(default_factory=dict)
+    # 输出时长策略（fixed / adaptive）：见 resolve_output_duration。
+    # 老调用/老 job 没有这个字段 → fixed，行为与改动前完全一致。
+    duration_mode: str = DURATION_MODE_FIXED
     # 多图：全部图片按槽位顺序（含定妆图）。为空时回退 image_path（桌面/CLI 老调用）。
     # 必须放在末尾：image_path 等前排字段无默认值，中间插带默认值的字段会报 TypeError。
     image_paths: list[str] = field(default_factory=list)
@@ -597,9 +641,17 @@ class BatchRunner:
         tid = tpl["id"]
         out_file = spec.out_dir / f"{tid}.mp4"
         template_seconds = _as_seconds(tpl.get("duration"))
+        # 逐条解析输出时长：fixed 原样下发；adaptive 按模板（≥7→7、4–7→-1、<4→4）。
+        request_duration, expect_seconds = resolve_output_duration(
+            spec.duration_mode, template_seconds, spec.duration)
+        if expect_seconds is None:
+            # fixed + duration=-1（老批次的「跟随素材」）：预期就是模板时长。
+            expect_seconds = template_seconds
         rec = {"id": tid, "record_id": new_record_id(), "template": tpl["url"], "status": "pending",
                "provider": spec.provider, "model": spec.model, "mode": spec.mode,
                "resolution": spec.resolution, "file": str(out_file),
+               # 这一条实际下发的 duration（-1 = 跟随源时长），排查时不用再猜策略。
+               "requested_duration": request_duration,
                "billable_seconds": None, "estimated_cost": None, "cost": None,
                "seconds": None, "error": None}
 
@@ -642,8 +694,8 @@ class BatchRunner:
                 "promptExtend": False,
                 "watermark": False,
             }
-            if spec.duration is not None:
-                task["duration"] = spec.duration
+            if request_duration is not None:
+                task["duration"] = request_duration
             if spec.aspect_ratio:
                 task["aspectRatio"] = spec.aspect_ratio
 
@@ -710,7 +762,7 @@ class BatchRunner:
             else:
                 rec["status"] = "success"
                 try:
-                    rec["verify"] = self._verify(out_file, template_seconds)
+                    rec["verify"] = self._verify(out_file, expect_seconds)
                 except Exception as exc:  # noqa: BLE001 - 校验只是附加信息
                     rec["verify_error"] = f"{type(exc).__name__}: {exc}"
                 self._archive(rec, out_file)

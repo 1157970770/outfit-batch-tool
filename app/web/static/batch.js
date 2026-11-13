@@ -3,8 +3,9 @@
  * 依赖 app.js 暴露的 window.OutfitApp：{ api, toast, state, switchView, openJob, refreshFlatJobs, statusText }
  *
  * 口径说明：
- * - `duration` 就是输出秒数，本页固定传 7。后端 web 层与 wan_api 已统一为
- *   `duration_ok()`（-1 或 2–30），7 合法且是 POST /api/batches 的默认值。
+ * - 输出时长：`duration` 就是输出秒数，固定档恒传 7；新加的「自适应」由 `duration_mode`
+ *   表达，引擎按模板逐条解析（≥7s 按 7s、4–7s 跟随模板、<4s 按 4s）。
+ *   后端 web 层与 wan_api 统一为 `duration_ok()`（-1 或 2–30），7 合法且是默认值。
  * - 本页不展示任何金额/费用信息；花费统一在「管理 → 账户用量」里按账户核算。
  *   生产按钮的档位仍由后端 cost_estimate.options[i].count 决定（配置改了上限也能跟上），
  *   只是不再读取 amount。
@@ -16,8 +17,10 @@
   const { api, toast } = App;
   const $ = (id) => document.getElementById(id);
 
-  const BATCH_DURATION_PARAM = 7;    // duration = 输出秒数，本页固定 7
-  const OUTPUT_SECONDS = BATCH_DURATION_PARAM;
+  const BATCH_DURATION_PARAM = 7;    // 固定档的输出秒数；自适应时由后端逐条解析
+  // duration_mode 的展示文案：fixed 沿用历史叫法，adaptive 就是「输出时长」里新加的选项。
+  const DURATION_MODE_TEXT = { fixed: '输出 7 秒（固定）', adaptive: '输出自适应（≤7 秒，短模板跟随）' };
+  const DURATION_MODE_OF = (batch) => (txt(batch.duration_mode) === 'adaptive' ? 'adaptive' : 'fixed');
   const PRODUCE_STEPS = [5, 10, 20, 50, 100];
   // 最小生成单位：档位下限（服务端 produce_min 优先）。低于它只有一种情况放行——清单就剩这么多。
   const PRODUCE_MIN_FALLBACK = 5;
@@ -360,7 +363,7 @@
 
   /* ---------- 步骤 A：建批次 ---------- */
   function setFormFrozen(frozen) {
-    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution', 'batch-category'].forEach((id) => {
+    ['batch-no', 'batch-title', 'batch-image-file', 'batch-prompt-select', 'batch-prompt-body', 'batch-resolution', 'batch-duration', 'batch-category'].forEach((id) => {
       const node = $(id);
       if (node) node.disabled = frozen;
     });
@@ -398,6 +401,8 @@
     App.fillTagSlots('batch-tags', legacy || {});
     $('batch-title').value = txt(batch.title);
     if (txt(batch.resolution)) $('batch-resolution').value = txt(batch.resolution);
+    // 输出时长：老批次没有 duration_mode，一律回落到「固定」（按 duration 显示）。
+    $('batch-duration').value = DURATION_MODE_OF(batch);
     const promptId = txt(batch.prompt_id);
     if (promptId && [...$('batch-prompt-select').options].some((option) => option.value === promptId)) {
       $('batch-prompt-select').value = promptId;
@@ -411,6 +416,8 @@
       ? `图片 ${slotCount} 张 · 槽位 1 定妆图：${imageName || '—'}`
       : '这个批次还没有绑定定妆图。';
     const durationValue = batch.duration === null || batch.duration === undefined ? BATCH_DURATION_PARAM : num(batch.duration, BATCH_DURATION_PARAM);
+    const durationText = DURATION_MODE_TEXT[DURATION_MODE_OF(batch)]
+      || (durationValue > 0 ? `输出 ${durationValue} 秒` : '输出跟随素材时长');
     // 收起状态下这一行就是「这个批次是什么」的全部信息
     $('batch-a-summary').textContent = [
       txt(batch.batch_no) || '未命名批次',
@@ -418,7 +425,7 @@
       App.tagSummaryText(batch.tags, txt(batch.style_no)) || '',
       txt(batch.title) || '',
       txt(batch.resolution) || '—',
-      durationValue > 0 ? `输出 ${durationValue} 秒` : '输出跟随素材时长',
+      durationText,
       slotCount ? `图片 ${slotCount} 张` : '未绑定定妆图',
     ].filter(Boolean).join(' · ');
     // 查看已有批次：槽位只读，缩略图走 /api/uploads/{id}（后端只给 owner/admin 看）。
@@ -434,6 +441,8 @@
     App.fillTagSlots('batch-tags', {});
     $('batch-title').value = '';
     $('batch-prompt-body').value = '';
+    // 新建批次默认「固定 7 秒」：自适应要让用户主动选，不能因为上次选过就悄悄变。
+    $('batch-duration').value = 'fixed';
     Slots.resetSlots(b.slots);
     $('batch-image-file').value = '';
     b.slotError = '';
@@ -491,7 +500,7 @@
       }
       const ids = upload.uploadIds;
       btn.textContent = '正在创建批次…';
-      const payload = { batch_no: batchNo, category, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, upload_ids: ids, upload_id: ids[0] };
+      const payload = { batch_no: batchNo, category, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, duration_mode: $('batch-duration').value || 'fixed', upload_ids: ids, upload_id: ids[0] };
       const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
       if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
       Slots.resetSlots(b.slots);          // 上传用的 object URL 用完即释放
@@ -1473,6 +1482,9 @@
     const failed = num(batch.failed);
     const durationValue = batch.duration === null || batch.duration === undefined
       ? BATCH_DURATION_PARAM : num(batch.duration, BATCH_DURATION_PARAM);
+    // 新批次可能是「自适应」；老批次没有 duration_mode，仍按 duration 文案（-1 = 跟随素材）。
+    const durationText = DURATION_MODE_TEXT[DURATION_MODE_OF(batch)]
+      || (durationValue > 0 ? `输出 ${durationValue} 秒` : '跟随素材时长');
     const prompt = txt(batch.prompt);
     // 标签快照：包含条件与原格式一致；有排除条件时追加「排除 …」，
     // 老批次没有 tag_excludes 字段（undefined），不会多出一段。
@@ -1490,8 +1502,8 @@
     const rows = [
       ['批次号', txt(batch.batch_no) || '—'],
       ['状态', BATCH_STATE_TEXT[txt(batch.state)] || txt(batch.state) || '—'],
-      // 本页建出来的批次恒为 duration=7；-1 只可能来自接口直建的老批次，文案别硬说成 7 秒。
-      ['画质 / 时长', `${txt(batch.resolution) || '—'} · ${durationValue > 0 ? `输出 ${durationValue} 秒` : '跟随素材时长'}`],
+      // 固定档恒为 duration=7；「自适应」由 duration_mode 表达；-1 只可能来自接口直建的老批次。
+      ['画质 / 时长', `${txt(batch.resolution) || '—'} · ${durationText}`],
       ['清单', `${total} 条`],
       ['进度', `已结束 ${done + failed} / ${total}（成功 ${done} · 失败 ${failed}）`],
       ['锁定时间', fmtTime(batch.locked_at)],
@@ -2470,15 +2482,20 @@
           ? '小批量试跑' : historyScope === 'big' ? '大批量任务' : '全部任务'}`
         : (isUngrouped ? '未分组（试跑与老任务）' : (txt(group.batch_no) || '未命名批次'));
     titleWrap.append(el('b', null, title));
-    // 数字统一按「记录条数」口径，与账户用量页一致；任务数单独标，不再混写。
+    // 数字统一按「记录条数」口径；排队中的条目（records 还没建，按模板清单算出来）
+    // 已计入 total，这里单独标「等待中」，「进行中」要减掉它们，避免同一批条目数两遍。
+    const waitingCount = num(group.waiting);
+    const runningCount = Math.max(0, num(group.unfinished) - waitingCount);
     const parts = [`${num(group.total)} 条记录`, `成功 ${num(group.success)}`,
-      `失败 ${num(group.failed)}`, `进行中 ${num(group.unfinished)}`,
+      `失败 ${num(group.failed)}`, `进行中 ${runningCount}`,
+      ...(waitingCount ? [`等待中 ${waitingCount}`] : []),
       `${num(group.job_count)} 个任务`];
     if (App.state.user && App.state.user.role === 'admin' && group.owner && !isOwnerGroup) parts.unshift(`账户 ${group.owner}`);
     titleWrap.append(el('small', null, `${parts.join(' · ')} · ${fmtTime(group.first_at)} → ${fmtTime(group.last_at)}`));
     const side = el('div', 'history-group-side');
-    // 标题里已有失败数，右侧只保留「进行中」这个需要一眼看到的动态徽标。
-    if (num(group.unfinished)) side.append(el('span', 'status running', `进行中 ${num(group.unfinished)}`));
+    // 标题里已有失败数，右侧只保留需要一眼看到的动态徽标。
+    if (runningCount) side.append(el('span', 'status running', `进行中 ${runningCount}`));
+    if (waitingCount) side.append(el('span', 'status queued', `等待中 ${waitingCount}`));
     const chevron = el('span', 'history-chevron', open ? '收起' : '展开');
     side.append(chevron);
     head.append(titleWrap, side);
@@ -2642,7 +2659,10 @@
     nameCell.title = `任务 ${txt(item.job_id)}${txt(item.batch_no) ? ` · ${txt(item.batch_no)}` : ''}`;
     const statusCell = el('div', 'history-record-state');
     const statusText = App.statusText || {};
-    statusCell.append(el('span', `status ${status}`, statusText[status] || status || '—'));
+    // 排队中的条目：records 还没建（job 还是 queued），状态写死「等待中」；
+    // status 仍给 queued，好复用现成的琥珀色徽标。
+    statusCell.append(el('span', `status ${status}`,
+      item.waiting ? '等待中' : (statusText[status] || status || '—')));
     const infoCell = el('div', 'history-record-info');
     const parts = [];
     // 按账户拆出来的组标题已经写了账户，行内不再重复一遍。
@@ -2650,6 +2670,8 @@
     if (adminAll && num(item.created_at)) parts.push(fmtTime(item.created_at));
     if (num(item.seconds)) parts.push(`用时 ${num(item.seconds)} 秒`);
     if (txt(item.archive_warning)) parts.push(txt(item.archive_warning));
+    // 排队中的条目：点明「还没开始」，免得看见状态却不知道要等到什么时候。
+    if (item.waiting) parts.push('还没开始生成，开始前可取消');
     if (parts.length) infoCell.append(el('small', null, parts.join(' · ')));
     // 这一条所在那一批换了提示词：同一批次里前后的视频可能不是同一段提示词生成的。
     if (item.run_prompt_changed) {
@@ -2662,7 +2684,8 @@
     if (warn) infoCell.append(el('small', 'history-verify-warn', `质量提示：${warn}`));
     const actions = el('div', 'record-actions');
     const success = status === 'success' && txt(item.download_url);
-    if (txt(item.job_id)) {
+    // 排队中的条目还没跑过：不摆「重跑」（会重复提交同一条），只留「任务详情」。
+    if (txt(item.job_id) && !item.waiting) {
       const rerun = el('button', 'quiet rerun-btn', '重跑');
       rerun.type = 'button';
       rerun.title = '把这条的图片、提示词和模板视频带入「小批量试跑」，修改后再提交';

@@ -27,6 +27,9 @@ import uuid
 import zipfile
 from pathlib import Path
 
+from app.core import (
+    DURATION_MODE_ADAPTIVE, DURATION_MODE_FIXED, DURATION_MODES, resolve_output_duration,
+)
 from app.web.jobs import (
     MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _FAILED_RECORD_STATES, _redact,
     clean_style_no, clean_tags, duration_ok, image_slots, needs_recheck, record_uid,
@@ -90,6 +93,26 @@ def _history_lane(job: dict) -> str:
     if str(job.get("batch_ref") or ""):
         return "big"
     return _lane_of(job)
+
+
+def _waiting_templates(job: dict) -> list[dict]:
+    """排队中、还没开跑的任务：records 还是空的，但模板清单提交时就定下来了。
+
+    历史页只看 records，这类任务原来在明细里一条都看不见（卡片上只有 job_count）。
+    这里把提交时的模板清单还原成「等待中」条目行，让排队任务在历史里有名字、有状态。
+    只认 queued：running 之后 records 一定已建，空 records 的 running 是异常态，
+    交给明细按原样显示，不臆造条目。
+    """
+    if job.get("records") or str(job.get("status") or "") != "queued":
+        return []
+    out: list[dict] = []
+    for tpl in job.get("templates") or []:
+        if isinstance(tpl, dict) and str(tpl.get("id") or ""):
+            out.append({"id": str(tpl.get("id")), "name": str(tpl.get("name") or "")})
+    if out:
+        return out
+    # 老任务/被裁过的 job 可能只剩 template_ids（没有名字），同样要给出行。
+    return [{"id": str(tid), "name": ""} for tid in (job.get("template_ids") or []) if str(tid)]
 
 
 def _day_key(ts) -> str:
@@ -447,14 +470,23 @@ class BatchManager:
         return view
 
     def estimate(self, live_items: list[dict], resolution: str,
-                 output_seconds: float | None = None) -> dict:
+                 output_seconds: float | None = None,
+                 duration_mode: str = DURATION_MODE_FIXED) -> dict:
         """按（模板时长 + 输出秒数）× 单价预估；单价缺失时 amount 为 null。
 
         output_seconds 缺省 7 秒，与批次冻结的 duration 对齐（duration=-1 也按 7 估算）。
+        duration_mode=adaptive 时逐条解析输出（≥7→7、4–7→跟随模板、<4→4），
+        解析用的是引擎同一个 resolve_output_duration —— 预估不会和实际下发漂移。
         """
         out_seconds = float(output_seconds if output_seconds and output_seconds > 0 else OUTPUT_SECONDS)
-        seconds = [(_as_float(item.get("duration")) or DEFAULT_TEMPLATE_SECONDS) + out_seconds
-                   for item in live_items]
+        # 别用 _as_int：它对 "5.0" 会抛 ValueError 回落 7，而 output_seconds_of() 返回的正是 float。
+        try:
+            fixed = int(round(out_seconds))
+        except (TypeError, ValueError):
+            fixed = DEFAULT_DURATION
+        if not duration_ok(fixed):
+            fixed = DEFAULT_DURATION
+        seconds = [self._item_seconds(item, fixed, duration_mode) for item in live_items]
         total = round(sum(seconds), 2)
         unit, source = self.settings.unit_price(resolution)
         count = len(seconds)
@@ -465,6 +497,10 @@ class BatchManager:
                 continue
             options.append({"count": choice,
                             "amount": round(choice * per_item * unit, 2) if unit else None})
+        note = (f"按（模板时长 + 输出 {out_seconds:g} 秒）× 单价预估，实际以账单为准"
+                if duration_mode != DURATION_MODE_ADAPTIVE else
+                "按（模板时长 + 自适应输出：≥7s 出 7s、4–7s 跟随模板、<4s 出 4s）× 单价预估，"
+                "实际以账单为准")
         return {
             "count": count,
             "seconds": total,
@@ -474,14 +510,27 @@ class BatchManager:
             "resolution": resolution,
             "options": options,
             "currency": "CNY",
-            "note": f"按（模板时长 + 输出 {out_seconds:g} 秒）× 单价预估，实际以账单为准",
+            "note": note,
         }
+
+    @staticmethod
+    def _item_seconds(item: dict, fixed: int, duration_mode: str) -> float:
+        """单条计费秒 = 模板时长 + 这条实际会出的秒数。"""
+        template = _as_float(item.get("duration"))
+        _request, expected = resolve_output_duration(duration_mode, template, fixed)
+        return (template or DEFAULT_TEMPLATE_SECONDS) + (expected if expected else float(fixed))
 
     @staticmethod
     def output_seconds_of(batch: dict) -> float:
         """批次冻结的输出秒数：duration>0 用它，-1（跟随素材）按 7 秒估算。"""
         duration = _as_int(batch.get("duration"))
         return float(duration) if duration and duration > 0 else OUTPUT_SECONDS
+
+    @staticmethod
+    def duration_mode_of(batch: dict) -> str:
+        """批次冻结的输出时长策略；老批次没有这个字段 → fixed（历史行为不变）。"""
+        mode = str(batch.get("duration_mode") or "").strip().lower()
+        return mode if mode in DURATION_MODES else DURATION_MODE_FIXED
 
     # ------------------------------------------------------------------ 公开字段
     # ------------------------------------------------------------------ 多图槽位
@@ -585,7 +634,8 @@ class BatchManager:
             data = {key: batch.get(key) for key in (
                 "id", "batch_no", "title", "owner", "state", "image_upload_id", "image_name",
                 "category",
-                "prompt_id", "prompt", "resolution", "duration", "tag_filters", "tag_excludes",
+                "prompt_id", "prompt", "resolution", "duration", "duration_mode",
+                "tag_filters", "tag_excludes",
                 "style_no", "tags",
                 "total_items", "done", "failed", "pending", "producing", "active_job_id",
                 "created_at", "updated_at", "locked_at", "closed_at")}
@@ -668,7 +718,7 @@ class BatchManager:
             live = self._live(catalog, item.get("template_id")) if catalog is not None else None
             live_items.append(live or {})
         return self.estimate(live_items, str(batch.get("resolution") or "720P"),
-                             self.output_seconds_of(batch))
+                             self.output_seconds_of(batch), self.duration_mode_of(batch))
 
     # ------------------------------------------------------------------ #1 创建
     def create(self, user: dict, data: dict) -> dict:
@@ -684,6 +734,13 @@ class BatchManager:
             raise BatchError("任务分类只能是：" + " / ".join(TASK_CATEGORIES) + "。")
         # 网页标配「输出固定 7 秒」；-1（跟随素材）与 2–30 的其他秒数仍接受，向后兼容老批次。
         duration = _as_int(data.get("duration"), DEFAULT_DURATION)
+        # 输出时长策略（「自适应」选项）：写错立刻报错，不能静默改成固定 7 秒。
+        # adaptive 下 duration 没有意义（逐条按模板解析），统一落 7 让老读法不炸。
+        duration_mode = str(data.get("duration_mode") or "").strip().lower() or DURATION_MODE_FIXED
+        if duration_mode not in DURATION_MODES:
+            raise BatchError("输出时长只能是固定秒数或自适应。")
+        if duration_mode == DURATION_MODE_ADAPTIVE:
+            duration = DEFAULT_DURATION
         # 多图：upload_ids 有序（槽位 1 = 定妆图）；缺省时回退老的单个 upload_id。
         # 草稿态允许 0 张（后补），所以 allow_empty=True。
         slots = self._parse_uploads(user, data, allow_empty=True)
@@ -730,7 +787,7 @@ class BatchManager:
                 "image_path": (slots[0]["path"] if slots else ""),
                 "image_name": (slots[0]["name"] if slots else ""),
                 "prompt_id": prompt_id, "prompt": prompt,
-                "resolution": resolution, "duration": duration,
+                "resolution": resolution, "duration": duration, "duration_mode": duration_mode,
                 "tag_filters": {}, "tag_excludes": {},
                 "items": [], "runs": [],
                 # 草稿期的「生产清单」：筛选时只改候选展示，不改这里；锁定后清空。
@@ -878,7 +935,8 @@ class BatchManager:
             "hide_used": hide_used,
             "used_skipped": used_skipped,
             "exclude_skipped": exclude_skipped,
-            "cost_estimate": self._money_view(user, self.estimate(matched[:limit], resolution, out_seconds)),
+            "cost_estimate": self._money_view(user, self.estimate(
+                matched[:limit], resolution, out_seconds, self.duration_mode_of(batch))),
         }
 
     # ------------------------------------------------------------------ #3b 草稿生产清单
@@ -1065,6 +1123,8 @@ class BatchManager:
         duration = _as_int(batch.get("duration"), DEFAULT_DURATION)
         if not duration_ok(duration):
             duration = DEFAULT_DURATION
+        # 「自适应」：整批条目的 duration 由引擎按模板逐条解析（≥7→7、4–7→-1、<4→4）。
+        duration_mode = self.duration_mode_of(batch)
         # 先落「本次生产已开始」的标记，再建 job。jobs.create 之后任何一步失败（写盘、
         # 记账、标记条目）都不会让批次看起来还能再点一次生产——否则同一批条目会再建
         # 一个 job，云端会真的再出一遍片、再收一次钱。
@@ -1090,6 +1150,8 @@ class BatchManager:
                 tags=dict(batch.get("tags") or {}),
                 style_no=str(batch.get("style_no") or ""),
                 category=str(batch.get("category") or ""),
+                # 策略随 job 落盘：之后的重试/复查/重启接回都按它逐条解析时长。
+                duration_mode=duration_mode,
                 images=slots,
             )
         except ValueError as exc:
@@ -1137,7 +1199,8 @@ class BatchManager:
             "skipped_download_failed": len(blocked_download),
             "taken": len(taken),
             "blocked": blocked,
-            "cost_estimate": self._money_view(user, self.estimate([live for _, live in taken], resolution)),
+            "cost_estimate": self._money_view(user, self.estimate(
+                [live for _, live in taken], resolution, duration, duration_mode)),
         }
 
     def produce(self, batch_id: str, user: dict, data: dict) -> dict:
@@ -1399,6 +1462,10 @@ class BatchManager:
                 slot = groups.setdefault(key, {
                     "key": key, "job_count": 0, "total": 0,
                     "success": 0, "failed": 0, "unfinished": 0,
+                    # 排队中、还没开跑的条目数（records 未建，按 job.templates 还原）。
+                    # 它同时算进 total / unfinished：任务提交时就定了要出这几条，
+                    # 不显示的话「4 个任务、0 条记录」会让人以为任务丢了。
+                    "waiting": 0,
                     "first_at": None, "last_at": None, "owners": set(), "sig": [],
                     # 按来源计数：历史页要能只显示大批量，也要能把「未分组」里的试跑挑出来。
                     "small_jobs": 0, "big_jobs": 0,
@@ -1423,16 +1490,25 @@ class BatchManager:
                 for rec in job.get("records") or []:
                     status = str(rec.get("status") or "")
                     slot["total"] += 1
-                    # 与 jobs.work_for / 账户用量完全同口径：非成功终态全算失败侧，
+                    # 与 jobs.work_for / 账户用量同口径：非成功终态全算失败侧，
                     # 其余（running/queued/pending/空）算进行中，保证 total 三者之和。
                     # 以前这里写死 4 种失败状态，unknown/timeout/skipped 和进行中
                     # 都会凭空消失，卡片数字与账户用量对不上。
+                    # 唯一的补充是下面「等待中」的排队条目：它们提交时已定、必然要产，
+                    # 也记进 total / unfinished（口径仍是 total = success + failed + unfinished）。
                     if status == "success":
                         slot["success"] += 1
                     elif status in _FAILED_RECORD_STATES:
                         slot["failed"] += 1
                     else:
                         slot["unfinished"] += 1
+                # 排队中的任务没有 records：把提交时定下的模板清单算成「等待中」条目，
+                # 与明细行（history_items 的同名占位行）严格一一对应，卡片数字不会变成 0。
+                waiting = _waiting_templates(job)
+                if waiting:
+                    slot["waiting"] += len(waiting)
+                    slot["total"] += len(waiting)
+                    slot["unfinished"] += len(waiting)
             rows = []
             for key, slot in groups.items():
                 is_day_group = key.startswith(DAY_KEY + ":")
@@ -1457,7 +1533,7 @@ class BatchManager:
                     "owner": owner_label,
                     "job_count": slot["job_count"], "total": slot["total"],
                     "success": slot["success"], "failed": slot["failed"],
-                    "unfinished": slot["unfinished"],
+                    "unfinished": slot["unfinished"], "waiting": slot["waiting"],
                     "state_sig": hashlib.md5("|".join(sorted(slot["sig"])).encode("utf-8")).hexdigest()[:12],
                     "first_at": slot["first_at"], "last_at": slot["last_at"] or 0,
                 })
@@ -1644,6 +1720,7 @@ class BatchManager:
                         "batch_no": row_batch_no,
                         "job_status": str(job.get("status") or ""),
                         "status": status,
+                        "waiting": False,
                         "seconds": rec.get("seconds"),
                         "download_url": (f"/api/jobs/{job.get('id')}/download/{template_id}"
                                          if status == "success" else ""),
@@ -1651,6 +1728,33 @@ class BatchManager:
                                             if rec.get("archive_error") else ""),
                         # 与批次条目同口径：done 的质量提示，状态仍是 success。
                         "verify_warn": _redact(str((rec.get("verify") or {}).get("warn") or ""))[:200],
+                    })
+                # 排队中的任务：records 还没建，但模板清单提交时就定了。不补这几行，
+                # 历史明细里这个任务一条都看不见（卡片上的条数却已经算了它们）。
+                # waiting=True 让前端把状态写成「等待中」，并且不摆下载/对比按钮。
+                for tpl in _waiting_templates(job):
+                    rows.append({
+                        "job_id": str(job.get("id")),
+                        "template_id": tpl["id"],
+                        "record_id": "",
+                        "run_no": run_no_by_job.get(str(job.get("id")), 0),
+                        "run_nos": sorted(set(run_nos_by_template.get(tpl["id"]) or (
+                            [run_no_by_job[str(job.get("id"))]]
+                            if str(job.get("id")) in run_no_by_job else []))),
+                        "run_total": len(runs),
+                        "run_prompt_changed": False,
+                        "image_url": image_url,
+                        "template_name": tpl["name"] or names.get(tpl["id"], ""),
+                        "owner": str(job_owner or ""),
+                        "created_at": job.get("created_at") or 0,
+                        "batch_no": row_batch_no,
+                        "job_status": str(job.get("status") or ""),
+                        "status": "queued",
+                        "waiting": True,
+                        "seconds": None,
+                        "download_url": "",
+                        "archive_warning": "",
+                        "verify_warn": "",
                     })
             total = len(rows)
             return {"key": key, "batch_no": batch_no,

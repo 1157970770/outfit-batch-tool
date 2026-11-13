@@ -13,7 +13,10 @@ from pathlib import Path
 
 from app import billing
 from app import config as appconfig
-from app.core import TAG_SLOTS, BatchRunner, BatchSpec, status_counts, unique_batch_dir
+from app.core import (
+    DURATION_MODE_FIXED, DURATION_MODES, TAG_SLOTS, BatchRunner, BatchSpec,
+    status_counts, unique_batch_dir,
+)
 from app.media import base64_budget_error
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, global_inflight, global_small_inflight
@@ -372,6 +375,9 @@ class JobManager:
                batch_ref: str = "", limit_items: int | None = None,
                tags: dict | None = None, style_no: str = "",
                category: str = "",
+               # 输出时长策略：fixed = 整批用 duration；adaptive = 逐条按模板解析
+               # （≥7s→7、4–7s→跟随模板、<4s→4），见 app.core.resolve_output_duration。
+               duration_mode: str = DURATION_MODE_FIXED,
                admin: bool = False, images: list[dict] | None = None) -> dict:
         """建任务并入队。batch_ref 指向批次（老路径为空）；limit_items 覆盖单次条数上限。
 
@@ -406,6 +412,10 @@ class JobManager:
             raise ValueError(f"一次最多生成 {max_items} 条")
         if resolution not in ("480P", "720P") or not duration_ok(duration):
             raise ValueError("生成参数无效，请刷新页面后重试")
+        # 策略白名单：写错要立刻拒绝，不能静默回落成固定 7 秒（会多收钱、少出画面）。
+        duration_mode = str(duration_mode or "").strip().lower() or DURATION_MODE_FIXED
+        if duration_mode not in DURATION_MODES:
+            raise ValueError("输出时长策略无效，请刷新页面后重试")
         # 上衣款号必填：COS 归档路径按它分段。tags 优先，老调用传 style_no 时兜底映射。
         job_tags = clean_tags(tags) if tags else ({"top": clean_style_no(style_no)} if clean_style_no(style_no) else {})
         if not job_tags.get("top"):
@@ -424,7 +434,8 @@ class JobManager:
             "images": slots, "image_upload_id": slots[0]["upload_id"],
             "prompt_id": prompt_id, "prompt": prompt,
             "templates": templates, "template_ids": [str(t["id"]) for t in templates],
-            "resolution": resolution, "duration": duration, "total": len(templates),
+            "resolution": resolution, "duration": duration, "duration_mode": duration_mode,
+            "total": len(templates),
             "done": 0, "records": [], "summary": None, "message": "已排队，开始前可取消。",
             "out_dir": "", "log_tail": [], "cancel_requested": False,
             # 批次归属：批次生产时指向 BatchManager 的 id，试跑/老 job 为空。
@@ -679,6 +690,7 @@ class JobManager:
             provider=str(cfg.get("WAN_PROVIDER") or "dashscope"),
             model=str(cfg.get("WAN_MODEL") or "wan3.0-video"), mode="edit",
             resolution=job["resolution"], duration=job["duration"],
+            duration_mode=str(job.get("duration_mode") or DURATION_MODE_FIXED),
             aspect_ratio=cfg.get("WAN_DEFAULT_RATIO"), concurrency=concurrency,
             poll_interval=float(cfg.get("WAN_POLL_INTERVAL") or 15),
             poll_timeout=int(cfg.get("WAN_POLL_TIMEOUT") or 1800),
@@ -941,6 +953,8 @@ class JobManager:
                                source["prompt_id"], source["resolution"], source["duration"], source.get("prompt"),
                                batch_ref=str(source.get("batch_ref") or ""),
                                tags=dict(source.get("tags") or {}), style_no=str(source.get("style_no") or ""),
+                               # 策略必须透传：漏了会让「自适应」的失败重试退回固定 7 秒。
+                               duration_mode=str(source.get("duration_mode") or ""),
                                admin=admin, images=slots)
 
     def cancel(self, job_id: str) -> bool:
@@ -1212,7 +1226,7 @@ class JobManager:
                 "id", "owner", "status", "created_at", "started_at", "finished_at",
                 "batch_id",                 "batch_ref", "image_name", "prompt_id", "template_ids", "resolution",
                 "category",
-                "duration", "total", "done", "message", "log_tail", "cancel_requested",
+                "duration", "duration_mode", "total", "done", "message", "log_tail", "cancel_requested",
                 "lane", "style_no", "tags")}
             # 复查超时任务（P0）的进度：前端据此显示「已复查 3/23」并保持轮询。
             state = job.get("recheck")
@@ -1232,6 +1246,10 @@ class JobManager:
             else:
                 safe["summary"] = None
             safe["records"] = []
+            # 排队中的任务 records 还是空的：详情面板要按提交时的模板清单显示「等待中」行，
+            # 所以下发 id + 名字（云端 URL 等内部字段不下发）。
+            safe["templates"] = [{"id": str(t.get("id")), "name": str(t.get("name") or "")}
+                                 for t in (job.get("templates") or []) if isinstance(t, dict)]
             record_keys = ("id", "status", "seconds", "error", "task_id", "request_id",
                            "billable_seconds", "estimated_cost", "verify", "cos_key",
                            # 云端已出片、只是下载失败：前端据此把「重试」提示成「复查补下载」。

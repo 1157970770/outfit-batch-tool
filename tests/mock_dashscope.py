@@ -30,6 +30,8 @@ state = {
     "last_body": None,
     "last_headers": {},
     "last_query": None,
+    # 逐条下发过的 duration（按提交顺序）：自适应批次要断言 7 / -1 / 4 混发。
+    "durations": [],
 }
 lock = threading.Lock()
 
@@ -61,6 +63,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 state["submitted"] += 1
                 state["last_body"] = body
+                state["durations"].append((body.get("parameters") or {}).get("duration"))
                 state["last_headers"] = {
                     "Authorization": self.headers.get("Authorization", ""),
                     "X-DashScope-Async": self.headers.get("X-DashScope-Async", ""),

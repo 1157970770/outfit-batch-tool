@@ -185,6 +185,7 @@ while not stop:
 | `templates` / `template_ids` | 本次要跑的场景（含 COS 地址） |
 | `prompt` / `prompt_id` | 实际提交的提示词 |
 | `resolution` / `duration` / `total` / `done` | 生成参数与进度 |
+| `duration_mode` | 输出时长策略快照：`fixed`（默认，恒发 `duration`）/ `adaptive`（逐条按模板分辨率解析）。缺省视为 `fixed`，老数据零迁移 |
 | `tags` | 6 栏位标签 `{top/lining/pants/shoes/scene/note}`（v0.10.0 起，top 必填进 COS 路径） |
 | `category` | 任务分类快照（`服装换装` / `项链手串`）。建批次时冻结、提交时从批次抄进 job，批次删了也能按分类统计；试跑/老任务为空，统计时归「未分类」 |
 | `style_no` | 旧款号字段（v0.9.0 老数据展示用，新任务不再写入） |
@@ -203,7 +204,8 @@ while not stop:
 | `images[]` | **图片唯一真源**：`[{upload_id,name,path}]`，顺序 = 槽位 = `imageUrls`；[0]=定妆图 |
 | `image_path` / `image_name` / `image_url` | `images[0]` 的**主图别名**（老代码/老前端/历史对比层用），写图时同步回写 |
 | `prompt_id` / `prompt` | 提示词（不改 prompt；「图2…图10」由用户自己写）。绑定后仍可在步骤 4「分批生产」里改，只影响之后的生产 |
-| `resolution` / `duration` | 本批次参数 |
+| `resolution` / `duration` | 本批次参数（`duration` 仍存 7，镜像/历史页零迁移） |
+| `duration_mode` | 输出时长策略：`fixed`（默认）/ `adaptive`。**adaptive 时逐条解析**：模板 ≥7s → 发 `7`；4–7s → 发 `-1`（保持源时长，实测输出=模板时长）；<4s → 发 `4`（地板，避免 1–2s 成片动作做不完）。同一入口 `app/core.py::resolve_output_duration` 同时供引擎下发与预估，口径不会漂移。老批次无此字段 → `fixed` |
 | `tags` | 6 栏位标签，建批次时填，冻结后不改（旧批次只有 `style_no`） |
 | `category` | 任务分类：`app/web/batches.py::TASK_CATEGORIES` 是唯一真源（现为 服装换装 / 项链手串），由 `/api/bootstrap` 下发前端。建批次时选、之后冻结；不传默认「服装换装」，传非法值 400（不静默归类）；老批次为空 → 统计归「未分类」 |
 | `style_no` | 旧款号字段（v0.9.0），仅老批次存在 |
