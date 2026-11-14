@@ -207,7 +207,7 @@
               <div class="batch-form-grid batch-form-grid-3">
                 <label class="field">提示词模板<select id="batch-prompt-select"></select></label>
                 <label class="field">画质<select id="batch-resolution"><option value="480P" selected>标准 480P</option><option value="720P">高清 720P</option></select></label>
-                <label class="field">输出时长<select id="batch-duration" title="自适应：模板 ≥7 秒按 7 秒出、4–7 秒跟随模板、短于 4 秒按 4 秒出"><option value="fixed" selected>7 秒（固定）</option><option value="adaptive">自适应（≤7 秒，短模板跟随）</option></select></label>
+                <label class="field">输出时长<select id="batch-duration" title="自适应：模板 ≥7 秒按 7 秒出、4–7 秒跟随模板、短于 4 秒按 4 秒出"><option value="adaptive" selected>自适应（≤7 秒，短模板跟随）</option><option value="fixed">7 秒（固定）</option></select></label>
               </div>
               <label class="field prompt-editor-label">批次提示词（整批共用，可按需要微调）<textarea id="batch-prompt-body" rows="6" maxlength="4000" spellcheck="false"></textarea></label>
               <div class="prompt-meta"><span>提示词保存到批次上，之后每次分批生产都用这一份，不随单次改动。</span><span id="batch-prompt-length">0 / 4000</span></div>

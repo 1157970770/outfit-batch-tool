@@ -441,8 +441,8 @@
     App.fillTagSlots('batch-tags', {});
     $('batch-title').value = '';
     $('batch-prompt-body').value = '';
-    // 新建批次默认「固定 7 秒」：自适应要让用户主动选，不能因为上次选过就悄悄变。
-    $('batch-duration').value = 'fixed';
+    // 新建批次默认「自适应」：短模板跟随、长模板封顶 7 秒，仍可在下拉里改回固定 7 秒。
+    $('batch-duration').value = 'adaptive';
     Slots.resetSlots(b.slots);
     $('batch-image-file').value = '';
     b.slotError = '';
@@ -500,7 +500,7 @@
       }
       const ids = upload.uploadIds;
       btn.textContent = '正在创建批次…';
-      const payload = { batch_no: batchNo, category, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, duration_mode: $('batch-duration').value || 'fixed', upload_ids: ids, upload_id: ids[0] };
+      const payload = { batch_no: batchNo, category, title, tags, prompt_id: promptId, prompt: promptBody, resolution, duration: BATCH_DURATION_PARAM, duration_mode: $('batch-duration').value || 'adaptive', upload_ids: ids, upload_id: ids[0] };
       const data = await api('/api/batches', { method: 'POST', body: JSON.stringify(payload) });
       if (!data.batch || !data.batch.id) throw new Error('服务端没有返回批次信息，请刷新后重试。');
       Slots.resetSlots(b.slots);          // 上传用的 object URL 用完即释放
