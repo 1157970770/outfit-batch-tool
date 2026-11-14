@@ -10,6 +10,7 @@
 | [core-code-and-migration.md](core-code-and-migration.md) | **核心代码导读 + 迁移手册**：搬什么/不搬什么、配置与数据清单、八步迁移、必改的硬编码地址、验收清单、已知坑 | 2026-11-10 |
 | [core-code-and-migration.docx](core-code-and-migration.docx) | 同上手册的**排版版（Word，16 页）**，给不看仓库的人传阅用；由 [scripts/build_migration_docx.py](../scripts/build_migration_docx.py) 从 md 生成，改内容先改 md 再重跑脚本 | 2026-11-10 |
 | [architecture.md](architecture.md) | **代码架构**：分层、线程模型、请求/批次生命周期、额度闸门、数据模型、接口表、前端结构、排障 | 2026-11-02 |
+| [batch-archive.md](batch-archive.md) | **批次永久档案**：款号/提示词/参考图落盘、触发时机、下载与补档、备份恢复、已知边界 | 2026-11-14 |
 | [project-summary-20261102.md](project-summary-20261102.md) | 现状：参数表、能力清单、运维手册、风险 | 2026-11-02 |
 | [account-usage-and-quota.md](account-usage-and-quota.md) | 单 Key 共用、创建/轮询双额度、账户用量与金额口径 | 2026-11-02 |
 | [web-lan.md](web-lan.md) | 局域网部署、访问地址、常见网络问题 | 2026-10 |

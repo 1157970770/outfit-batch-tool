@@ -977,3 +977,15 @@ footer { padding: 24px 0 8px; color: #98a1af; font-size: 11.5px; text-align: cen
 .template-pick-item.is-on{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 10%,white);color:var(--blue-dark);font-weight:700}
 .template-pick-item.is-unready{color:var(--muted);background:var(--bg);cursor:not-allowed;text-decoration:line-through}
 .template-pick-item.is-used::after{content:"【已用】";color:var(--amber);font-size:11px}
+
+/* ---------- 管理页 · 提示词模板库 ---------- */
+.prompt-admin-list{display:grid;gap:8px;margin-top:10px}
+.prompt-admin-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.prompt-admin-row b{font-size:13px}
+.prompt-admin-row small{display:block;margin-top:2px}
+.prompt-admin-row p{margin:4px 0 0;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+.prompt-admin-form{margin-top:12px;padding:12px;border:1px solid var(--line-strong);border-radius:10px;background:var(--bg)}
+.prompt-admin-head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.prompt-admin-form textarea{width:100%;min-height:130px;font-family:inherit;line-height:1.55;resize:vertical}
+.prompt-admin-actions{display:flex;align-items:center;gap:8px;margin-top:8px}
+.prompt-admin-actions .muted{margin-right:auto;font-size:12px}

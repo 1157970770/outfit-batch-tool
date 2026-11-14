@@ -32,7 +32,9 @@ from app.imggen import ImageGenError, ImageGenManager
 from app.videogen import VideoGenError, VideoGenManager
 from app.media import MediaError, validate_image
 from app.mirror import start_mirror
-from app.prompts import PromptLibrary
+from app.prompts import (MAX_PROMPT_CHARS, MAX_PROMPT_TITLE, MAX_PROMPTS, Prompt,
+                         PromptLibrary, PromptLibraryError, clean_prompt_fields,
+                         next_prompt_id, save_library)
 from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
@@ -119,6 +121,12 @@ def _local_hosts() -> set[str]:
     return {h.lower() for h in hosts}
 
 
+def _prompts_from_library(lib: PromptLibrary) -> dict[str, dict]:
+    """把库里的模板整理成网页可用映射；p01（服装定妆）不是视频提示词，不展示。"""
+    return {p.id: {"title": p.title, "body": p.body} for p in lib.prompts
+            if p.id != "p01" and p.title.strip() != "服装定妆"}
+
+
 def _load_prompts() -> dict[str, dict]:
     """网页可用的提示词模板：只取提示词库里沉淀好的那几份。
 
@@ -126,15 +134,18 @@ def _load_prompts() -> dict[str, dict]:
     「换装无字幕」内容重叠，却因为排在最前被默认选中，容易误用。
     库读不到时返回空字典，由调用方提示「提示词库未加载」，不再塞占位文案。
     """
-    prompts: dict[str, dict] = {}
     try:
-        lib = PromptLibrary.load()
-        # 服装定妆用于图片定妆，不是视频生成提示词，网页生产页不展示。
-        prompts.update({p.id: {"title": p.title, "body": p.body} for p in lib.prompts
-                        if p.id != "p01" and p.title.strip() != "服装定妆"})
+        return _prompts_from_library(PromptLibrary.load())
     except Exception:
-        pass
-    return prompts
+        return {}
+
+
+class PromptAdminError(Exception):
+    """管理页维护提示词库时的业务错误（带 HTTP 状态码）。"""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
 
 
 class WebApplication:
@@ -169,6 +180,8 @@ class WebApplication:
         self.signer = SessionSigner(settings.web["session_secret"], settings.web.get("session_hours", 12))
         self.limiter = LoginLimiter()
         self.jobs = JobManager(settings, {key: value["body"] for key, value in self.prompts.items()})
+        # 管理页维护提示词库：读改写整段串行；jobs.prompts 与 self.prompts 必须一起换。
+        self._prompt_lock = threading.RLock()
         self.started_at = time.time()
         self.uploads_dir = settings.data_dir / "uploads"
         self.upload_meta = self.uploads_dir / "meta"
@@ -214,6 +227,51 @@ class WebApplication:
         meta = dict(meta)
         meta["path"] = str(path)
         return meta
+
+    # ---------------------------------------------------------- 提示词模板库（管理页）
+    def _apply_prompts(self, lib: PromptLibrary) -> None:
+        """把库内容同时灌进 self.prompts 与 jobs.prompts（建任务校验读后者）。"""
+        prompts = _prompts_from_library(lib)
+        with self._prompt_lock:
+            self.prompts = prompts
+            self.jobs.set_prompts({key: value["body"] for key, value in prompts.items()})
+
+    def admin_prompts(self) -> dict:
+        lib = PromptLibrary.load()
+        rows = [{"id": p.id, "title": p.title, "body": p.body, "chars": p.chars,
+                 "selectable": p.id != "p01" and p.title.strip() != "服装定妆"}
+                for p in lib.prompts]
+        return {"prompts": rows, "issues": list(lib.issues), "path": str(lib.path or ""),
+                "max_chars": MAX_PROMPT_CHARS, "max_title": MAX_PROMPT_TITLE}
+
+    def save_admin_prompt(self, prompt_id: str | None, data: dict) -> dict:
+        """新增（prompt_id 为空）或修改一条模板，落盘后热更新到建任务链路。"""
+        title, body = clean_prompt_fields(data.get("title"), data.get("body"))
+        with self._prompt_lock:
+            lib = PromptLibrary.load()
+            prompts = list(lib.prompts)
+            if prompt_id:
+                index = next((i for i, p in enumerate(prompts) if p.id == prompt_id), -1)
+                if index < 0:
+                    raise PromptAdminError("找不到这个提示词模板，请刷新后重试。", 404)
+                prompt = Prompt(id=prompt_id, title=title, body=body)
+            else:
+                if len(prompts) >= MAX_PROMPTS:
+                    raise PromptAdminError(f"模板最多 {MAX_PROMPTS} 个，请先整理旧模板。", 409)
+                prompt = Prompt(id=next_prompt_id(prompts), title=title, body=body)
+            # 同名模板会让下拉框无法区分，直接拒绝（自己改自己不算重复）。
+            if any(p.id != prompt.id and p.title == title for p in prompts):
+                raise PromptAdminError("已有同名模板，请换一个名称。", 409)
+            if prompt_id:
+                prompts[index] = prompt
+            else:
+                prompts.append(prompt)
+            try:
+                save_library(prompts, lib.path)
+            except OSError as exc:
+                raise PromptAdminError(f"提示词库写入失败：{exc}", 503) from None
+            self._apply_prompts(PromptLibrary.load(lib.path))
+        return {"prompt": prompt.to_dict()}
 
     def user_for_token(self, token: str) -> dict | None:
         return self.signer.verify(token, self.settings.users)
@@ -685,6 +743,10 @@ def make_handler(app: WebApplication):
                 parts = path.strip("/").split("/")
                 if len(parts) == 4 and parts[3] == "files.zip":
                     return self._batch_zip(parts[2], urllib.parse.parse_qs(parsed.query), user)
+                # 批次永久档案：款号 / 提示词 / 全部参考图的本机副本，删批次后仍保留。
+                if len(parts) == 4 and parts[3] == "archive.zip":
+                    return self._batch_archive_zip(
+                        parts[2], urllib.parse.parse_qs(parsed.query), user)
                 # 整批下载的异步版：POST 建任务 → 轮询 .../<token>/status → 完成后 GET 下载。
                 # 同步的 /files.zip 保留不动（老链接、直接点开仍可用）。
                 if len(parts) >= 5 and parts[3] == "files.zip" and parts[4] == "jobs":
@@ -776,6 +838,13 @@ def make_handler(app: WebApplication):
                                    "users": [{"username": n, "role": u.get("role", "user"),
                                               "enabled": u.get("enabled", True)}
                                              for n, u in app.settings.users.items()]})
+            if path == "/api/admin/prompts":
+                if not self._user(admin=True):
+                    return
+                try:
+                    return self._json({"ok": True, **app.admin_prompts()})
+                except PromptLibraryError as exc:
+                    return self._error(str(exc), 503)
             if path == "/api/admin/template-health":
                 if not self._user(admin=True):
                     return
@@ -970,6 +1039,30 @@ def make_handler(app: WebApplication):
                     "untagged_skipped": int(info.get("untagged_skipped") or 0),
                     "manifest_warning": str(info.get("manifest_warning") or ""),
                 })
+            if path == "/api/admin/prompts":
+                if user.get("role") != "admin":
+                    return self._error("此操作需要管理员权限。", 403)
+                try:
+                    result = app.save_admin_prompt(None, data)
+                except PromptAdminError as exc:
+                    return self._error(str(exc), exc.status)
+                except PromptLibraryError as exc:
+                    return self._error(str(exc), 400)
+                return self._json({"ok": True, **result, **app.admin_prompts()}, 201)
+            if path.startswith("/api/admin/prompts/"):
+                if user.get("role") != "admin":
+                    return self._error("此操作需要管理员权限。", 403)
+                parts = path.strip("/").split("/")
+                if len(parts) != 4:
+                    return self._error("页面或接口不存在。", 404)
+                prompt_id = urllib.parse.unquote(parts[3])
+                try:
+                    result = app.save_admin_prompt(prompt_id, data)
+                except PromptAdminError as exc:
+                    return self._error(str(exc), exc.status)
+                except PromptLibraryError as exc:
+                    return self._error(str(exc), 400)
+                return self._json({"ok": True, **result, **app.admin_prompts()})
             if path == "/api/admin/users":
                 if user.get("role") != "admin":
                     return self._error("此操作需要管理员权限。", 403)
@@ -1562,15 +1655,18 @@ def make_handler(app: WebApplication):
             return self._json({"ok": True, **result})
 
         def _batch_images(self, batch_id, data, user):
-            """锁定后唯一可写图的入口：op=add 追加细节图 / op=remove 删除细节图。"""
+            """锁定后唯一可写图的入口：op=add 追加细节图 / remove 删除细节图 /
+            replace 更换定妆图（留 image_changes 记录）。"""
             op = str(data.get("op") or "").strip()
             try:
                 if op == "add":
                     result = app.batches.add_images(batch_id, user, data)
                 elif op == "remove":
                     result = app.batches.remove_images(batch_id, user, data)
+                elif op == "replace":
+                    result = app.batches.replace_primary_image(batch_id, user, data)
                 else:
-                    return self._error("op 只能是 add 或 remove。", 400)
+                    return self._error("op 只能是 add / remove / replace。", 400)
             except BatchError as exc:
                 return self._error(exc, exc.status)
             return self._json({"ok": True, **result})
@@ -1687,6 +1783,33 @@ def make_handler(app: WebApplication):
                                        f"{label or info['id']}.zip")
             finally:
                 _remove_quiet(path)
+
+        def _batch_archive_zip(self, batch_id, query, user):
+            """批次档案 ZIP。?probe=1 只回图片数量，避免浏览器把错误 JSON 存成 zip。"""
+            probe = str((query.get("probe", [""])[0] or "")).strip() == "1"
+            try:
+                if probe:
+                    info = app.batches.archive_info(batch_id, user)
+                    return self._json({
+                        "ok": True,
+                        "count": int(info.get("image_count") or 0),
+                        "batch_no": info.get("batch_no") or "",
+                        "ready": bool(info.get("ready")),
+                        "size_bytes": int(info.get("size_bytes") or 0),
+                        "download_url": (f"/api/batches/"
+                                         f"{urllib.parse.quote(str(info.get('id') or batch_id))}"
+                                         f"/archive.zip"),
+                    })
+                result = app.batches.archive_zip(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            label = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-",
+                           str(result.get("batch_no") or "")).strip("-")[:60]
+            try:
+                return self._send_file(result["path"], "application/zip",
+                                       f"{label or batch_id}_档案.zip")
+            finally:
+                _remove_quiet(result["path"])
 
         def _batch_zip_start(self, batch_id, user):
             """建一个整批打包任务：后台线程逐条写 zip，前端轮询进度。
@@ -2172,6 +2295,19 @@ def make_handler(app: WebApplication):
                         job["batch_run"] = {"no": view["no"], "total": len(runs),
                                             "prompt_changed": bool(view.get("prompt_changed"))}
                         break
+                # 详情面板直接显示人可读的批次号（FXSC...），不是内部 batch_id（WEB-...）。
+                job["batch_no"] = str(batch.get("batch_no") or "")
+                job["batch_owner"] = str(batch.get("owner") or "")
+                job["batch_state"] = str(batch.get("state") or "")
+                job["image_changes"] = [dict(change) for change in
+                                        (batch.get("image_changes") or []) if isinstance(change, dict)]
+            # 记录行补模板名：模板后来下架/改名时，仍能看出这条视频对应哪个场景。
+            names = {str(tpl.get("id")): str(tpl.get("name") or "")
+                     for tpl in (job.get("templates") or []) if isinstance(tpl, dict)}
+            for rec in job.get("records") or []:
+                if not isinstance(rec, dict) or rec.get("template_name"):
+                    continue
+                rec["template_name"] = names.get(str(rec.get("id")), "")
             return self._json({"ok": True, "job": job})
 
         def _authorized_job(self, job_id, user):

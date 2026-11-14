@@ -222,6 +222,7 @@ web-data/
 ├── jobs/<id>.json          任务状态（1 个文件 = 1 轮）
 ├── batches/<id>.json       批次
 ├── uploads/<xx>/<32hex>.png 定妆图与细节图（每图一个文件 + meta/<id>.json；目前无 GC）
+├── archive/<款号>/<批次号>__<batch_id>/  批次永久档案（见 5.6；删批次也不删这里）
 ├── output/<batch_id>/      成片 mp4 + 归档清单
 ├── logs/<job_id>.log       逐条提交日志
 ├── style_template_usage.json  款号-模板防重账本（v0.11.0，见 5.3）
@@ -283,6 +284,37 @@ web-data/
   `error` 写「服务重启，任务中断，请重新提交。」——不做断点续传。
 - 删除任务会连 `files/<id>/` 一起删；`生成中` 的任务拒绝删除（409）。
 
+### 5.6 `web-data/archive/<款号>/<批次号>__<batch_id>/`（批次永久档案）
+
+目的：批次可能被删除、`uploads` 也可能做清理，但**款号、提示词、参考图必须能永久追溯**。
+档案与批次解耦：删批次只删 `batches/<id>.json`，档案目录和图片副本不动。
+
+- 归属：`app/web/batch_archive.py::BatchArchive`；由 `BatchManager` 在每次写盘点后调用。
+- 目录：
+
+```
+archive/<款号>/<批次号>__<batch_id>/
+├── meta.json              批次快照 + 当前图/全部图（含 removed_at）+ 计数
+├── prompt.txt             当前提示词
+├── prompt-history.jsonl   每次提示词变化（按内容去重）
+├── history.jsonl          批次事件流（创建/换图/锁定/生产/关闭/删除）
+├── archive说明.txt        人读说明
+├── checksums.sha256       当前图片的 SHA-256
+├── images/<upload_id>.<ext>  参考图副本（按 upload_id 去重，删掉的图也保留）
+├── runs/<job_id>.json     每一轮实际提交的 prompt / 图片 / 模板 ID
+└── deleted.json           批次删除墓碑（只在删除后出现）
+```
+
+- 款号取 `tags.top`，老批次回退 `style_no`，都没有归 `未分类`；目录名做非法字符与 Windows 保留名清洗。
+- 写档案失败**不阻断**建批次/加图/生产，只写 warning；唯一例外是删除：先 `ensure` + `mark_deleted`，
+  失败则返回 500 并保留批次，避免「批次没了、档案也没写全」。
+- 老批次不做启动时全量扫描；第一次 `?probe=1` 只按已绑定图报数，第一次真正下载时补档。
+  存量可用 `scripts/backfill_batch_archive.py` 一次性补齐。
+- 读取：`GET /api/batches/<id>/archive.zip[?probe=1]`。probe 返回 `count/ready/size_bytes/download_url`，
+  真实下载同步打包（单批参考图通常几十 MB；zip 写 `web-data/tmp`，发完即删）。
+- 边界：档案是**副本**，不是 `uploads` 的替代；`uploads` 仍是运行期真源。档案不做去重/GC，
+  磁盘占用约为批次参考图的 1 倍，`archive/<款号>/` 可直接整目录备份。
+
 ## 7. HTTP 接口
 
 | 方法 | 路径 | 权限 | 作用 |
@@ -298,6 +330,7 @@ web-data/
 | GET/POST | `/api/batches` | 登录 | 批次列表 / 新建 |
 | GET/POST | `/api/batches/<id>[/...]` | 登录（限本人） | 详情、image、images（增删细节图）、candidates、selection（草稿清单）、lock、produce、retry-failed、close |
 | GET | `/api/batches/<id>/files.zip[?probe=1]` | 登录（限本人） | 整批打包下载，**仅大批量且非试跑的批次**；按 runs 收集每一轮成功视频、按场景去重保留最新。`?probe=1` 只回 `{count,batch_no,download_url}` 不落盘，供前端先确认再触发原生下载 |
+| GET | `/api/batches/<id>/archive.zip[?probe=1]` | 登录（限本人） | 批次永久档案（款号/提示词/提示词历史/全部参考图/每轮快照/校验和）；`?probe=1` 只回 `{count,ready,size_bytes,batch_no,download_url}`，真实下载时补档并同步打包，发完删除临时 zip |
 | GET | `/api/history/groups[/<key>]` | 登录 | 历史分组 / 组内条目；`group_by=batch\|owner\|day`，`lane=small\|big` 按通道过滤；明细带 `scope` 保证与列表同口径，每条带 `record_id`（视频唯一 ID） |
 | GET | `/api/style-usage?top=` | 登录 | 款号已用模板账本（防重标记） |
 | GET | `/api/imagegen/tasks` | 登录（限本人；admin `?scope=all`） | 生图任务列表，`limit` 默认 40 |

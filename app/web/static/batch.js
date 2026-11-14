@@ -67,6 +67,8 @@
     recheckPoll: 0,
     // 建批次时的 10 槽位本地状态；锁定后追加细节图时的错误文案（轮询重渲染不丢）
     slots: [], slotBusy: false, slotError: '',
+    // 分批生产页换定妆图：上传中标记与错误文案（4 秒轮询重渲染不丢）
+    imageBusy: false, imageError: '',
     promptEditing: false,    // 锁定摘要里「修改提示词」的编辑态；切批次/退出时复位
     promptDraft: '',         // 编辑中的草稿文本（与 batch.prompt 分离，避免误覆盖）
     promptOpen: false,       // 提示词是否展开全文（默认折叠两行，页面更紧凑；4 秒轮询重渲染也靠它保持）
@@ -345,6 +347,36 @@
       }
     }
   }
+  /* 批次永久档案：款号 / 提示词 / 提示词历史 / 全部参考图的本地副本。
+     先 probe 拿数量，再走浏览器原生下载；老批次第一次下载由后端补档，可能要等几秒。 */
+  async function downloadBatchArchive(batchId, button) {
+    const id = txt(batchId);
+    if (!id || (button && button.disabled)) return;
+    const label = button ? button.textContent : '';
+    if (button) { button.disabled = true; button.textContent = '准备档案…'; }
+    try {
+      const probe = await api(`/api/batches/${encodeURIComponent(id)}/archive.zip?probe=1`);
+      const count = num(probe.count);
+      const a = document.createElement('a');
+      a.href = probe.download_url
+        || `/api/batches/${encodeURIComponent(id)}/archive.zip`;
+      a.rel = 'noopener';
+      document.body.append(a);
+      a.click();
+      a.remove();
+      toast(count
+        ? `正在下载批次档案（含 ${count} 张参考图）…`
+        : '正在下载批次档案…');
+    } catch (err) {
+      toast(`档案下载失败：${err.message}`);
+    } finally {
+      if (button && button.isConnected) {
+        button.disabled = false;
+        button.textContent = label || '下载档案（ZIP）';
+      }
+    }
+  }
+
   function openJobDetail(jobId) {
     if (!jobId) return;
     App.switchView('history-view');
@@ -448,6 +480,16 @@
       dlBtn.disabled = !canDownload || b.busy;
       dlBtn.title = canDownload
         ? `打包下载本批次全部已出片视频（清单显示已完成 ${done} 条）` : '';
+    }
+    // 永久档案：只要批次存在就给入口（草稿也能下，档案里已有款号/提示词/当前图片）；
+    // 老批次第一次下载时由后端补复制图片，不阻塞页面。
+    const archiveBtn = $('batch-archive-download');
+    if (archiveBtn) {
+      const canArchive = b.mode === 'view' && !!txt(b.current && b.current.id);
+      archiveBtn.classList.toggle('hidden', !canArchive);
+      archiveBtn.disabled = !canArchive || b.busy;
+      archiveBtn.title = canArchive
+        ? `下载永久档案：款号、提示词、提示词历史与全部参考图（批次 ${txt(b.current.batch_no) || b.current.id}）` : '';
     }
   }
   function exitBatch() {
@@ -698,6 +740,9 @@
     }
     updateBatchPromptCount();
   }
+
+  // 管理页新增/修改模板后由 app.js 调用：只重建下拉，不打断当前页其它输入。
+  function refreshPrompts() { fillPromptSelect(); }
 
   /* ---------- 步骤 B：标签筛选与候选 ---------- */
   /* 每个标签三态循环：不选 → 包含（同色描边）→ 排除（红色划线）→ 不选。
@@ -1550,7 +1595,7 @@
       compact: true, readonly: !editable,
       onRemove: editable ? (index) => removeDetailImage(index) : null,
     });
-    $('batch-slot-hint').textContent = `已绑定 ${entries.length} / ${Slots.maxSlots} 张 · 定妆图不可更换，追加只影响之后的生产`;
+    $('batch-slot-hint').textContent = `已绑定 ${entries.length} / ${Slots.maxSlots} 张 · 定妆图可在「分批生产」里更换，追加只影响之后的生产`;
     $('batch-slot-add').disabled = !editable || entries.length >= Slots.maxSlots;
     const error = $('batch-slot-error');
     error.textContent = b.slotError;
@@ -1686,7 +1731,7 @@
     // 保存后下一轮生效）。这里保留全文方便核对，默认折叠两行。
     root.append(buildPromptBlock(batch, prompt, { editable: false }));
     root.append(el('p', 'muted batch-summary-hint',
-      '清单已锁定：条目不可增删，定妆图 / 画质 / 时长都用批次创建时的设置；提示词在下方「分批生产」里改，只影响之后的生产。'));
+      '清单已锁定：条目不可增删；定妆图可在下方「分批生产」里更换（只影响之后的生产并留记录），提示词也在那里改。'));
   }
 
   function buildPromptBlock(batch, prompt, opts) {
@@ -1802,6 +1847,9 @@
       promptBox.replaceChildren(buildPromptBlock(batch, txt(batch.prompt), { editable: true }));
     }
 
+    // 定妆图：分批生产阶段可换；换图只影响之后的生产，记录写进批次 image_changes。
+    renderProduceImages(batch);
+
     const counters = $('batch-counters');
     counters.replaceChildren();
     for (const [value, label] of [[pending, '待生产'], [done, '已生产'], [failed, '失败']]) {
@@ -1885,6 +1933,94 @@
       retryBox.classList.remove('hidden');
     }
     if (!retryBox.childNodes.length) retryBox.classList.add('hidden');
+  }
+
+  /* ---------- 分批生产页：更换定妆图 ----------
+     为什么允许：跑了几轮才发现定妆图选错/要换角度时，整批重开成本太高。
+     每轮生产在 _start_run 里已把 images 快照进 job，所以换图不会改到已生成的视频；
+     每次更换写进 batch.image_changes，历史页与任务详情都能追溯「谁在第几轮前换的」。 */
+  function renderProduceImages(batch) {
+    const box = $('batch-produce-images');
+    if (!box) return;
+    box.classList.toggle('hidden', !batch || b.mode !== 'view');
+    if (!batch || b.mode !== 'view') return;
+    const closed = txt(batch.state) === 'closed';
+    const running = !!txt(batch.active_job_id);
+    const urls = Array.isArray(batch.image_urls) && batch.image_urls.length
+      ? batch.image_urls : (txt(batch.image_url) ? [txt(batch.image_url)] : []);
+    const names = Array.isArray(batch.image_names) ? batch.image_names : [];
+    const changes = Array.isArray(batch.image_changes) ? batch.image_changes : [];
+    box.replaceChildren();
+    const head = el('div', 'batch-produce-images-head');
+    head.append(el('b', null, '定妆图'));
+    head.append(el('span', 'muted', running
+      ? '当前这一轮已提交，换图从下一轮生效；已生成的视频不受影响。'
+      : '分批生产阶段可以更换；只影响之后的生产，每次更换都会记入历史。'));
+    if (!closed) {
+      const file = el('input', 'slot-file-input');
+      file.type = 'file';
+      file.accept = 'image/*,.jpg,.jpeg,.png,.webp,.bmp';
+      const btn = el('button', 'quiet btn-sm', b.imageBusy ? '上传中…' : '更换定妆图');
+      btn.type = 'button';
+      btn.disabled = b.imageBusy || b.busy;
+      btn.title = running ? '当前这一轮已提交，换图从下一轮生效' : '只影响之后的生产，已生成的视频不变';
+      btn.addEventListener('click', () => file.click());
+      file.addEventListener('change', () => replacePrimaryImage(file.files));
+      head.append(file, btn);
+    } else {
+      head.append(el('span', 'muted', '批次已关闭，定妆图不可再换。'));
+    }
+    box.append(head);
+    const strip = el('div', 'batch-produce-image-strip');
+    if (urls.length) {
+      const link = el('a', 'batch-produce-image');
+      link.href = urls[0]; link.target = '_blank'; link.rel = 'noopener';
+      const img = el('img'); img.src = urls[0]; img.alt = names[0] || '定妆图'; img.loading = 'lazy';
+      link.append(img, el('span', 'slot-badge is-primary', '定妆'));
+      strip.append(link);
+    } else {
+      strip.append(el('span', 'muted', '还没有定妆图'));
+    }
+    if (changes.length) {
+      const log = el('details', 'batch-image-changes');
+      log.append(el('summary', null, `定妆图更换记录（${changes.length} 次）`));
+      const list = el('ul');
+      changes.slice().reverse().forEach(change => {
+        const when = change.at ? new Date(num(change.at) * 1000).toLocaleString() : '';
+        list.append(el('li', null, `${when} · ${txt(change.by) || '—'} 更换（此前已生产 ${num(change.runs_before)} 轮）`));
+      });
+      log.append(list);
+      strip.append(log);
+    }
+    if (b.imageError) strip.append(el('p', 'error', b.imageError));
+    box.append(strip);
+  }
+
+  async function replacePrimaryImage(files) {
+    if (b.imageBusy || b.busy || !files || !files.length || !b.current || !b.current.id) return;
+    const slots = [];
+    const result = Slots.appendFiles(slots, files, { replaceIndex: 1 });
+    if (result.errors.length) { b.imageError = result.errors.join(' '); renderProduceImages(b.current); return; }
+    if (!slots.length) return;
+    b.imageBusy = true; b.busy = true; b.imageError = '';
+    renderProduceImages(b.current);
+    try {
+      const upload = await Slots.uploadImages(slots, { concurrency: 1 });
+      if (!upload.ok) throw new Error(`定妆图上传失败：${upload.failures[0].message}`);
+      const data = await api(`/api/batches/${encodeURIComponent(txt(b.current.id))}/images`, {
+        method: 'POST',
+        body: JSON.stringify({ op: 'replace', upload_id: upload.uploadIds[0] }),
+      });
+      b.current = data.batch;
+      toast(data.changed ? '定妆图已更换，只影响之后的生产，记录已保存。' : '与当前定妆图相同，未做修改。');
+    } catch (err) {
+      b.imageError = err.message;
+      toast(err.message);
+    } finally {
+      Slots.resetSlots(slots);
+      b.imageBusy = false; b.busy = false;
+      await loadBatchDetail(true);
+    }
   }
 
   /* ---------- 自定条数（档位之外的可变粒度：7、13、33 都行） ----------
@@ -2671,6 +2807,10 @@
         batchNo: txt(data.batch_no),
         // 轮次：一个批次按 N 条一批生产了几次（账户/日期/未分组组没有，后端给空数组）。
         runs: Array.isArray(data.runs) ? data.runs : [],
+        // 定妆图与更换记录：批次组才下发，展开时直接显示，不用再请求批次详情。
+        imageChanges: Array.isArray(data.image_changes) ? data.image_changes : [],
+        imageUrls: Array.isArray(data.image_urls) ? data.image_urls : [],
+        imageNames: Array.isArray(data.image_names) ? data.image_names : [],
       });
       if (body) renderGroupBody(key, body);
     } catch (err) {
@@ -2693,9 +2833,8 @@
   function runStrip(runs) {
     const strip = el('div', 'history-runs');
     strip.append(el('b', 'history-runs-title', `本批次共 ${runs.length} 批生产`));
-    for (const run of runs) {
-      const line = el('div', 'history-run');
-      const head = el('div', 'history-run-head');
+    runs.forEach((run, index) => {
+      const line = el('div', 'history-run');      const head = el('div', 'history-run-head');
       head.append(el('b', null, `第 ${num(run.no)} 批`));
       const meta = [`${num(run.count)} 条`];
       if (num(run.success)) meta.push(`成功 ${num(run.success)}`);
@@ -2705,6 +2844,13 @@
       if (run.prompt_changed) {
         const badge = el('span', 'history-run-badge', '提示词已改');
         badge.title = '这一批用的提示词与上一批不同：同批次里的视频可能不是同一段提示词生成的';
+        head.append(badge);
+      }
+      // 这一轮用的定妆图与上一轮不同：历史里必须能一眼看出是哪一轮换的。
+      const previousImage = index > 0 ? txt(runs[index - 1].image_upload_id) : '';
+      if (txt(run.image_upload_id) && txt(run.image_upload_id) !== previousImage) {
+        const badge = el('span', 'history-run-badge', '定妆图已换');
+        badge.title = `这一批用的定妆图：${txt(run.image_name) || '（未命名）'}`;
         head.append(badge);
       }
       line.append(head);
@@ -2722,9 +2868,40 @@
         line.append(el('small', 'muted', '这轮任务已不存在，提示词无法还原'));
       }
       strip.append(line);
-    }
+    });
     return strip;
   }
+  /* 批次组的定妆图与更换记录：展开历史组就能看到「这批复用了哪张图、中途换过几次」，
+     与任务详情里的 image_changes 同源（都来自 batch.image_changes）。 */
+  function historyImageBlock(detail) {
+    const box = el('div', 'history-images');
+    if (detail.imageUrls.length) {
+      const link = el('a', 'history-image');
+      link.href = detail.imageUrls[0]; link.target = '_blank'; link.rel = 'noopener';
+      const img = el('img');
+      img.src = detail.imageUrls[0];
+      img.alt = detail.imageNames[0] || '定妆图';
+      img.loading = 'lazy';
+      link.append(img, el('span', 'slot-badge is-primary', '定妆'));
+      box.append(link);
+      box.append(el('div', 'history-images-info',
+        `当前定妆图${detail.imageNames[0] ? ` · ${detail.imageNames[0]}` : ''}`));
+    }
+    if (detail.imageChanges.length) {
+      const log = el('details', 'history-image-changes');
+      log.append(el('summary', null, `定妆图更换记录（${detail.imageChanges.length} 次）`));
+      const list = el('ul');
+      detail.imageChanges.slice().reverse().forEach(change => {
+        const when = change.at ? fmtTime(change.at) : '';
+        list.append(el('li', null,
+          `${when} · ${txt(change.by) || '—'} 更换（此前已生产 ${num(change.runs_before)} 轮）`));
+      });
+      log.append(list);
+      box.append(log);
+    }
+    return box;
+  }
+
   function renderGroupBody(key, body) {
     const detail = b.groupDetails.get(key);
     body.replaceChildren();
@@ -2733,6 +2910,9 @@
     // 只生产过一轮的批次不必多一条轮次条：那只是把「第 1/1 批」重复一遍。
     if (detail.runs.length > 1 || detail.runs.some(run => run.prompt_changed)) {
       body.append(runStrip(detail.runs));
+    }
+    if (detail.imageUrls.length || detail.imageChanges.length) {
+      body.append(historyImageBlock(detail));
     }
     const list = el('div', 'record-list');
     const fragment = document.createDocumentFragment();
@@ -2996,6 +3176,8 @@
     bindDropZone();
     const dlAll = $('batch-download-all');
     if (dlAll) dlAll.addEventListener('click', () => downloadBatchZip(txt(b.current && b.current.id), dlAll));
+    const archiveDl = $('batch-archive-download');
+    if (archiveDl) archiveDl.addEventListener('click', () => downloadBatchArchive(txt(b.current && b.current.id), archiveDl));
     // 追加细节图：锁定之后仍可用（只影响之后的生产）
     $('batch-slot-add').addEventListener('click', () => { $('batch-slot-file').value = ''; $('batch-slot-file').click(); });
     $('batch-slot-file').addEventListener('change', () => {
@@ -3150,6 +3332,7 @@
     enter,
     onTemplates,
     refreshHistory,
+    refreshPrompts,
     // 小批量试跑页的「历史」入口：并到统一的历史任务页，只留一套列表与口径。
     showSmallHistory: () => {
       setHistoryScope('small', true);

@@ -290,6 +290,14 @@ class JobManager:
         self.dispatcher = threading.Thread(target=self._dispatch, name="web-job-dispatch", daemon=True)
         self.dispatcher.start()
 
+    def set_prompts(self, prompts: dict[str, str]) -> None:
+        """管理页改完提示词库后热更新：建任务校验读的就是这份映射。
+
+        整体替换而不是原地 update，避免请求线程读到写了一半的字典。
+        """
+        with self.lock:
+            self.prompts = dict(prompts)
+
     def _cos_available(self) -> bool:
         """多图预算闸用：启用 COS 时图片走短签名 URL，不受 Base64 总量限制。"""
         # getattr 兜底：单测/诊断脚本里的 settings 是 SimpleNamespace，没有 config 字段。

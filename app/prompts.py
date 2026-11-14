@@ -10,9 +10,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# 与网页建任务/建批次的校验口径保持一致：提示词正文最多 4000 字。
+MAX_PROMPT_CHARS = 4000
+MAX_PROMPT_TITLE = 60
+MAX_PROMPTS = 100
 
 
 class PromptLibraryError(RuntimeError):
@@ -125,3 +133,65 @@ def library_path() -> Path:
         if candidate.exists():
             return candidate
     return candidates[-1]
+
+
+# ---------------------------------------------------------------------------
+# 写入（管理页维护用）
+# ---------------------------------------------------------------------------
+
+def clean_prompt_fields(title: object, body: object) -> tuple[str, str]:
+    """校验并规范化管理页提交的名称/正文；不合法直接抛 PromptLibraryError。"""
+    title = str(title or "").strip()
+    body = str(body or "").strip()
+    if not title:
+        raise PromptLibraryError("模板名称不能为空。")
+    if len(title) > MAX_PROMPT_TITLE:
+        raise PromptLibraryError(f"模板名称最多 {MAX_PROMPT_TITLE} 个字符。")
+    if not body:
+        raise PromptLibraryError("提示词正文不能为空。")
+    if len(body) > MAX_PROMPT_CHARS:
+        raise PromptLibraryError(f"提示词最多 {MAX_PROMPT_CHARS} 个字符。")
+    return title, body
+
+
+def next_prompt_id(prompts: list[Prompt]) -> str:
+    """给新模板分配 pNN 形式的 id；现有库是 p01–p06，保持同一套编号习惯。"""
+    used = {p.id for p in prompts}
+    numbers = [int(match.group(1)) for pid in used
+               if (match := re.fullmatch(r"p(\d+)", pid))]
+    number = max(numbers, default=0) + 1
+    while f"p{number:02d}" in used:
+        number += 1
+    return f"p{number:02d}"
+
+
+def save_library(prompts: list[Prompt], path: str | Path | None = None) -> Path:
+    """原子写回库文件，并把上一版留成 .bak。
+
+    网页是单进程，管理页保存频率很低，不再引入跨进程锁；tmp + os.replace
+    保证任何时刻磁盘上都是一份完整 JSON（写到一半断电也不会留下半截文件）。
+    """
+    target = Path(path) if path else library_path()
+    version = 1
+    if target.exists():
+        try:
+            raw = json.loads(target.read_text(encoding="utf-8-sig"))
+            version = int(raw.get("version") or 1) if isinstance(raw, dict) else 1
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            version = 1
+    payload = {
+        "version": version,
+        "updated": time.strftime("%Y-%m-%d"),
+        "prompts": [prompt.to_dict() for prompt in prompts],
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        if target.exists():
+            shutil.copyfile(target, target.with_name(target.name + ".bak"))
+        os.replace(tmp, target)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    return target

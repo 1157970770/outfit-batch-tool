@@ -54,7 +54,7 @@ python run_web.py
 | 视图 | 能力 |
 | --- | --- |
 | 小批量试跑 | 三列控制台一屏完成：定妆图+细节图 → 场景与参数 → 提示词，单次上限 3 条 |
-| 大批量生产 | 新建批次（批次号/备注/定妆图+细节图）→ 筛选候选 → 锁定清单 → 分多轮「生产 N 条」→ 导出成片 ZIP；锁定后仍可追加/删除细节图 |
+| 大批量生产 | 新建批次（批次号/备注/定妆图+细节图）→ 筛选候选 → 锁定清单 → 分多轮「生产 N 条」→ 导出成片 ZIP；批次款号、提示词与全部参考图自动永久留档，可随时下载档案 ZIP；锁定后仍可追加/删除细节图 |
 | 历史任务 | 按批次号/账户分组查看，重试失败项、下载成片与 CSV 报告 |
 | 标签（所有人） | 给视频打标签 / 批量改标签、**上传新视频**（≤50MB，直传 COS 并立即可用）、**弃用与恢复**（软删除）、标签库与**自定义大类**的新建/改名/合并/删除、整库版本历史与回滚；数据落 `web-data/template_tags.json`，网页与本地打标工具共用 |
 | 管理（仅 admin） | 服务状态、账号列表、重新加载场景、**账户用量**（条数/成功失败/计费秒/预估金额，点账户看逐条明细并导出 CSV） |
@@ -73,7 +73,8 @@ python run_web.py
                                              ├─ settings.py  server/*.json → 配额与上限
                                              ├─ templates.py 标签清单 × 云端 manifest
                                              ├─ jobs.py      队列调度 + 事件 + 用量
-                                             └─ batches.py   批次生命周期
+                                             ├─ batches.py   批次生命周期
+                                             └─ batch_archive.py 批次永久档案（款号/提示词/参考图）
                                                     │
                                                     ▼
                                           app/core.py  BatchRunner（线程池）
@@ -106,14 +107,14 @@ app/web/static/imagegen.js ──▶ app/imggen/manager.py（落盘 + 队列 + �
 | 路径 | 说明 |
 | --- | --- |
 | `run_web.py` | 网页版入口 |
-| `app/web/` | 网页服务：`server.py` 路由、`jobs.py`、`batches.py`、`settings.py`、`templates.py`、`auth.py`、`static/` 前端 |
+| `app/web/` | 网页服务：`server.py` 路由、`jobs.py`、`batches.py`、`batch_archive.py`、`settings.py`、`templates.py`、`auth.py`、`static/` 前端 |
 | `app/core.py` | 引擎：线程池、提交/轮询/下载、事件回调 |
 | `app/wan_api.py` | 协议适配（DashScope 默认 / RunningHub），限流与在飞 |
 | `app/config.py` | 配置映射：`server/config.json` → 内部 `WAN_*` |
 | `app/storage.py` / `app/media.py` | COS/本地存储、图片与视频预检 |
 | `app/imggen/` | 生图 tab：`manager.py` 队列与落盘、`models.py` 型号与校验、`processing.py` 尺寸与裁切、`api.py` urllib 客户端、`decoder.py`、`errors.py` |
 | `server/` | 部署配置（`web.json` 账号、`config.json` Key/模型/COS、`imagegen.json` 生图 Key） |
-| `web-data/` | 运行数据：任务、批次、上传、成片、日志（不入库） |
+| `web-data/` | 运行数据：任务、批次、上传、成片、日志；`archive/` 是批次永久档案（不入库） |
 | `tests/` | 离线测试；`run_all.py` 一键跑全部 |
 | `docs/` | 文档，索引见 [docs/README.md](docs/README.md) |
 | `scripts/`、`tools/` | 构建、COS 归档、清单生成等辅助脚本 |
@@ -124,6 +125,7 @@ app/web/static/imagegen.js ──▶ app/imggen/manager.py（落盘 + 队列 + �
 python tests/run_all.py            # 全部离线套件
 python tests/test_web.py           # 网页端端到端
 python tests/test_batches.py       # 批次全流程 + 额度断言
+python tests/test_batch_archive.py # 批次永久档案：落档/图片增删/提示词历史/ZIP/删除墓碑
 python tests/test_imagegen.py      # 生图 tab：选项/校验/取图/权限/重启恢复
 python demo.py --count 5           # 一键演练整条链路（假百炼）
 ```

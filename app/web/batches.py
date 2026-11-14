@@ -17,8 +17,10 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -30,6 +32,7 @@ from pathlib import Path
 from app.core import (
     DURATION_MODE_ADAPTIVE, DURATION_MODE_FIXED, DURATION_MODES, resolve_output_duration,
 )
+from app.web.batch_archive import BatchArchive, BatchArchiveError
 from app.web.jobs import (
     MAX_IMAGE_SLOTS, UPLOAD_PATH_RE, _FAILED_RECORD_STATES, _redact,
     clean_style_no, clean_tags, duration_ok, image_slots, needs_recheck, record_uid,
@@ -40,6 +43,7 @@ from app.web.templates import TemplateError
 
 BATCH_STATES = ("draft", "locked", "closed")
 ITEM_STATES = ("pending", "producing", "done", "failed")
+logger = logging.getLogger(__name__)
 # v3：单次生产的快捷档位 5 / 10 / 20 / 50 / 100；接口同时接受 PRODUCE_MIN–上限的
 # **任意整数**（7、13、33 这类非 5 倍数同样放行），前端"自定条数"就靠这条。
 # 唯一例外：清单剩余不足 PRODUCE_MIN 时，允许一次提交「全部剩余」（否则零头永远跑不掉）。
@@ -168,6 +172,8 @@ class BatchManager:
         self.warnings: list[str] = []
         # 款号-模板记账本：批次生产提交时记账，供前端「同款号不重复用模板」标记。
         self.usage = StyleUsageLedger(settings.data_dir)
+        # 批次永久档案：款号 / 提示词 / 全部参考图的本机独立副本，删批次也保留。
+        self.archive = BatchArchive(settings.data_dir)
         self._load()
 
     # ------------------------------------------------------------------ 存储
@@ -179,6 +185,41 @@ class BatchManager:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(batch, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
+
+    # ------------------------------------------------------------------ 永久档案
+    @staticmethod
+    def _user_name(user) -> str:
+        if isinstance(user, dict):
+            return str(user.get("username") or "")
+        return str(user or "")
+
+    def _archive_warn(self, batch: dict, event: str, exc: Exception) -> None:
+        message = f"批次 {batch.get('id')} 档案写入失败（{event}）：{exc}"
+        logger.warning(message)
+        self.warnings.append(message)
+        if len(self.warnings) > 50:
+            self.warnings[:] = self.warnings[-50:]
+
+    def _archive_quiet(self, batch: dict, event: str, user="", *,
+                       copy_images: bool = True) -> bool:
+        """同步一次批次档案；失败只告警，绝不影响建批次 / 生产主流程。"""
+        try:
+            self.archive.ensure(batch, event=event, user=self._user_name(user),
+                                copy_images=copy_images)
+            return True
+        except Exception as exc:  # 磁盘满、权限、单文件被占用都不该拖垮主流程
+            self._archive_warn(batch, event, exc)
+            return False
+
+    def _archive_run_quiet(self, batch: dict, user, job_id: str,
+                           images: list, template_ids: list) -> None:
+        try:
+            self.archive.write_run(
+                batch, job_id=job_id, prompt=str(batch.get("prompt") or ""),
+                images=images, template_ids=template_ids,
+            )
+        except Exception as exc:
+            self._archive_warn(batch, "run_snapshot", exc)
 
     def _load(self) -> None:
         """启动时建索引；重复批次号保留首个并告警，坏文件跳过不阻断启动。"""
@@ -654,6 +695,9 @@ class BatchManager:
             slots = self._image_slots(batch)
             data["image_urls"] = [f"/api/uploads/{s['upload_id']}" for s in slots if s.get("upload_id")]
             data["image_names"] = [s["name"] for s in slots]
+            # 定妆图更换记录：只留最近 20 条，历史页/详情页据此展示「谁在什么时候换过」。
+            data["image_changes"] = [dict(change) for change in (batch.get("image_changes") or [])
+                                     if isinstance(change, dict)][-20:]
             data["runs"] = [dict(run) for run in (batch.get("runs") or [])]
             # 还有超时/下载失败记录的 job：前端据此显示「复查补下载」按钮，
             # 复查成功时批次条目会被 _heal_items 自动改回已完成。
@@ -799,6 +843,7 @@ class BatchManager:
             self.batches[batch_id] = batch
             self.by_no[_norm_no(batch_no)] = batch_id
             self._save(batch)
+            self._archive_quiet(batch, "batch_created", user)
             return self.public(batch)
 
     # ------------------------------------------------------------------ #2 绑定定妆图
@@ -815,6 +860,7 @@ class BatchManager:
             self._sync_image_aliases(batch)
             batch["updated_at"] = time.time()
             self._save(batch)
+            self._archive_quiet(batch, "images_set", user)
             return {"image_name": batch["image_name"], "batch": self.public(batch)}
 
     def add_images(self, batch_id: str, user: dict, data: dict) -> dict:
@@ -837,6 +883,7 @@ class BatchManager:
             self._sync_image_aliases(batch)
             batch["updated_at"] = time.time()
             self._save(batch)
+            self._archive_quiet(batch, "image_added", user)
             return {"batch": self.public(batch), "slot_count": len(batch["images"])}
 
     def remove_images(self, batch_id: str, user: dict, data: dict) -> dict:
@@ -865,7 +912,52 @@ class BatchManager:
             self._sync_image_aliases(batch)
             batch["updated_at"] = time.time()
             self._save(batch)
+            self._archive_quiet(batch, "image_removed", user)
             return {"batch": self.public(batch), "slot_count": len(slots)}
+
+    def replace_primary_image(self, batch_id: str, user: dict, data: dict) -> dict:
+        """锁定后更换定妆图（槽位 1）：只影响之后的生产，并留下可追溯的更换记录。
+
+        为什么允许：批次跑了几轮才发现定妆图选错 / 要换角度时，整批重开成本太高；
+        每轮生产在 `_start_run` 里已经把当时的 images 快照进 job，换图不会改到已生成的视频。
+        为什么留记录：同一批次前后用了不同定妆图，历史里必须能看出是哪一轮换的、谁换的。
+        """
+        upload_id = str(data.get("upload_id") or "").strip()
+        if not re.fullmatch(r"[a-f0-9]{32}", upload_id):
+            raise BatchError("新定妆图已失效，请重新上传。", 404)
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            self._reconcile(batch)
+            if batch.get("state") == "closed":
+                raise BatchError("批次已关闭，不能再换定妆图。", 409)
+            slots = self._image_slots(batch)
+            if not slots:
+                raise BatchError("这个批次还没有定妆图，请先追加图片。", 409)
+            old = slots[0]
+            if str(old.get("upload_id") or "") == upload_id:
+                return {"batch": self.public(batch), "changed": False}
+            meta = self.resolve_upload(upload_id, str(batch.get("owner") or user["username"]))
+            if not meta:
+                raise BatchError("新定妆图已失效，请重新上传。", 404)
+            slots[0] = {"upload_id": upload_id,
+                        "name": str(meta.get("name") or ""),
+                        "path": str(meta.get("path") or "")}
+            batch["images"] = slots
+            self._sync_image_aliases(batch)
+            change = {
+                "at": time.time(),
+                "by": str(user.get("username") or ""),
+                "from_upload_id": str(old.get("upload_id") or ""),
+                "from_name": str(old.get("name") or ""),
+                "to_upload_id": upload_id,
+                "to_name": str(meta.get("name") or ""),
+                "runs_before": len(batch.get("runs") or []),
+            }
+            batch.setdefault("image_changes", []).append(change)
+            batch["updated_at"] = time.time()
+            self._save(batch)
+            self._archive_quiet(batch, "primary_image_replaced", user)
+            return {"batch": self.public(batch), "changed": True, "change": change}
 
     # ------------------------------------------------------------------ #3 候选清单
     def candidates(self, batch_id: str, user: dict, data: dict) -> dict:
@@ -1050,6 +1142,8 @@ class BatchManager:
             batch["updated_at"] = batch["locked_at"]
             self._refresh(batch)
             self._save(batch)
+            # 锁定 = 清单与款号此刻定型，落一次档案（图片已在加图时复制过，这里补齐清单与版本）。
+            self._archive_quiet(batch, "batch_locked", user)
             return self.public(batch)
 
     # ------------------------------------------------------------------ 生产（#5 / #9 共用）
@@ -1117,6 +1211,7 @@ class BatchManager:
             self._refresh(batch)
             batch["updated_at"] = time.time()
             self._save(batch)
+            self._archive_quiet(batch, "run_blocked", user)
             raise BatchError("待生产条目的模板都已不可用，请检查模板清单。", 503)
         resolution = str(batch.get("resolution") or "720P")
         # 批次冻结的输出秒数原样下发（7 / -1 / 2–30）；老批次存了非法值也兜回默认，不让 produce 卡死。
@@ -1182,6 +1277,9 @@ class BatchManager:
         batch.setdefault("runs", []).append({
             "job_id": job_id, "count": len(taken), "started_at": time.time(),
             "finished_at": None, "success": 0, "failed": 0, "blocked": len(blocked),
+            # 这一轮用的定妆图快照：之后换图时，历史里还能看出「这一轮是哪张图跑的」。
+            "image_upload_id": str(slots[0].get("upload_id") or ""),
+            "image_name": str(slots[0].get("name") or ""),
         })
         batch["updated_at"] = time.time()
         batch.pop("pending_run", None)
@@ -1193,6 +1291,11 @@ class BatchManager:
             raise BatchError(
                 f"任务已创建（{job_id}），但批次状态写入失败：{exc}；"
                 "请刷新后查看，不要重复生产。", 503) from None
+        # 档案快照：这一轮用的提示词与图片副本。留档失败只告警，不影响已经建好的任务。
+        if self._archive_quiet(batch, "run_started", user):
+            self._archive_run_quiet(
+                batch, user, job_id, slots,
+                [str(item.get("template_id")) for item, _live_item in taken])
         return {
             "job": job,
             "batch": self.public(batch),
@@ -1248,6 +1351,7 @@ class BatchManager:
             batch["closed_at"] = time.time()
             batch["updated_at"] = batch["closed_at"]
             self._save(batch)
+            self._archive_quiet(batch, "batch_closed", user)
             return self.public(batch)
 
     # ------------------------------------------------------------------ #14 修改提示词（锁定后仍可改）
@@ -1275,6 +1379,7 @@ class BatchManager:
             batch["prompt"] = prompt
             batch["updated_at"] = time.time()
             self._save(batch)
+            self._archive_quiet(batch, "prompt_updated", user)
             return self.public(batch)
 
     # ------------------------------------------------------------------ #12 删除
@@ -1296,6 +1401,14 @@ class BatchManager:
             if batch.get("active_job_id"):
                 raise BatchError("批次正在生产中，请等待生产结束或取消任务后再删除", 409)
             target = batch["id"]
+            # 先确保永久档案完整落盘，再删批次 JSON：档案写失败就拒绝删除（批次原样保留），
+            # 避免「批次删了、图也被 uploads 清理了」的不可恢复丢失。档案本身永远不随删除清理。
+            try:
+                self.archive.ensure(batch, event="batch_deleted",
+                                    user=self._user_name(user))
+                self.archive.mark_deleted(batch, user=self._user_name(user))
+            except Exception as exc:
+                raise BatchError(f"批次档案写入失败，已取消删除：{exc}", 500) from None
             try:
                 # 先删文件再摘索引：落盘失败就整体失败（500），不留「内存没了、磁盘还在」的幽灵。
                 self._path(target).unlink(missing_ok=True)
@@ -1417,6 +1530,42 @@ class BatchManager:
                 pass
             raise BatchError(f"打包失败：{exc}", 500) from None
         return zip_path
+
+    # ------------------------------------------------------------------ 永久档案出口
+    def archive_info(self, batch_id: str, user: dict) -> dict:
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            info = self.archive.info(batch)
+            # 老批次升级后第一次打开时档案还没生成；此时按批次里已绑定的图报数，
+            # 让前端仍能点「下载档案」——真正的复制在 archive_zip() 里完成。
+            if not info.get("ready"):
+                info["image_count"] = len(self._image_slots(batch))
+            return info
+
+    def archive_zip(self, batch_id: str, user: dict, probe: bool = False) -> dict:
+        """生成批次永久档案 ZIP；probe=True 只回报数量，不打包。"""
+        with self.mutex:
+            batch = self._authorized(batch_id, user)
+            self._reconcile(batch)
+            if probe:
+                info = self.archive.info(batch)
+                if not info.get("ready"):
+                    info["image_count"] = len(self._image_slots(batch))
+                return info
+            try:
+                self.archive.ensure(batch, event="zip_export",
+                                    user=self._user_name(user))
+            except (BatchArchiveError, OSError) as exc:
+                raise BatchError(f"档案写入失败：{exc}", 500) from None
+            snapshot = copy.deepcopy(batch)
+            batch_no = str(batch.get("batch_no") or "")
+        dest = (self.settings.data_dir / "tmp"
+                / f"batch-archive-{uuid.uuid4().hex[:10]}.zip")
+        try:
+            path, count = self.archive.build_zip(snapshot, dest, ensure=False)
+        except (BatchArchiveError, OSError) as exc:
+            raise BatchError(f"档案打包失败：{exc}", 500) from None
+        return {"path": path, "count": count, "batch_no": batch_no}
 
     # ------------------------------------------------------------------ #11 历史分组
     def history_groups(self, user: dict, all_users: bool = False, owner: str = "",
@@ -1573,6 +1722,9 @@ class BatchManager:
                 "failed": _as_int(run.get("failed"), 0) or 0,
                 "prompt": prompt,
                 "prompt_changed": bool(prompt) and previous is not None and prompt != previous,
+                # 这一轮用的定妆图（老批次没有快照 → 空，前端回退到批次当前图）。
+                "image_upload_id": str(run.get("image_upload_id") or ""),
+                "image_name": str(run.get("image_name") or ""),
             })
             if prompt:
                 previous = prompt
@@ -1757,7 +1909,22 @@ class BatchManager:
                         "verify_warn": "",
                     })
             total = len(rows)
+            # 批次组把定妆图与更换记录一起带回：历史页展开时能直接看到「这批复用了哪张图、
+            # 中途换过几次」，不用再单独请求批次详情。
+            image_changes: list[dict] = []
+            image_urls: list[str] = []
+            image_names: list[str] = []
+            if isinstance(batch, dict):
+                image_changes = [dict(change) for change in (batch.get("image_changes") or [])
+                                 if isinstance(change, dict)][-20:]
+                for slot in self._image_slots(batch):
+                    if slot.get("upload_id"):
+                        image_urls.append(f"/api/uploads/{slot['upload_id']}")
+                        image_names.append(str(slot.get("name") or ""))
             return {"key": key, "batch_no": batch_no,
                     "items": rows[offset:offset + limit],
                     "runs": runs,
+                    "image_changes": image_changes,
+                    "image_urls": image_urls,
+                    "image_names": image_names,
                     "total": total, "offset": offset, "limit": limit}

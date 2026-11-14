@@ -122,6 +122,28 @@
     document.title = on ? '换装视频工作台（开发版）' : '换装视频工作台';
   }
 
+  // 提示词模板下拉：bootstrap 与管理页保存后共用，避免两处各写一遍。
+  function applyPrompts(prompts) {
+    state.prompts = Array.isArray(prompts) ? prompts : [];
+    const promptSelect = $('prompt-select');
+    const previous = promptSelect.value;
+    promptSelect.replaceChildren();
+    for (const p of state.prompts) {
+      const o = document.createElement('option');
+      o.value = p.id; o.textContent = p.title; o.dataset.body = p.body || '';
+      promptSelect.append(o);
+    }
+    if (previous && [...promptSelect.options].some(o => o.value === previous)) promptSelect.value = previous;
+    $('prompt-body').value = promptSelect.selectedOptions[0]?.dataset.body || '';
+    updatePromptCount();
+    if (window.BatchUI && window.BatchUI.refreshPrompts) window.BatchUI.refreshPrompts();
+  }
+
+  async function refreshPrompts() {
+    const data = await api('/api/bootstrap');
+    applyPrompts(data.prompts || []);
+  }
+
   async function bootstrap() {
     const data = await api('/api/bootstrap'); state.user = data.user; state.service = data.service; state.prompts = data.prompts || []; showApp();
     // 图片槽位上限以后端为准（官方 reference_image 上限 10），前端不硬编码。
@@ -139,10 +161,7 @@
     if (data.service.templates_error) { $('notice').textContent = '视频场景暂时无法加载，请联系管理员。'; $('notice').classList.remove('hidden'); }
     else if (data.service.templates_count && !ready) { $('notice').textContent = `${data.service.templates_count} 个场景已标注标签，但都还没上传到云端模板库：现在可以按标签筛选和预览，生成功能要等上传完成。`; $('notice').classList.remove('hidden'); }
     $('count-select').querySelectorAll('option').forEach(o => { if (Number(o.value) > data.service.max_items) o.disabled = true; });
-    const promptSelect = $('prompt-select'); promptSelect.replaceChildren();
-    for (const p of state.prompts) { const o = document.createElement('option'); o.value = p.id; o.textContent = p.title; o.dataset.body = p.body || ''; promptSelect.append(o); }
-    $('prompt-body').value = promptSelect.selectedOptions[0]?.dataset.body || '';
-    updatePromptCount();
+    applyPrompts(state.prompts);
     await loadTemplates(); updateSummary(); await refreshJobs();
     clearInterval(state.timer); state.timer = setInterval(() => { if (!document.hidden) refreshJobs(); }, 3500);
   }
@@ -592,7 +611,7 @@
     const root = $('job-detail'); const wasHidden = root.classList.contains('hidden'); root.classList.remove('hidden'); root.replaceChildren();
     // 窄屏没有右侧栏：详情会落到列表下面，打开时主动滚过去；宽屏右侧直接可见，不打扰。
     if (wasHidden && window.matchMedia('(max-width:1179px)').matches) root.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = [job.batch_id ? `批次号 ${job.batch_id}` : '', job.message || statusText[job.status]].filter(Boolean).join(' · '); left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status;
+    const head = document.createElement('div'); head.className = 'detail-head'; const left = document.createElement('div'); const h = document.createElement('h3'); h.textContent = `任务 ${job.id}`; const p = document.createElement('p'); p.className = 'muted'; p.textContent = [job.batch_no ? `批次 ${job.batch_no}` : (job.batch_id ? `批次 ${job.batch_id}` : ''), job.message || statusText[job.status]].filter(Boolean).join(' · '); left.append(h, p); const badge = document.createElement('span'); badge.className = `status ${job.status}`; badge.textContent = statusText[job.status] || job.status;
     const side = document.createElement('div'); side.className = 'job-actions';
     const close = document.createElement('button'); close.className = 'quiet btn-sm'; close.type = 'button'; close.textContent = '关闭';
     close.addEventListener('click', () => { root.classList.add('hidden'); state.selectedJob = null; state.detailStatus = null; });
@@ -636,10 +655,34 @@
         const badge = document.createElement('span');
         badge.className = `slot-badge${index === 0 ? ' is-primary' : ''}`;
         badge.textContent = index === 0 ? '定妆' : `图${index + 1}`;
+        // 老任务的 uploads 可能已被清理：给一块「图片已失效」占位，不要留破图。
+        img.addEventListener('error', () => {
+          const fallback = document.createElement('span');
+          fallback.className = 'detail-slot-fallback';
+          fallback.textContent = '图片已失效';
+          link.replaceChildren(fallback, badge);
+        });
         link.append(img, badge);
         strip.append(link);
       });
       root.append(strip);
+    }
+    // 批次中途换过定妆图时，详情里要能看出「什么时候、谁换的」，与历史页同源。
+    const changes = Array.isArray(job.image_changes) ? job.image_changes : [];
+    if (changes.length) {
+      const log = document.createElement('details');
+      log.className = 'detail-image-changes';
+      const sum = document.createElement('summary');
+      sum.textContent = `定妆图更换记录（${changes.length} 次）`;
+      const ul = document.createElement('ul');
+      changes.slice().reverse().forEach(change => {
+        const li = document.createElement('li');
+        const when = change.at ? new Date(change.at * 1000).toLocaleString() : '';
+        li.textContent = `${when} · ${change.by || '—'} 更换（此前已生产 ${change.runs_before || 0} 轮）`;
+        ul.append(li);
+      });
+      log.append(sum, ul);
+      root.append(log);
     }
     if (job.status === 'succeeded' || job.status === 'partial') { const dl = document.createElement('a'); dl.className = 'link-btn'; dl.href = job.download_all; dl.textContent = '下载已完成视频和报告（ZIP）'; root.append(dl); const first = (job.records || []).find(r => r.status === 'success' && r.download_url); if (first) { const player = document.createElement('video'); player.controls = true; player.preload = 'metadata'; player.className = 'preview-video'; player.src = first.download_url; root.append(player); } }
     // 等待超时 / 下载失败（P0）：先按原 taskId 复查云端——云端大多已出片并计费，
@@ -667,7 +710,7 @@
     const failedCount = (job.records || []).filter(r => ['failed','invalid','expired','canceled','unknown','timeout','skipped'].includes(r.status)).length;
     if (failedCount && ['partial','failed','canceled'].includes(job.status)) { const retry = document.createElement('button'); retry.className = 'quiet'; retry.textContent = `只重试失败的 ${failedCount} 条`; retry.title = dlCount ? `其中 ${dlCount} 条是「云端已出片、只是下载失败」：重试会二次计费，请先「复查补下载」` : timeoutCount ? '其中含等待超时的条目：建议先「复查补下载」，直接重试会二次计费' : ''; retry.addEventListener('click', async () => { const warn = timeoutCount ? `\n\n注意：其中 ${timeoutCount} 条是等待超时/下载失败——云端可能已出片并计费，直接重试会二次提交。\n建议先点「复查补下载」。` : ''; const skip = dlCount ? `\n其中 ${dlCount} 条「云端已出片、只是下载失败」会被跳过。` : ''; if (!confirm(`只重试失败的 ${failedCount} 条？${warn}${skip}`)) return; try { const data = await api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: '{}' }); const skipped = Number(data.skipped_download_failed) || 0; toast(skipped ? `已重新排队；${skipped} 条「云端已出片、只是下载失败」已跳过（请点「复查补下载」）。` : '失败项已重新排队。'); await refreshJobs(data.job.id); } catch (err) { toast(err.message); } }); root.append(retry); }
     const list = document.createElement('div'); list.className = 'record-list';
-    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); if (rec.record_id) { const uid = document.createElement('small'); uid.className = 'record-id'; uid.textContent = `视频 ID ${rec.record_id}`; uid.title = '这条视频的唯一 ID，跨任务、跨批次不会重复'; info.append(uid); } const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); });
+    (job.records || []).forEach(rec => { const row = document.createElement('div'); row.className = 'record'; const id = document.createElement('b'); id.textContent = `场景 ${rec.id}`; const info = document.createElement('div'); const stateLine = document.createElement('span'); stateLine.textContent = statusText[rec.status] || rec.status; info.append(stateLine); if (rec.template_name) { const nm = document.createElement('small'); nm.className = 'record-name'; nm.textContent = rec.template_name; info.append(nm); } if (rec.record_id) { const uid = document.createElement('small'); uid.className = 'record-id'; uid.textContent = `视频 ID ${rec.record_id}`; uid.title = '这条视频的唯一 ID，跨任务、跨批次不会重复'; info.append(uid); } const verifyWarn = rec.verify && typeof rec.verify === 'object' ? String(rec.verify.warn || '') : ''; const small = document.createElement('small'); small.textContent = [rec.error || rec.archive_warning, verifyWarn, rec.seconds ? `用时 ${rec.seconds} 秒` : ''].filter(Boolean).join(' · '); info.append(small); row.append(id, info); if (rec.download_url) { const a = document.createElement('a'); a.className = 'link-btn'; a.href = rec.download_url; a.textContent = '下载'; row.append(a); } else row.append(document.createElement('span')); list.append(row); });
     // 排队中的任务 records 还是空的：按提交时的模板清单补「等待中」行。否则详情面板里
     // 这个任务一条都没有、只剩一句「任务日志将在这里显示」，看着像任务丢了。
     if (!(job.records || []).length && job.status === 'queued') {
@@ -1015,11 +1058,95 @@
     more.classList.toggle('hidden', state.usageRows.length >= state.usageTotal);
   }
 
+  /* ---------- 管理端 · 提示词模板库 ---------- */
+  state.promptAdmin = [];
+  state.promptEditId = '';
+
+  async function loadAdminPrompts() {
+    const root = $('prompt-admin-list');
+    if (!root) return;
+    try {
+      const data = await api('/api/admin/prompts');
+      state.promptAdmin = data.prompts || [];
+      renderAdminPrompts(data);
+    } catch (err) { root.textContent = err.message; }
+  }
+
+  function renderAdminPrompts(data) {
+    const root = $('prompt-admin-list');
+    root.replaceChildren();
+    if (!state.promptAdmin.length) {
+      const empty = document.createElement('div'); empty.className = 'empty';
+      empty.textContent = '还没有提示词模板。';
+      root.append(empty); return;
+    }
+    state.promptAdmin.forEach(prompt => {
+      const row = document.createElement('div'); row.className = 'prompt-admin-row';
+      const info = document.createElement('div');
+      const title = document.createElement('b'); title.textContent = prompt.title;
+      const meta = document.createElement('small'); meta.className = 'muted';
+      meta.textContent = `${prompt.id} · ${prompt.chars} 字${prompt.selectable ? '' : ' · 不在视频页展示'}`;
+      const body = document.createElement('p'); body.className = 'muted';
+      body.textContent = prompt.body.length > 90 ? `${prompt.body.slice(0, 90)}…` : prompt.body;
+      info.append(title, meta, body);
+      const edit = document.createElement('button'); edit.className = 'quiet btn-sm'; edit.type = 'button';
+      edit.textContent = '修改'; edit.addEventListener('click', () => openPromptForm(prompt));
+      row.append(info, edit); root.append(row);
+    });
+  }
+
+  function openPromptForm(prompt) {
+    state.promptEditId = prompt ? prompt.id : '';
+    $('prompt-admin-form').classList.remove('hidden');
+    $('prompt-admin-title').textContent = prompt ? '修改模板' : '新增模板';
+    $('prompt-admin-id').textContent = prompt ? prompt.id : '';
+    $('prompt-admin-name').value = prompt ? prompt.title : '';
+    $('prompt-admin-body').value = prompt ? prompt.body : '';
+    updatePromptAdminCount();
+    $('prompt-admin-name').focus();
+  }
+
+  function closePromptForm() {
+    state.promptEditId = '';
+    $('prompt-admin-form').classList.add('hidden');
+  }
+
+  function updatePromptAdminCount() {
+    const body = $('prompt-admin-body').value || '';
+    $('prompt-admin-count').textContent = `${body.length} / 4000`;
+  }
+
+  $('prompt-new-btn').addEventListener('click', () => openPromptForm(null));
+  $('prompt-admin-cancel').addEventListener('click', closePromptForm);
+  $('prompt-admin-body').addEventListener('input', updatePromptAdminCount);
+  $('prompt-admin-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const name = $('prompt-admin-name').value.trim();
+    const body = $('prompt-admin-body').value.trim();
+    if (!name) return toast('请填写模板名称。');
+    if (!body) return toast('请填写提示词正文。');
+    const id = state.promptEditId;
+    const url = id ? `/api/admin/prompts/${encodeURIComponent(id)}` : '/api/admin/prompts';
+    const btn = e.currentTarget.querySelector('button[type=submit]');
+    btn.disabled = true; btn.textContent = '保存中…';
+    try {
+      const data = await api(url, { method: 'POST', body: JSON.stringify({ title: name, body }) });
+      toast(id ? '模板已更新。' : '模板已新增。');
+      closePromptForm();
+      state.promptAdmin = data.prompts || [];
+      renderAdminPrompts(data);
+      // 下拉框立即用上新模板（已提交的任务仍用它们各自的提示词快照）。
+      await refreshPrompts();
+    } catch (err) { toast(err.message); }
+    finally { btn.disabled = false; btn.textContent = '保存'; }
+  });
+
   async function refreshAdmin() {
     if (state.user?.role !== 'admin') return;
     try {
       const data = await api('/api/admin/status'); const root = $('admin-status'); root.replaceChildren();
       [[data.templates, '可用视频场景'], [data.queued, '排队任务'], [data.active, '正在运行'], [`${data.free_gb} GB`, '主机剩余空间']].forEach(([value,label]) => { const box = document.createElement('div'); box.className = 'stat'; const b = document.createElement('b'); b.textContent = value; const s = document.createElement('small'); s.textContent = label; box.append(b,s); root.append(box); });
+      await loadAdminPrompts();
       const userData = await api('/api/admin/users'); const usersRoot = $('users-list'); usersRoot.replaceChildren();
       (userData.users || []).forEach(account => { const row = document.createElement('div'); row.className = 'record'; const name = document.createElement('b'); name.textContent = account.username;
         const quota = Number(account.quota) || 0; const used = Number(account.used) || 0;
@@ -1160,6 +1287,8 @@
     collectTagSlots, fillTagSlots, tagSummaryText, TAG_LABELS,
     // 标签页改完标签/弃用后要刷新小批量页的模板下拉，否则仍能选到已弃用的场景
     reloadTemplates: loadTemplates,
+    // 管理页保存提示词后，小批量/大批量两处下拉都要立刻同步
+    refreshPrompts, applyPrompts,
     // 大批量页复用同一套 10 槽位组件与并发上传
     imageSlots: window.ImageSlots };
   // Esc：先关任务详情，再关账户明细，符合"从最上层开始退"的直觉。

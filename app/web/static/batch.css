@@ -274,6 +274,8 @@
 .batch-items-head h3{margin:0;font-size:14px}
 /* 整批下载按钮靠状态筛选左侧，不与 h3 抢空间 */
 .batch-download-all{margin-left:auto;flex:none}
+/* 档案按钮跟在同一组右侧，不再参与 auto margin 的空间分配 */
+.batch-archive-download{flex:none}
 .batch-filter-field{margin:0;flex:none;font-size:12px}
 .batch-filter-field select{min-height:32px}
 
@@ -513,6 +515,30 @@
 .batch-image-bar{display:flex;align-items:center;gap:10px;margin-top:6px}
 .batch-image-bar .image-info{flex:1 1 auto;margin:0;min-width:0}
 .batch-image-bar .slot-pick-btn{margin-left:auto}
+
+/* ---------- 分批生产 · 更换定妆图 ---------- */
+.batch-produce-images{margin:10px 0 4px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.batch-produce-images-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.batch-produce-images-head .muted{font-size:12px}
+.batch-produce-image-strip{display:flex;align-items:flex-start;gap:14px;margin-top:10px;flex-wrap:wrap}
+.batch-produce-image{position:relative;display:block;width:96px;height:96px;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
+.batch-produce-image img{width:100%;height:100%;object-fit:cover;display:block}
+.batch-image-changes{font-size:12px;color:var(--muted)}
+.batch-image-changes summary{cursor:pointer;color:var(--ink)}
+.batch-image-changes ul{margin:6px 0 0;padding-left:18px}
+
+/* ---------- 历史组 · 定妆图与更换记录 ---------- */
+.history-images{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;padding:10px 4px 6px;border-top:1px dashed var(--line)}
+.history-image{position:relative;width:84px;height:84px;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
+.history-image img{width:100%;height:100%;object-fit:cover;display:block}
+.history-images-info{font-size:12px;color:var(--muted);align-self:center}
+.history-image-changes{font-size:12px;color:var(--muted)}
+.history-image-changes summary{cursor:pointer;color:var(--ink)}
+.history-image-changes ul{margin:6px 0 0;padding-left:18px}
+
+/* 图片 404 时的占位，避免详情面板里出现破图 */
+.detail-slot-fallback{display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:12px;color:var(--muted);background:color-mix(in srgb,var(--bg) 80%,white)}
+.record-name{display:block;color:var(--ink);font-size:12px}
 
 /* ---------- 整批下载 · 右下角打包进度 ----------
    挂在 body 上，不随批次页 4 秒轮询重渲染丢失；可同时显示多条（连点两个批次）。 */

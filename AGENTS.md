@@ -42,6 +42,11 @@
 `server/config.json` 是**真实 Key**——dev 提交 = 真实计费，且与生产共用 250 RPM / 100 在飞，别在生产高峰压测。
 切换前的完整生产数据归档在 `设计区\web-data-生产快照-20261106\`（只读兜底，运行区稳定一周后可删）。
 
+**批次永久档案（2026-11-14 起）**：每个区的 `web-data/archive/` 各自一份，**不跟 `uploads` 联接走**。
+生产档案在 `运行区\web-data\archive\`，dev 档案在 `设计区\web-data-dev\archive\`；档案按
+`<款号>/<批次号>__<batch_id>/` 存款号、提示词历史、参考图副本与每轮快照。**删批次不会删档案**，
+`uploads` 以后做 GC 也不影响档案；要备份就整目录备 `archive/`。详见 [docs/batch-archive.md](docs/batch-archive.md)。
+
 细节（布局理由、一次性切换/回滚脚本、数据归档）见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
 
 ### dev 的 uploads 目录联接（2026-11-06）
@@ -83,6 +88,7 @@ New-Item -ItemType Junction -Path 'D:\批量视频任务设计区\web-data-dev\u
 | 引擎 | `app/core.py` / `app/wan_api.py` | 纯 Python，网页与 CLI 共用 |
 | 生图 | `app/imggen/` | 独立队列 + urllib 客户端，不占视频的在飞名额 |
 | 自由视频 | `app/videogen/` | 独立队列 + 独立记录；复用 `WanClient` 但与换装/模板/COS 归档链路无关 |
+| 批次档案 | `app/web/batch_archive.py` | 款号 / 提示词 / 参考图永久副本；删批次保留，见 [docs/batch-archive.md](docs/batch-archive.md) |
 
 ## 2. 三分钟跑起来
 
@@ -113,7 +119,8 @@ app/web/server.py      路由 / 鉴权 / 静态文件 / CSV·ZIP 下载   ← �
    ├─ templates.py     TemplateCatalog（标签真源 / xlsx + manifest 索引）
    ├─ tag_api.py       标签页接口：打标 / 弃用 / 标签库维护（普通用户可写）
    ├─ jobs.py          JobManager（队列、调度、事件、用量统计）
-   └─ batches.py       BatchManager（草稿 → 筛选 → 锁定 → 多轮生产 → 关闭）
+   ├─ batches.py       BatchManager（草稿 → 筛选 → 锁定 → 多轮生产 → 关闭）
+   └─ batch_archive.py 批次永久档案（款号 / 提示词 / 参考图副本；删批次保留）
           │
           ▼
 tools/template_store.py  标签唯一真源（JSON）：原子写 + 跨进程锁 + revision 乐观锁
@@ -158,7 +165,7 @@ app/imggen/manager.py   ImageGenManager：任务落盘 + queue.Queue + N 个守�
 供外部程序查询；金额口径来自 `app/billing.py`（与 `usage_for()` 同源）。
 JSON 仍是唯一真源，镜像可删可重建，见 [docs/production-data.md](docs/production-data.md)。
 
-## 4. 七条硬约束（改代码前必须知道）
+## 4. 八条硬约束（改代码前必须知道）
 
 1. **全站只有一把 API Key**：`server/config.json → wan.api_key`，所有账户共用。
    历史上做过“每账户一把 Key”，已在 v0.4.0 全部移除，别再引入。
@@ -176,6 +183,10 @@ JSON 仍是唯一真源，镜像可删可重建，见 [docs/production-data.md](
 7. **运行区只 pull 不改码**：`D:\批量视频任务运行区` 是生产，只通过
    `git pull --ff-only`（或 `python scripts/deploy_runtime.py`）接收已提交的代码；
    一切修改都发生在设计区，见 [docs/dev-runtime-split.md](docs/dev-runtime-split.md)。
+8. **批次档案只追加，不随批次删除**：`web-data/archive/` 是款号、提示词、参考图的永久副本；
+   `delete` 只写 `deleted.json` 墓碑，不删档案，`uploads` 以后做 GC 也不影响它。
+   删批次前必须先成功写档案，写失败返回 500 并取消删除，不许绕过这条硬闸门；
+   要清理只能人工确认后按款号整目录备份/删除，别在代码里做自动回收。
 
 ## 5. 配置与数据放在哪
 
@@ -190,6 +201,7 @@ JSON 仍是唯一真源，镜像可删可重建，见 [docs/production-data.md](
 | `server/*.example.json` | 上述三者的模板 | ✅ |
 | `web-data/jobs/<id>.json` | 任务状态与逐条记录 | ❌ |
 | `web-data/batches/<id>.json` | 批次与条目 | ❌ |
+| `web-data/archive/<款号>/<批次号>__<batch_id>/` | **批次永久档案**：款号、提示词与历史、全部参考图副本、每轮 runs 快照、checksums、删除墓碑；删批次与 uploads GC 都不影响，见 [docs/batch-archive.md](docs/batch-archive.md) | ❌ |
 | `web-data/template_tags.json` | **标签唯一真源**（视频清单 + 标签库 + 弃用状态 + 审计），网页与本地打标工具共用；`.bak` 是上一版 | ❌ |
 | `web-data/manifest_overlay.json` | 网页上传的视频索引（云端 manifest 里没有它们）；启动时与 manifest 合并 | ❌ |
 | `web-data/tag_versions/` | 真源版本快照（gzip，整库含每条标签与弃用态）；自动留 50 版 + 手动 50 版，回滚前另存备份 | ❌ |
@@ -201,6 +213,7 @@ JSON 仍是唯一真源，镜像可删可重建，见 [docs/production-data.md](
 | `app/web/static/` | 前端源码（每次请求读盘，改完刷新即可） | ✅ |
 
 **多图（v0.17.0）**：两页都支持 10 个槽位（槽位 1 定妆图必填，2–10 细节图可选），数组顺序即模型 `imageUrls` 顺序与 prompt 的「图N」。job / batch 以 `images[]` 为唯一真源，`image_path/image_name/image_url` 保留为**主图别名**（老数据零迁移）。`/api/jobs`、`/api/batches` 收 `upload_ids[]`（兼容旧 `upload_id`）；锁定后细节图走 `POST /api/batches/<id>/images` 的 `op=add/remove`，主图不可换。删除细节图后序号自动左移；**不改 prompt**，指代由用户自己写「图2…图10」。COS 关闭时 `app/media.py:base64_budget_error` 会按总量 40MB 兜底拒绝。uploads 目录目前**没有 GC**，10 倍图量会持续堆积，后续可加「按 job/batch 引用计数 + 7 天」的清理。
+`archive/` 是独立永久副本：不参与 uploads 清理，也不会被删批次带走；uploads 仍是运行期真源，档案只是快照。
 
 ### 换 Key / 换模型 / 换地域，只改一处
 
@@ -231,18 +244,21 @@ python tests/run_all.py          # 全部离线套件（不花钱、不联网）
 python tests/test_web.py         # 网页端端到端：登录/上传/任务/用量/权限
 python tests/test_batches.py     # 批次：草稿→锁定→生产→历史分组 + 额度断言
 python tests/test_batch_zip.py   # 整批下载：多轮收集 / 非试跑资格 / probe / HTTP zip
+python tests/test_batch_archive.py # 批次永久档案：落档 / 图片增删 / 提示词历史 / ZIP / 删除墓碑 / 补档
 python tests/test_imagegen.py    # 生图 tab：选项下发 / 参数校验 / 取图下载 / 权限 / 重启恢复
 python tests/test_videogen.py    # 自由视频 tab：选项 / 文生·图生·视频编辑 / 校验 / 权限 / 取消 / 删除
 python tests/test_data_mirror.py # 生产数据镜像：行数/路径、与 usage_for() 口径对平、脱敏、增量、坏库重建
 ```
 
-`tests/run_all.py` 覆盖引擎、存储、网页接口、批次、生图、自由视频与数据镜像端到端（31 套，含 `test_path_relocate`），全部离线运行。
+`tests/run_all.py` 覆盖引擎、存储、网页接口、批次、批次永久档案、生图、自由视频与数据镜像端到端（33 套，含 `test_path_relocate`），全部离线运行。
 
 ## 7. 别动 / 小心
 
 - `app/web/__init__.py`：`.gitignore` 里的 `_*.py` 曾误伤所有 `__init__.py`，现已加例外。
   新建包时若发现 `__init__.py` 没进版本库，先查 `.gitignore`。
 - `web-data/`、`server/web.json`、`server/config.json`：本机运行数据，不要为了“干净”删掉。
+- `web-data/archive/`：永久档案，**不要手工删单张图/改文件名**（会破坏 `checksums.sha256`）；
+  要清理只能按款号整目录备份后处理，别用脚本扫 `images/` 做去重。
 - 服务启动**约 7 秒后**才监听端口；用 `netstat -ano | findstr 8765` 确认只有一个 LISTENING。
   别对**同一个数据目录**起第二个进程（`SO_REUSEADDR` 允许双绑同一端口，实例锁只按 `data_dir` 区分）；
   「8765 生产 + 8766 dev」同时存在是正常状态。设计区 `server/web.json` 不要改回 8765 / `web-data`。
@@ -257,6 +273,7 @@ python tests/test_data_mirror.py # 生产数据镜像：行数/路径、与 usag
 - `server.py` 2000+ 行、`wan_api.py` 1120 行：路由与协议都写在大类里，按需再拆，不要顺手重构。
 - 生图任务是**单进程内存队列**（`queue.Queue` + 守护线程），没有跨进程锁；同一 `data_dir` 起两个实例会互相抢任务文件，别这么干。重启不做断点续传，进行中的任务直接落成「生成失败」。
 - 自由视频（`app/videogen/`）同样是单进程内存队列 + 守护线程（线程数 `web.json.videogen_max_inflight`，默认 2），重启不续传、`count>1` 串行跑；取消是协作式的，已提交给引擎的任务不撤回、照常计费。
+- 批次档案是**同步复制**：建批次/换图/每轮生产都会复制缺失的参考图并重写 checksums，批量换图时会有一次磁盘 IO 尖峰；档案约等于批次参考图的 1 倍磁盘，没有 GC/去重，只能人工按款号清理。ZIP 是现场同步打包（非事务），大档案下载会占请求线程；老批次第一次 probe 不落盘、第一次下载才补齐。
 - 测试是独立脚本，没有 pytest 夹具；`tests/run_all.py` 只是顺序执行器。
 - `wan.price_per_second` 三档均为 `null`，金额用公开价目表兜底，与真实账单有偏差。
 - 本仓库只维护网页端与引擎；不要再引入 GUI 界面或桌面打包相关代码。
@@ -274,6 +291,7 @@ python tests/test_data_mirror.py # 生产数据镜像：行数/路径、与 usag
 | [docs/ui-rollback.md](docs/ui-rollback.md) | 界面改版的基线与回滚步骤 |
 | [docs/ps-assistant.md](docs/ps-assistant.md) | PS 助手 tab（去紫）：算法口径、接口、像素上限与排障 |
 | [docs/free-video-tab.md](docs/free-video-tab.md) | 自由视频 tab（通用 wan3.0）：用法、接口、参数口径、数据落盘、并发计费与限制 |
+| [docs/batch-archive.md](docs/batch-archive.md) | **批次永久档案**：目录结构、触发时机、ZIP 接口、历史补档、备份恢复与已知边界 |
 | [docs/production-data.md](docs/production-data.md) | **生产数据镜像**：SQLite 只读副本的表/视图字段、金额口径、外部程序（Python/LLM、Excel、Power BI）接法、新鲜度与排障 |
 | [docs/llm-data-access.md](docs/llm-data-access.md) | **给 LLM / Agent 的数据获取指南**：怎么连、有哪些表、自然语言→SQL 速查、字段口径与别做的事（要查数据先读这篇） |
 | [docs/README.md](docs/README.md) | 全部文档索引（现行 / 历史） |

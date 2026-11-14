@@ -295,11 +295,11 @@
               </div>
             </div>
             <div id="batch-summary" class="batch-summary"></div>
-            <!-- 锁定后仍可追加/删除细节图；主图不可换，追加只影响之后的生产 -->
+            <!-- 锁定后仍可追加/删除细节图、更换定妆图；都只影响之后的生产 -->
             <div id="batch-slot-manage" class="batch-slot-manage hidden">
               <div class="batch-slot-head">
                 <b>批次图片</b>
-                <span id="batch-slot-hint" class="muted">定妆图 1 张（不可更换）+ 细节图 0–9 张；追加只影响之后的生产</span>
+                <span id="batch-slot-hint" class="muted">定妆图 1 张 + 细节图 0–9 张；定妆图可在下方「分批生产」里更换，追加/更换只影响之后的生产</span>
                 <input id="batch-slot-file" class="slot-file-input" type="file" multiple accept="image/*,.jpg,.jpeg,.png,.webp,.bmp">
                 <button id="batch-slot-add" class="quiet btn-sm" type="button">追加细节图</button>
               </div>
@@ -319,6 +319,8 @@
             </div>
             <!-- 提示词：分批生产阶段就地可改；改的是批次提示词，已提交的轮次不受影响 -->
             <div id="batch-produce-prompt" class="batch-produce-prompt"></div>
+            <!-- 定妆图：分批生产阶段可换；每次更换写进批次 image_changes，历史与详情都能看到 -->
+            <div id="batch-produce-images" class="batch-produce-images hidden"></div>
             <!-- 生产控制条：左边计数+进度，右边生产按钮，一行放完 -->
             <div class="batch-produce-bar">
               <div class="batch-produce-main">
@@ -341,6 +343,7 @@
             <div class="batch-items-head">
               <h3>清单条目</h3>
               <button id="batch-download-all" class="quiet btn-sm batch-download-all hidden" type="button">下载整批视频（ZIP）</button>
+              <button id="batch-archive-download" class="quiet btn-sm batch-archive-download hidden" type="button" title="下载款号、提示词、提示词历史与全部参考图的永久档案">下载档案（ZIP）</button>
               <label class="field batch-filter-field">状态<select id="batch-item-filter"><option value="all" selected>全部</option><option value="pending">待生产</option><option value="producing">生产中</option><option value="done">已完成</option><option value="failed">失败</option></select></label>
             </div>
             <div id="batch-item-list" class="batch-item-list"></div>
@@ -786,6 +789,19 @@
           <div id="account-summary" class="muted account-summary"></div>
           <div id="account-table" class="usage-table"></div>
           <div class="batch-more"><button id="account-more" class="quiet hidden" type="button">加载更多</button></div>
+        </article>
+        <article class="card admin-prompts">
+          <div class="section-head">
+            <div><h3>提示词模板库</h3><p class="muted">维护小批量 / 大批量下拉框里的提示词模板；保存后立即生效，已提交的任务不受影响。</p></div>
+            <button id="prompt-new-btn" class="primary btn-sm" type="button">新增模板</button>
+          </div>
+          <div id="prompt-admin-list" class="prompt-admin-list"></div>
+          <form id="prompt-admin-form" class="prompt-admin-form hidden">
+            <div class="prompt-admin-head"><b id="prompt-admin-title">新增模板</b><span id="prompt-admin-id" class="muted"></span></div>
+            <label class="field">名称<input id="prompt-admin-name" maxlength="60" required autocomplete="off" placeholder="例如：换装 + 手串"></label>
+            <label class="field">提示词正文<textarea id="prompt-admin-body" rows="6" maxlength="4000" required spellcheck="false" placeholder="支持「图1…图10」指代上传的图片；最多 4000 字"></textarea></label>
+            <div class="prompt-admin-actions"><span id="prompt-admin-count" class="muted">0 / 4000</span><button id="prompt-admin-cancel" class="quiet btn-sm" type="button">取消</button><button class="primary btn-sm" type="submit">保存</button></div>
+          </form>
         </article>
         <article class="card admin-users"><h3>添加使用者</h3><form id="add-user-form" class="user-form"><label>账号<input name="username" minlength="2" maxlength="32" required></label><label>初始密码<input name="password" type="password" minlength="8" required></label><label>权限<select name="role"><option value="user">普通使用者</option><option value="admin">管理员</option></select></label><button class="primary" type="submit">添加账号</button></form><p class="muted">密码只保存在本机。账号变更会立即生效。</p><div id="users-list" class="record-list"></div></article>
       </section>

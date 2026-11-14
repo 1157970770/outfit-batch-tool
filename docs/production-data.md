@@ -93,6 +93,8 @@ Java / Go / .NET 同理，认 SQLite3 文件即可。
 
 数据量级参考（2026-11-12）：jobs 236 / records 1141 / batches 28 / uploads 648，全库约 2–3 MB。
 
+> **批次永久档案不在镜像里**：`web-data/archive/`（款号、提示词历史、参考图副本、每轮 runs 快照）是独立目录，没有对应的 SQLite 表。要查档案只能读目录或走 `/api/batches/<id>/archive.zip`，别在 `production.sqlite` 里找。
+
 ### 3.1 整表
 
 | 表 | 主键 | 一行是什么 | 关键列 |

@@ -81,6 +81,8 @@ uv run python -m app.mirror --once --data-root "D:\批量视频任务运行区\w
 **数量级参考（2026-11-12 生产）**：237 个任务、1100+ 条视频、28 个批次、650+ 张图，整库 2–3 MB。
 所以随便 `SELECT *` 都能几毫秒返回；但给模型读的时候还是加 `LIMIT`，别把整库灌进上下文。
 
+> **批次档案不在这个库里**：`web-data/archive/` 存的是款号、提示词历史、参考图副本与每轮 runs 快照，**不会进 `production.sqlite`**。用户问“某批次当时用的提示词/参考图/第几轮换了图”时，不要写 SQL 硬找，直接读该批次档案目录或下载 `/api/batches/<id>/archive.zip`；批次 JSON 只保留当前状态，历史版本在档案的 `prompt-history.jsonl` / `history.jsonl`。
+
 ---
 
 ## 4. 自然语言 → SQL 速查
