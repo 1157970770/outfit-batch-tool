@@ -37,6 +37,7 @@ from app.runtime import build_storages
 from app.wan_api import MAX_IMAGES, configure_globals, global_limits
 from app.web.auth import LoginLimiter, SessionSigner, make_password, verify_password
 from app.web.archive_zip import ArchiveZipError, ArchiveZipManager
+from app.web.batch_zip import BatchZipError, BatchZipManager
 from app.web.batches import (PRODUCE_CHOICES, PRODUCE_MIN, TASK_CATEGORIES,
                              BatchError, BatchManager)
 from app.web.jobs import (MAX_IMAGE_SLOTS, UNCATEGORIZED, JobManager, _redact, image_slots,
@@ -189,6 +190,8 @@ class WebApplication:
         self.imagegen = ImageGenManager(settings)
         # 「云端归档 → 打包下载 ZIP」：后台线程逐条从成品桶拉流写 zip，前端轮询进度。
         self.archive_zip = ArchiveZipManager(settings.data_dir)
+        # 「批次整批下载 ZIP」：同一套「建任务 + 后台打包 + 轮询进度」，但读的是本机成片。
+        self.batch_zip = BatchZipManager(settings.data_dir)
         # 自由视频 tab（通用 wan3.0 生产）：独立的落盘目录与队列，不读模板清单、
         # 不占 job 槽位；参考素材（视频/音频）需要 COS，图片可走 Base64。
         self.videogen = VideoGenManager(settings)
@@ -682,6 +685,16 @@ def make_handler(app: WebApplication):
                 parts = path.strip("/").split("/")
                 if len(parts) == 4 and parts[3] == "files.zip":
                     return self._batch_zip(parts[2], urllib.parse.parse_qs(parsed.query), user)
+                # 整批下载的异步版：POST 建任务 → 轮询 .../<token>/status → 完成后 GET 下载。
+                # 同步的 /files.zip 保留不动（老链接、直接点开仍可用）。
+                if len(parts) >= 5 and parts[3] == "files.zip" and parts[4] == "jobs":
+                    if len(parts) == 5:
+                        return self._batch_zip_start(parts[2], user)
+                    if len(parts) == 6:
+                        return self._batch_zip_file(parts[5], user)
+                    if len(parts) == 7 and parts[6] == "status":
+                        return self._batch_zip_status(parts[5], user)
+                    return self._error("页面或接口不存在。", 404)
                 if len(parts) == 3:
                     return self._batch_detail(parts[2], urllib.parse.parse_qs(parsed.query), user)
             if path == "/api/history/groups":
@@ -904,6 +917,9 @@ def make_handler(app: WebApplication):
                 return self._batch_create(data, user)
             if path.startswith("/api/batches/"):
                 parts = path.strip("/").split("/")
+                # 整批下载的异步打包：建任务后由后台线程写 zip，前端轮询 .../<token>/status。
+                if len(parts) == 5 and parts[3] == "files.zip" and parts[4] == "jobs":
+                    return self._batch_zip_start(parts[2], user)
                 if len(parts) == 4:
                     action = parts[3]
                     if action == "image":
@@ -1671,6 +1687,44 @@ def make_handler(app: WebApplication):
                                        f"{label or info['id']}.zip")
             finally:
                 _remove_quiet(path)
+
+        def _batch_zip_start(self, batch_id, user):
+            """建一个整批打包任务：后台线程逐条写 zip，前端轮询进度。
+
+            不在请求里同步打包的原因见 app/web/batch_zip.py 顶部：几十条视频就是
+            几个 GB，同步响应期间浏览器只有一个转圈，用户会以为「点了没反应」。
+            """
+            try:
+                info = app.batches.batch_videos(batch_id, user)
+            except BatchError as exc:
+                return self._error(exc, exc.status)
+            if not info["files"]:
+                return self._error("暂时没有可下载的视频。", 404)
+            label = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", info["batch_no"]).strip("-")[:60]
+            try:
+                task = app.batch_zip.start(info["id"], label or info["id"], info["files"],
+                                           owner=str(user.get("username") or ""),
+                                           admin=user.get("role") == "admin")
+            except BatchZipError as exc:
+                return self._error(exc, exc.status)
+            return self._json({"ok": True, **task})
+
+        def _batch_zip_status(self, token, user):
+            task = app.batch_zip.status(token, user)
+            if task is None:
+                return self._error("打包任务不存在或已过期，请重新下载。", 404)
+            return self._json({"ok": True, **task})
+
+        def _batch_zip_file(self, token, user):
+            """下载打完的 zip；还没打完给 409，前端据此继续轮询（不会把 JSON 存成 zip）。"""
+            path = app.batch_zip.path_of(token, user)
+            if path is None:
+                task = app.batch_zip.status(token, user)
+                if task is None:
+                    return self._error("打包任务不存在或已过期，请重新下载。", 404)
+                return self._error("还在打包中，请稍候。", 409)
+            return self._send_file(path, "application/zip",
+                                   app.batch_zip.zip_name(token))
 
         # ---------------------------------------------------------- 历史分组
         def _history_groups(self, query, user):

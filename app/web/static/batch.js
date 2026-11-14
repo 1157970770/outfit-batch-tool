@@ -186,24 +186,156 @@
     return `all${owner}`;
   }
   /* 按批次整批下载：只给真实的大批量批次用（小批量试跑 / 未分组都没有批次）。
-     先 probe 拿数量，再交给浏览器原生下载 —— 直接 <a href=zip> 时后端一旦报错，
-     浏览器会把那段 JSON 当附件存下来，用户还以为下到了视频。 */
+     打包在服务端后台线程里跑（几十条视频要几十秒），这里只负责「建任务 → 轮询进度 →
+     打完再交给浏览器原生下载」；不直接 <a href=zip>，是因为打包期间没有响应头，
+     页面上什么都看不到，用户会以为没点上。 */
+  const ZIP_POLL_MS = 800;
+  const zipJobs = new Map();   // token → 进度面板上的一个条目
+
+  function fmtBytes(n) {
+    const v = Math.max(0, Number(n) || 0);
+    if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(2)} GB`;
+    if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(0)} MB`;
+    if (v >= 1024) return `${(v / 1024).toFixed(0)} KB`;
+    return `${v} B`;
+  }
+
+  function zipPanel() {
+    let panel = $('zip-progress');
+    if (!panel) {
+      panel = el('div', 'zip-progress');
+      panel.id = 'zip-progress';
+      panel.setAttribute('aria-live', 'polite');
+      document.body.append(panel);
+    }
+    return panel;
+  }
+
+  function zipStatusText(data) {
+    if (data.state === 'ready') return `打包完成 · 共 ${num(data.total)} 个 · ${fmtBytes(data.bytes)}`;
+    if (data.state === 'failed') return txt(data.error) || '打包失败。';
+    const done = num(data.done), total = num(data.total);
+    const size = num(data.total_bytes) ? ` · ${fmtBytes(data.bytes)} / ${fmtBytes(data.total_bytes)}` : '';
+    return `已打包 ${done} / ${total}${size}`;
+  }
+
+  function zipEtaText(entry) {
+    const data = entry.data;
+    if (!data || data.state !== 'building') return '';
+    const done = num(data.done), total = num(data.total);
+    const elapsed = (Date.now() - entry.startedAt) / 1000;
+    if (!done || !total || elapsed < 1.5 || done >= total) return '打包中…';
+    const eta = Math.max(1, Math.round(elapsed / done * (total - done)));
+    return `约剩 ${eta} 秒`;
+  }
+
+  function renderZipJob(entry) {
+    const data = entry.data;
+    const pct = data.state === 'ready' ? 100
+      : num(data.total) ? Math.min(100, Math.round(num(data.done) / num(data.total) * 100)) : 0;
+    entry.root.classList.toggle('is-ready', data.state === 'ready');
+    entry.root.classList.toggle('is-failed', data.state === 'failed');
+    entry.fill.style.width = `${pct}%`;
+    entry.text.textContent = zipStatusText(data);
+    entry.eta.textContent = data.state === 'building'
+      ? `${pct}% · ${zipEtaText(entry)}` : (data.state === 'ready' ? '已开始下载' : '');
+    entry.actions.replaceChildren();
+    if (data.state === 'ready') {
+      const again = el('button', 'quiet btn-sm', '再次下载');
+      again.type = 'button';
+      again.title = '成品 zip 在服务器上保留 6 小时';
+      again.addEventListener('click', () => zipDownload(entry.batchId, data.token));
+      entry.actions.append(again);
+    }
+    if (Array.isArray(data.failed) && data.failed.length) {
+      const warn = el('small', 'zip-job-warn', `${data.failed.length} 条没能打包（文件可能已被清理）`);
+      entry.actions.append(warn);
+    }
+  }
+
+  function zipDownload(batchId, token) {
+    const a = document.createElement('a');
+    a.href = `/api/batches/${encodeURIComponent(batchId)}/files.zip/jobs/${encodeURIComponent(token)}`;
+    a.rel = 'noopener';
+    document.body.append(a);
+    a.click();
+    a.remove();
+  }
+
+  function createZipEntry(data, batchId, panel) {
+    const root = el('div', 'zip-job');
+    const head = el('div', 'zip-job-head');
+    const title = el('b', null, `${txt(data.label) || '批次'} · ${num(data.total)} 个视频`);
+    const close = el('button', 'zip-job-close', '×');
+    close.type = 'button';
+    close.title = '关闭这条提示（打包在后台继续，可稍后在历史里重新下载）';
+    head.append(title, close);
+    const bar = el('div', 'zip-job-bar');
+    const fill = el('i');
+    bar.append(fill);
+    const text = el('div', 'zip-job-text', '准备中…');
+    const eta = el('div', 'zip-job-eta', '');
+    const actions = el('div', 'zip-job-actions');
+    root.append(head, bar, text, eta, actions);
+    const entry = { token: txt(data.token), batchId: txt(batchId), data, root, fill, text, eta,
+      actions, timer: 0, startedAt: Date.now(), autoDone: false };
+    close.addEventListener('click', () => {
+      clearTimeout(entry.timer);
+      root.remove();
+      zipJobs.delete(entry.token);
+      if (zipJobs.size === 0) panel.classList.add('hidden');
+    });
+    panel.classList.remove('hidden');
+    panel.append(root);
+    zipJobs.set(entry.token, entry);
+    return entry;
+  }
+
+  function pollZipJob(entry) {
+    clearTimeout(entry.timer);
+    const url = `/api/batches/${encodeURIComponent(entry.batchId)}/files.zip/jobs/`
+      + `${encodeURIComponent(entry.token)}/status`;
+    api(url).then(data => {
+      if (!zipJobs.has(entry.token)) return;
+      entry.data = data;
+      renderZipJob(entry);
+      if (data.state === 'ready') {
+        if (!entry.autoDone) { entry.autoDone = true; zipDownload(entry.batchId, entry.token); }
+        return;
+      }
+      if (data.state === 'failed') { toast(`整批下载失败：${txt(data.error) || '打包失败'}`); return; }
+      entry.timer = setTimeout(() => pollZipJob(entry), ZIP_POLL_MS);
+    }).catch(err => {
+      if (!zipJobs.has(entry.token)) return;
+      // 轮询偶发失败（重启/网络抖动）不该立刻报错：再试几次，避免用户白等。
+      entry.pollErrors = (entry.pollErrors || 0) + 1;
+      if (entry.pollErrors >= 4) {
+        entry.data = { ...entry.data, state: 'failed', error: `进度查询失败：${err.message}` };
+        renderZipJob(entry);
+        return;
+      }
+      entry.timer = setTimeout(() => pollZipJob(entry), ZIP_POLL_MS * 2);
+    });
+  }
+
   async function downloadBatchZip(batchId, button) {
     const id = txt(batchId);
     if (!id || (button && button.disabled)) return;
     const label = button ? button.textContent : '';
-    if (button) { button.disabled = true; button.textContent = '检查中…'; }
+    if (button) { button.disabled = true; button.textContent = '准备中…'; }
     try {
-      const probe = await api(`/api/batches/${encodeURIComponent(id)}/files.zip?probe=1`);
-      const count = num(probe.count);
-      if (!count) { toast('这个批次暂时没有可下载的视频。'); return; }
-      const a = document.createElement('a');
-      a.href = txt(probe.download_url) || `/api/batches/${encodeURIComponent(id)}/files.zip`;
-      a.rel = 'noopener';
-      document.body.append(a);
-      a.click();
-      a.remove();
-      toast(`正在打包 ${count} 个视频，浏览器稍后会提示保存。`);
+      const data = await api(`/api/batches/${encodeURIComponent(id)}/files.zip/jobs`,
+        { method: 'POST', body: '{}' });
+      let entry = zipJobs.get(txt(data.token));
+      if (!entry) entry = createZipEntry(data, id, zipPanel());
+      entry.data = data;
+      renderZipJob(entry);
+      if (data.state === 'ready') {
+        if (!entry.autoDone) { entry.autoDone = true; zipDownload(id, data.token); }
+      } else {
+        toast(`已开始打包 ${num(data.total)} 个视频，右下角显示进度。`);
+        pollZipJob(entry);
+      }
     } catch (err) {
       toast(`整批下载失败：${err.message}`);
     } finally {

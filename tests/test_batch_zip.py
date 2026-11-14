@@ -243,6 +243,69 @@ def main() -> int:
         assert code == 200 and json.loads(only.decode("utf-8"))["count"] == 1, (code, only)
         assert call(alice_op, base, "/api/batches/B3/files.zip")[0] == 404, "空批次"
         print("  ✓ HTTP：probe 返回数量 / zip 可下载 / 跨账户 403 / 零头批次可打包 / 空批次 404")
+
+        # ---------- 异步打包：POST 建任务 → 轮询状态 → 下载成品
+        code, _, raw = call(alice_op, base, "/api/batches/B1/files.zip/jobs", "POST", {})
+        task = json.loads(raw.decode("utf-8"))
+        assert code == 200 and task["total"] == 4, (code, task)
+        assert task["state"] in ("building", "ready"), task
+        token = task["token"]
+
+        # 连点两下：同一批次复用正在跑的任务，不把几个 GB 再写一遍。
+        code2, _, raw2 = call(alice_op, base, "/api/batches/B1/files.zip/jobs", "POST", {})
+        assert code2 == 200 and json.loads(raw2.decode("utf-8"))["token"] == token
+
+        status = task
+        deadline = time.time() + 20
+        while time.time() < deadline and status["state"] == "building":
+            code, _, raw = call(alice_op, base,
+                                f"/api/batches/B1/files.zip/jobs/{token}/status")
+            assert code == 200, (code, raw[:200])
+            status = json.loads(raw.decode("utf-8"))
+            if status["state"] == "building":
+                time.sleep(0.05)
+        assert status["state"] == "ready", status
+        assert status["done"] == 4 and status["bytes"] > 0, status
+        assert status["bytes"] == status["total_bytes"], status
+        assert status["download_url"].endswith(f"/{token}"), status
+
+        code, headers, raw = call(alice_op, base, f"/api/batches/B1/files.zip/jobs/{token}")
+        assert code == 200 and raw[:2] == b"PK", (code, raw[:80])
+        assert ".zip" in headers.get("Content-Disposition", ""), headers
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            assert sorted(zf.namelist()) == ["001.mp4", "002.mp4", "003.mp4", "004.mp4"], zf.namelist()
+            assert zf.read("001.mp4") == b"fake-mp4:job1:001"
+        # 成品 zip 在 TTL 内可重下（同事换个浏览器也能再拿一次）。
+        assert call(alice_op, base, f"/api/batches/B1/files.zip/jobs/{token}")[0] == 200
+
+        # 归属：别人的 token 拿不到状态，也下不到包；坏 token 一律 404。
+        assert call(bob_op, base, f"/api/batches/B1/files.zip/jobs/{token}/status")[0] == 404
+        assert call(bob_op, base, f"/api/batches/B1/files.zip/jobs/{token}")[0] == 404
+        assert call(alice_op, base, "/api/batches/B1/files.zip/jobs/deadbeef/status")[0] == 404
+        assert call(alice_op, base, "/api/batches/B1/files.zip/jobs/deadbeef")[0] == 404
+        # 空批次建任务：404 而不是空 zip。
+        assert call(alice_op, base, "/api/batches/B3/files.zip/jobs", "POST", {})[0] == 404
+        print("  ✓ 异步打包：建任务 / 连点复用 / 轮询到 ready / 下载 / 重下 / 跨账户 404 / 坏 token 404")
+
+        # 单条成片被删：其余照常进包，失败只记进 failed，不让整包变成 500。
+        gone = out_root / "job1" / "001.mp4"
+        saved = gone.read_bytes()
+        gone.unlink()
+        try:
+            broken = app.batch_zip.start("B9", "AW26-001",
+                                         [("001.mp4", gone), ("002.mp4", out_root / "job2" / "002.mp4")],
+                                         owner="alice")
+            deadline = time.time() + 20
+            broken_state = broken
+            while time.time() < deadline and broken_state["state"] == "building":
+                broken_state = app.batch_zip.status(broken["token"], alice)
+                time.sleep(0.05)
+            assert broken_state["state"] == "ready", broken_state
+            assert broken_state["done"] == 1 and len(broken_state["failed"]) == 1, broken_state
+        finally:
+            gone.write_bytes(saved)
+        print("  ✓ 容错：单条文件缺失只记 failed，其余照常打包")
+
     finally:
         if server:
             server.shutdown()
